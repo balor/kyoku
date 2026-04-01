@@ -50,7 +50,7 @@ These are the specific frustrations this project aims to solve:
 3. **File operations are deliberate** — import reads and catalogs; rename/move/organize are separate, explicit actions the user triggers; you always have the last word
 4. **Safety first** — never modify files without explicit confirmation; always show a dry-run diff
 5. **Offline-capable** — core library management works without network; MusicBrainz lookups are optional enrichment
-6. **Composable** — CLI subcommands work in pipelines (`kyoku search --format json | jq ...`)
+6. **Composable** — CLI subcommands work in pipelines (`kyoku import ~/Music/new --loose | ...`)
 7. **Incremental** — can import 10 files or 100,000; designed for large libraries from the start
 8. **Unmatched content is normal** — files without MusicBrainz matches are fully functional library members, not errors to be resolved
 9. **Unicode-native** — CJK characters, diacritics, and mixed-script content work correctly in tags, filenames, search, display, and sorting throughout the entire pipeline
@@ -98,11 +98,8 @@ kyoku/
 │   ├── cli/
 │   │   ├── mod.rs           # clap App definition
 │   │   ├── import.rs        # `kyoku import` command
-│   │   ├── search.rs        # `kyoku search` command
-│   │   ├── edit.rs          # `kyoku edit` command
 │   │   ├── move_cmd.rs      # `kyoku move` command
-│   │   ├── info.rs          # `kyoku info` command
-│   │   └── config.rs        # `kyoku config` command
+│   │   └── info.rs          # `kyoku info` command
 │   ├── tui/
 │   │   ├── mod.rs           # TUI app struct, main loop
 │   │   ├── app.rs           # App state, event handling
@@ -111,7 +108,8 @@ kyoku/
 │   │   │   ├── import.rs    # Import wizard view
 │   │   │   ├── detail.rs    # Album/track detail view
 │   │   │   ├── search.rs    # Search/filter view
-│   │   │   └── edit.rs      # Tag editor view
+│   │   │   ├── edit.rs      # Tag editor view
+│   │   │   └── sync.rs     # Sync wizard view (device sync)
 │   │   ├── widgets/
 │   │   │   ├── table.rs     # Sortable, filterable table
 │   │   │   ├── diff.rs      # Tag diff display
@@ -127,7 +125,8 @@ kyoku/
 │   │   ├── matcher.rs       # MusicBrainz matching logic
 │   │   ├── renamer.rs       # Path template engine
 │   │   ├── fingerprint.rs   # AcoustID/Chromaprint integration
-│   │   └── duplicate.rs     # Duplicate detection (future, stub)
+│   │   ├── duplicate.rs     # Duplicate detection (future, stub)
+│   │   └── sync.rs          # Device sync logic (file diff, copy/delete, fatsort)
 │   ├── db/
 │   │   ├── mod.rs
 │   │   ├── schema.rs        # Table definitions, migrations
@@ -647,52 +646,30 @@ In the TUI, the inbox status is always visible: `Inbox: 23 new files`. Pressing 
 
 The scan is lightweight — it only checks for new file paths not yet in the database. It does not read tags or fingerprint (that happens during import).
 
-### 6.3 Library Search (`kyoku search <query>`)
+### 6.3 Library Search (TUI only)
 
 **Design goal**: Search should feel like `rg` (ripgrep), not like SQL. A bare query just works.
 
-#### Simple Search (90% use case)
-```bash
-kyoku search radiohead              # Finds anything with "radiohead" in title, artist, or album
-kyoku search "ok computer"          # Phrase search
-kyoku search 東方                    # CJK search works identically
-kyoku search björk homogenic        # Multiple terms = AND
-```
+Search is TUI-only — always-visible at the top of the library browser. Typing immediately filters the view — no mode switching, no special key to "enter search mode." Just start typing. Press `/` to focus the search bar, `Esc` to clear.
 
-The bare positional argument searches FTS5 across title, artist, and album simultaneously. No special syntax needed. Results show a compact table with the most relevant info.
+#### Simple Search (90% use case)
+A bare query searches FTS5 across title, artist, and album simultaneously. No special syntax needed.
+- `radiohead` — finds anything with "radiohead" in title, artist, or album
+- `"ok computer"` — phrase search
+- `東方` — CJK search works identically
+- `björk homogenic` — multiple terms = AND
 
 #### Filtered Search (when you need precision)
-```bash
-kyoku search radiohead --year 1997
-kyoku search --genre "post-rock" --format flac
-kyoku search --unmatched                         # All tracks without MB match
-kyoku search --loose                             # Tracks not in any album
-kyoku search --collection "mixtape"              # Tracks in a specific collection
-kyoku search --added-after 2025-01-01            # Recently imported
-kyoku search --artist 初音ミク                    # CJK artist name
-```
-
 Filters are always optional and combinable with the freeform query. They narrow, never replace.
 
-#### Search Fields
-- `--artist`, `--album`, `--title`, `--genre`, `--year`, `--label`
-- `--format` (audio format: mp3, flac, etc.)
-- `--status` (tag status: unmatched, matched, verified, manual)
-- `--collection` (collection name, supports fuzzy matching)
-- `--loose` (tracks without an album)
-- `--added-after`, `--added-before` (import date range)
-- `--bitrate-min`, `--bitrate-max`
-
-#### Output Formats
-```bash
-kyoku search radiohead                    # Pretty table (default)
-kyoku search radiohead --output json      # JSON array for scripting
-kyoku search radiohead --output paths     # File paths only (one per line, for piping)
-kyoku search radiohead --output tsv       # Tab-separated values
-```
-
-#### TUI Search
-In the TUI, search is always-visible at the top of the library browser. Typing immediately filters the view — no mode switching, no special key to "enter search mode." Just start typing. The search bar accepts the same freeform queries. Press `/` to focus it, `Esc` to clear.
+**Available filters:**
+- Artist, album, title, genre, year, label
+- Audio format (mp3, flac, etc.)
+- Tag status (unmatched, matched, verified, manual)
+- Collection (collection name, supports fuzzy matching)
+- Loose tracks (not in any album)
+- Import date range (added after/before)
+- Bitrate range
 
 ### 6.4 Collections (`kyoku collection`)
 
@@ -734,21 +711,9 @@ kyoku import ~/東方/ --collection "Touhou"
 | `kyoku import ~/東方/ --loose --collection "Touhou"` | As-is from files | Collection template (`Collections/Touhou/...`) |
 | `kyoku import ~/東方/ --no-match` | As-is from files | Global template (`Artist/Album/...`) |
 
-### 6.5 Tag Editing (`kyoku edit <query>`)
+### 6.5 Tag Editing (TUI only)
 
-Edit tags for matched tracks.
-
-```
-kyoku edit --album "OK Computer" --set year=1997
-kyoku edit --path "/path/to/file.flac" --set title="New Title" --set artist="New Artist"
-kyoku edit --interactive --album "Kid A"   # Opens tag editor in TUI
-```
-
-- `--set <field>=<value>` — set field value
-- `--remove <field>` — clear a tag field
-- `--interactive` / `-i` — open the TUI tag editor
-- `--pretend` — show changes without applying
-- All edits are reflected in both file tags and database
+Tag editing is done through the TUI tag editor view. Select a track or album, open the editor, modify fields inline. All edits are reflected in both file tags and database. A preview diff is shown before applying changes.
 
 ### 6.6 File Organization (`kyoku organize`)
 
@@ -1110,8 +1075,7 @@ pub enum KyokuError {
 - [ ] `kyoku import <path>` (local-only, no MB matching yet)
 - [ ] `kyoku import --loose` and `--no-match` modes
 - [ ] `kyoku scan` — inbox directory scanner (checks configured inbox_dirs)
-- [ ] `kyoku search <query>` with FTS5 (freeform + filters)
-- [ ] Multiple output formats (table, json, paths, tsv)
+- [ ] Search with FTS5 (freeform + filters) — TUI only
 - [ ] Collections (create, add, list, show, remove, delete)
 - [ ] `kyoku import --collection` integration
 
@@ -1135,7 +1099,7 @@ pub enum KyokuError {
 - [ ] Match scoring algorithm (fuzzy string comparison + metadata heuristics)
 - [ ] Import wizard MB matching integration (TUI and CLI)
 - [ ] Tag writing (write matched data back to files via lofty)
-- [ ] `kyoku edit` — tag editing from CLI
+- [ ] Tag editing — TUI only (inline field editing in tag editor view)
 - [ ] Chromaprint fingerprinting (symphonia → rusty-chromaprint)
 - [ ] AcoustID lookup integration
 - [ ] `--pretend` mode for all mutating commands
@@ -1160,6 +1124,30 @@ pub enum KyokuError {
 - [ ] Comprehensive error recovery (partial import resumption)
 - [ ] Man page generation (clap)
 - [ ] Shell completions (bash, zsh, fish)
+
+### Milestone 7: Device Sync
+**Goal**: One-shot sync your library to external devices — MP3 players, SD cards, USB drives — entirely from the TUI. No saved configuration; each sync is an interactive wizard. Device-first workflow: pick the device, not a directory.
+
+**TUI Sync Wizard flow:**
+1. **Pick device** — detect and list removable/external block devices (via `lsblk` filtered to USB/SD/removable). Show device name, label, size, filesystem type.
+2. **Confirm mount point** — show where the selected device is currently mounted. If not mounted, offer to mount it. User selects/confirms the mount point from a list (devices may have multiple partitions).
+3. **Pick source** — entire library, a specific collection, or a search query result.
+4. **Options** — toggle flags: delete files missing from source, run fatsort after sync, path template override.
+5. **Preview** — dry-run diff: files to add, files to remove (if delete enabled), files unchanged. Show counts and total size.
+6. **Sync** — copy/delete files with live progress bar. If fatsort enabled: unmount device → run `fatsort <device>` → remount. Show summary on completion.
+
+**Tasks:**
+- [ ] Device detection (`core/sync.rs`): list removable block devices via `lsblk --json`, filter to USB/SD/removable, parse mount points and filesystem types
+- [ ] Sync engine: resolve source track list, compute file diff against mount point, copy/delete files
+- [ ] fatsort integration: after sync, unmount device → `fatsort [-n] <device>` → remount. Requires the block device path (known from step 1), not the mount point.
+- [ ] TUI sync wizard (`tui/views/sync.rs`): step-through flow — pick device → confirm mount → pick source → set flags → preview diff → confirm → sync with progress
+- [ ] Source selection: entire library, a collection, or a search query
+- [ ] Mount point confirmation/selection (device may have multiple partitions)
+- [ ] Dry-run preview: show files to add/remove/skip with counts and total size
+- [ ] Live progress bar during file copy
+- [ ] Optional delete mode: remove files on destination absent from source, with explicit confirmation showing count
+- [ ] Optional per-sync path template override
+- [ ] fatsort post-sync cycle: unmount → fatsort → remount, with clear TUI status for each step
 
 ### Future (v2): AI Integration
 **Goal**: Optional AI-powered features via OpenAI-compatible API.
@@ -1234,7 +1222,7 @@ Each step is a separate function that can be tested independently.
 
 ### TUI Architecture
 - Use the **component pattern**: each view is a struct implementing `Widget` + handling its own events
-- App state machine: `enum AppView { Library, Collections, AlbumDetail, CollectionDetail, Import, Editor, Help }`
+- App state machine: `enum AppView { Library, Collections, AlbumDetail, CollectionDetail, Import, Editor, Sync, Help }`
 - Separate input handling from rendering (process events → update state → render)
 - Debounce search input (don't query DB on every keystroke, wait 150ms)
 - The TUI is the primary interface — it should feel polished and complete, not an afterthought bolted onto a CLI tool
@@ -1256,6 +1244,11 @@ These are unambiguous rules for edge cases. Do not deviate from them.
 10. **Cover art detection**: On import, check for common folder art filenames (`cover.jpg`, `cover.png`, `folder.jpg`, `folder.png`, `front.jpg`, `front.png`, `artwork.jpg`) in the same directory as the audio files. Store the path in `albums.cover_art_path`. Do not extract embedded art to disk — read it from files on demand when needed.
 11. **Supported audio formats**: Support every format that `lofty` can read/write. At minimum: MP3, FLAC, M4A/AAC, OGG, Opus, WAV, WMA, APE, AIFF. Do not artificially restrict to a subset.
 12. **Library scale**: The target is 20,000–100,000 tracks. All DB queries must use indexes. TUI must use virtual scrolling / lazy loading for large result sets. Search must return results within 100ms at 100k tracks.
+13. **Sync — no removable devices detected**: Show a clear message ("No removable devices found — plug in your device and try again"). Do not fall back to a manual path input.
+14. **Sync — device not mounted**: If the selected device/partition is not mounted, offer to mount it. If mounting fails (permissions, no filesystem), show the error. Do not proceed with sync to an unmounted device.
+15. **Sync — fatsort not installed**: If the user enables fatsort but `fatsort` is not found in PATH, show a warning *before* sync starts (at the options step). Let them proceed without fatsort or cancel.
+16. **Sync — fatsort requires unmount**: After file copy, the wizard unmounts the device, runs `fatsort <device>`, and remounts. Show each step's status in the TUI. If unmount fails (device busy), warn and skip fatsort — do not force unmount.
+17. **Sync with delete**: Always show a confirmation with the count and list of files that will be deleted before proceeding. Never auto-delete.
 
 ---
 
