@@ -97,9 +97,7 @@ kyoku/
 │   ├── main.rs              # Entry point, CLI dispatch
 │   ├── cli/
 │   │   ├── mod.rs           # clap App definition
-│   │   ├── import.rs        # `kyoku import` command
-│   │   ├── move_cmd.rs      # `kyoku move` command
-│   │   └── info.rs          # `kyoku info` command
+│   │   └── import.rs        # `kyoku import` command
 │   ├── tui/
 │   │   ├── mod.rs           # TUI app struct, main loop
 │   │   ├── app.rs           # App state, event handling
@@ -116,7 +114,7 @@ kyoku/
 │   │   │   ├── progress.rs  # Import progress bar
 │   │   │   └── input.rs     # Text input widget
 │   │   └── keybindings.rs   # Key mapping configuration
-│   │   └── themes.rs       # 16 built-in color themes
+│   │   └── themes.rs       # 4 built-in color themes
 │   ├── core/
 │   │   ├── mod.rs
 │   │   ├── library.rs       # Library operations (add, remove, query)
@@ -125,7 +123,6 @@ kyoku/
 │   │   ├── matcher.rs       # MusicBrainz matching logic
 │   │   ├── renamer.rs       # Path template engine
 │   │   ├── fingerprint.rs   # AcoustID/Chromaprint integration
-│   │   ├── duplicate.rs     # Duplicate detection (future, stub)
 │   │   └── sync.rs          # Device sync logic (file diff, copy/delete, fatsort)
 │   ├── db/
 │   │   ├── mod.rs
@@ -139,8 +136,7 @@ kyoku/
 │   ├── external/
 │   │   ├── mod.rs
 │   │   ├── musicbrainz.rs   # MB API wrapper (uses musicbrainz_rs)
-│   │   ├── acoustid.rs      # AcoustID lookup
-│   │   └── ai.rs            # Future: OpenAI-compatible API client (stub)
+│   │   └── acoustid.rs      # AcoustID lookup
 │   └── error.rs             # Unified error types (thiserror)
 ├── migrations/
 │   └── 001_initial.sql
@@ -173,7 +169,6 @@ kyoku/
 | `serde` / `toml` | Configuration parsing | TOML config files |
 | `thiserror` / `anyhow` | Error handling | `thiserror` for library errors, `anyhow` in main/CLI |
 | `walkdir` | Recursive directory scanning | Fast filesystem traversal |
-| `indicatif` | CLI progress bars | For non-TUI progress display |
 | `dirs` | XDG directory resolution | Config/data/cache paths |
 | `fuzzy-matcher` | Fuzzy search | For library search/filtering |
 | `symphonia` | Audio decoding | Decode audio for fingerprinting (pure Rust) |
@@ -193,20 +188,10 @@ kyoku/
 
 ```sql
 -- Core entities
-CREATE TABLE IF NOT EXISTS artists (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL,
-    sort_name   TEXT,
-    mbid        TEXT UNIQUE,           -- MusicBrainz artist ID
-    created_at  TEXT DEFAULT (datetime('now')),
-    updated_at  TEXT DEFAULT (datetime('now'))
-);
-
 CREATE TABLE IF NOT EXISTS albums (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     title           TEXT NOT NULL,
-    artist_id       INTEGER REFERENCES artists(id),
-    album_artist    TEXT,               -- Denormalized for display
+    album_artist    TEXT,
     year            INTEGER,
     mbid            TEXT UNIQUE,        -- MusicBrainz release group ID
     release_mbid    TEXT,               -- MusicBrainz release ID (specific edition)
@@ -214,8 +199,6 @@ CREATE TABLE IF NOT EXISTS albums (
     track_total     INTEGER,
     genre           TEXT,               -- Primary genre
     label           TEXT,
-    catalog_number  TEXT,
-    country         TEXT,
     media_type      TEXT,               -- CD, Vinyl, Digital, etc.
     album_type      TEXT DEFAULT 'album', -- album, compilation, single, ep, soundtrack, live, other
     -- Cover art: path to folder art (cover.jpg, folder.png, etc.) or NULL if only embedded.
@@ -230,7 +213,6 @@ CREATE TABLE IF NOT EXISTS tracks (
     album_id        INTEGER REFERENCES albums(id),  -- NULL for loose/ungrouped tracks
     title           TEXT NOT NULL,
     artist          TEXT,               -- Track artist (may differ from album artist)
-    artist_id       INTEGER REFERENCES artists(id),
     track_number    INTEGER,
     disc_number     INTEGER DEFAULT 1,
     duration_ms     INTEGER,            -- Duration in milliseconds
@@ -299,10 +281,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id);
-CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist_id);
 CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(file_path);
 CREATE INDEX IF NOT EXISTS idx_tracks_loose ON tracks(album_id) WHERE album_id IS NULL;
-CREATE INDEX IF NOT EXISTS idx_albums_artist ON albums(artist_id);
 CREATE INDEX IF NOT EXISTS idx_albums_year ON albums(year);
 CREATE INDEX IF NOT EXISTS idx_albums_type ON albums(album_type);
 CREATE INDEX IF NOT EXISTS idx_tracks_status ON tracks(tag_status);
@@ -320,7 +300,7 @@ pub struct Track {
     pub id: Option<i64>,
     pub album_id: Option<i64>,       // None = loose track (not part of any album)
     pub title: String,
-    pub artist: Option<String>,
+    pub artist: Option<String>,       // Track artist (may differ from album artist)
     pub track_number: Option<u32>,
     pub disc_number: u32,
     pub duration_ms: Option<u64>,
@@ -403,18 +383,11 @@ path_template = "{album_artist}/{album} ({year})/{disc:0}-{track:02} {title}.{ex
 # Template for single-disc albums (disc_total == 1)
 path_template_single_disc = "{album_artist}/{album} ({year})/{track:02} {title}.{ext}"
 
-# How to handle characters invalid for the filesystem
-# Options: "replace" (replace with _), "transliterate" (ą→a), "strip" (remove)
-filename_sanitize = "replace"
-
-# Maximum filename length (0 = unlimited, respects filesystem limits)
-max_filename_length = 255
-
 [import]
 # Import behavior: import READS and CATALOGS files into the database.
 # It does NOT move or rename files by default. Use `kyoku organize` for that.
 # This setting controls what happens when you explicitly organize:
-# Options: "move" (move to music_dir), "copy" (copy, keep originals), "link" (hardlink)
+# Options: "move" (move to music_dir), "copy" (copy, keep originals)
 organize_operation = "move"
 
 # Automatically accept matches with similarity above this threshold (0.0 - 1.0)
@@ -433,21 +406,6 @@ skip_duplicates = true
 # Write tags back to files (if false, only updates DB)
 write_tags = true
 
-# Tag format preferences per file type
-# Options: "id3v24", "id3v23", "vorbis", "ape", "mp4"
-[tagging.preferred_tag_format]
-mp3 = "id3v24"
-flac = "vorbis"
-ogg = "vorbis"
-m4a = "mp4"
-
-# Fields to write (comment out to skip)
-write_fields = [
-    "title", "artist", "album", "album_artist", "year",
-    "track_number", "disc_number", "genre", "label",
-    "musicbrainz_trackid", "musicbrainz_albumid", "musicbrainz_artistid"
-]
-
 [musicbrainz]
 # User agent for MusicBrainz API (required by their ToS)
 user_agent = "kyoku/0.1.0 (https://github.com/yourname/kyoku)"
@@ -460,18 +418,10 @@ rate_limit_ms = 1100
 api_key = ""
 
 [ui]
-# TUI color scheme. 16 built-in themes (8 dark, 8 light).
-# Dark:  "tokyo-night", "kanagawa", "gruvbox-dark", "catppuccin-mocha",
-#        "dracula", "nord", "rose-pine", "one-dark"
-# Light: "tokyo-night-light", "kanagawa-lotus", "gruvbox-light", "catppuccin-latte",
-#        "solarized-light", "nord-light", "rose-pine-dawn", "one-light"
+# TUI color scheme. 4 built-in themes.
+# Dark:  "tokyo-night", "kanagawa"
+# Light: "tokyo-night-light", "kanagawa-lotus"
 theme = "tokyo-night"
-
-# Show file paths relative to music_dir
-relative_paths = true
-
-# Date format for display
-date_format = "%Y-%m-%d"
 
 # [ai]  # Future v2
 # enabled = false
@@ -482,7 +432,7 @@ date_format = "%Y-%m-%d"
 
 ### Theme System
 
-kyoku ships with 16 built-in themes — 8 dark, 8 light — covering the most popular terminal color schemes. Each theme defines a consistent palette used across all TUI elements (borders, tables, highlights, status badges, diffs, search).
+kyoku ships with 4 built-in themes — 2 dark, 2 light. Each theme defines a consistent palette used across all TUI elements (borders, tables, highlights, status badges, diffs, search).
 
 #### Built-in Themes
 
@@ -490,13 +440,6 @@ kyoku ships with 16 built-in themes — 8 dark, 8 light — covering the most po
 |-------|---------|-----------|
 | **Tokyo Night** | dark / light | Cool blue-purple, modern. The default. |
 | **Kanagawa** | wave (dark) / lotus (light) | Warm Japanese-inspired, muted sepia tones |
-| **Gruvbox** | dark / light | Warm retro, high contrast, earthy |
-| **Catppuccin** | mocha (dark) / latte (light) | Soft pastels, easy on the eyes |
-| **Dracula** | dark only | Vivid purple/green/pink, iconic |
-| **Nord** | dark / light | Cool arctic blue, minimal |
-| **Rosé Pine** | dark (main) / dawn (light) | Muted natural tones, elegant |
-| **One Dark/Light** | dark / light | Atom-inspired, balanced |
-| **Solarized** | light only | Ethan Schoonover's classic, precision-engineered |
 
 #### Theme Data Structure
 
@@ -527,14 +470,10 @@ pub struct Theme {
     pub red: Color,             // Error, deletion, strikethrough in diffs
     pub cyan: Color,            // Info, matched status
     pub orange: Color,          // Inbox count, attention
-
-    // Format badges
-    pub fmt_lossless: Color,    // FLAC, WAV, ALAC
-    pub fmt_lossy: Color,       // MP3, OGG, AAC
 }
 ```
 
-The agent should define all 16 themes as `const` values in a `src/tui/themes.rs` module. Theme selection happens at startup from config, with no runtime overhead.
+The agent should define all 4 themes as `const` values in a `src/tui/themes.rs` module. Theme selection happens at startup from config, with no runtime overhead.
 
 ---
 
@@ -639,7 +578,6 @@ Scans all configured `inbox_dirs` for audio files not yet in the database.
 
 ```bash
 kyoku scan                   # Check all inbox dirs, show summary
-kyoku scan --import          # Scan and immediately start import for found files
 ```
 
 In the TUI, the inbox status is always visible: `Inbox: 23 new files`. Pressing `i` on the inbox indicator starts the import wizard for those files.
@@ -671,27 +609,13 @@ Filters are always optional and combinable with the freeform query. They narrow,
 - Import date range (added after/before)
 - Bitrate range
 
-### 6.4 Collections (`kyoku collection`)
+### 6.4 Collections (TUI only)
 
-Collections are user-defined groupings that exist alongside (not instead of) the album hierarchy. They solve the "folder of random MP3s" problem.
+Collections are user-defined groupings that exist alongside (not instead of) the album hierarchy. They solve the "folder of random MP3s" problem. All collection management (create, browse, add/remove tracks, delete) is done through the TUI Collections view.
 
-```bash
-kyoku collection create "Driving Music"               # Create a new collection
-kyoku collection create "Unsorted 2024" --description "Stuff from old hard drive"
-kyoku collection create "Touhou" --template "Collections/Touhou/{artist} - {title}.{ext}"
-kyoku collection add "Driving Music" --search "highway" # Add tracks by search
-kyoku collection add "Driving Music" --path ~/random/   # Add by path
-kyoku collection list                                   # List all collections
-kyoku collection show "Driving Music"                   # Show tracks in collection
-kyoku collection remove "Driving Music" --track-id 42   # Remove a track
-kyoku collection delete "Driving Music"                 # Delete the collection (not the tracks)
-```
+A collection can optionally have a custom path template. When `kyoku organize` runs, tracks in this collection stay grouped together in their own folder instead of being scattered across the artist hierarchy. This is the key feature for managing compilations, loose folders, doujin collections, DJ sets, and anything that doesn't fit the standard `Artist/Album/Track` structure.
 
-The `--template` flag sets a custom path template for the collection. When `kyoku organize` runs, tracks in this collection stay grouped together in their own folder instead of being scattered across the artist hierarchy. This is the key feature for managing compilations, loose folders, doujin collections, DJ sets, and anything that doesn't fit the standard `Artist/Album/Track` structure.
-
-If no `--template` is set, the collection is purely organizational (a virtual grouping in the DB) and its tracks use the global template when organized.
-
-Collections are also accessible in the TUI as a view alongside the album browser.
+If no template is set, the collection is purely organizational (a virtual grouping in the DB) and its tracks use the global template when organized.
 
 **Import directly to collection:**
 ```bash
@@ -788,22 +712,7 @@ kyoku relocate --verify                                # Check all DB paths exis
 
 This does a simple string prefix replacement on all `file_path` entries in the database. Combined with `--verify`, it can also detect and report files that have gone missing (e.g. removed drive, deleted files).
 
-### 6.8 File Info (`kyoku info <path>`)
-
-Display detailed information about an audio file.
-
-```
-kyoku info /path/to/file.flac
-```
-
-Output includes:
-- All tag fields (with tag format noted: ID3v2.4, Vorbis Comment, etc.)
-- Audio properties (bitrate, sample rate, channels, duration, codec)
-- MusicBrainz IDs (if present)
-- Library status (if file is in database)
-- Chromaprint fingerprint (if available)
-
-### 6.9 TUI Mode (`kyoku` or `kyoku tui`)
+### 6.8 TUI Mode (`kyoku` or `kyoku tui`)
 
 Interactive terminal UI for library management.
 
@@ -948,17 +857,8 @@ The path template engine replaces `{variable}` placeholders with sanitized tag v
 1. Replace `/`, `\`, `:`, `*`, `?`, `"`, `<`, `>`, `|` with `_`
 2. Trim leading/trailing whitespace and dots
 3. Collapse multiple consecutive spaces/underscores
-4. Respect `max_filename_length` config (truncate with hash suffix if needed)
-5. Handle Unicode correctly (no ASCII folding unless configured)
-
-### Conditional Sections
-
-Support basic conditionals for optional fields:
-
-```toml
-# Only include disc number if disc_total > 1
-path_template = "{album_artist}/{album} ({year})/{%if disc_total > 1}{disc:0}-{%endif}{track:02} {title}.{ext}"
-```
+4. Truncate to OS filename limit (255 bytes) with hash suffix if needed
+5. Handle Unicode correctly (no ASCII folding)
 
 ---
 
@@ -994,7 +894,7 @@ This is a first-class concern, not an afterthought. Every layer of the applicati
 ### Sorting
 - Use ICU-aware collation for sorting when possible. At minimum, case-insensitive sorting that handles Unicode correctly.
 - Consider the `icu_collator` crate or simpler approaches like lowercasing with `str::to_lowercase()` (which handles Unicode case folding correctly in Rust).
-- Sort names: respect `sort_name` field for artists (e.g. `sort_name = "ハツネミク"` for kana-based sorting of Japanese content).
+- Sort names: respect sort-order tag fields from files (e.g. `ARTISTSORT = "ハツネミク"` for kana-based sorting of Japanese content).
 
 ### Crate Dependencies for Unicode
 
@@ -1065,7 +965,6 @@ pub enum KyokuError {
 - [ ] Configuration loading (TOML parsing, XDG paths, defaults, inbox_dirs)
 - [ ] Database schema + migrations (rusqlite, `migrations/001_initial.sql`)
 - [ ] Tag reader abstraction over `lofty` (read all supported formats)
-- [ ] `kyoku info <path>` — display file metadata
 - [ ] Basic test fixtures (short silence clips with known tags, including CJK-tagged files)
 
 ### Milestone 2: Library Database + Import
@@ -1076,7 +975,7 @@ pub enum KyokuError {
 - [ ] `kyoku import --loose` and `--no-match` modes
 - [ ] `kyoku scan` — inbox directory scanner (checks configured inbox_dirs)
 - [ ] Search with FTS5 (freeform + filters) — TUI only
-- [ ] Collections (create, add, list, show, remove, delete)
+- [ ] Collections (create, add, list, show, remove, delete) — TUI only
 - [ ] `kyoku import --collection` integration
 
 ### Milestone 3: TUI (primary interface)
@@ -1090,7 +989,7 @@ pub enum KyokuError {
 - [ ] Tag editor view (inline field editing)
 - [ ] Inbox indicator (shows count of unimported files from inbox_dirs)
 - [ ] Key bindings + help overlay
-- [ ] Theming support (16 built-in themes in `themes.rs`, selected from config, semantic color slots)
+- [ ] Theming support (4 built-in themes in `themes.rs`, selected from config, semantic color slots)
 
 ### Milestone 4: MusicBrainz Integration
 **Goal**: You can match albums against MusicBrainz and auto-tag.
@@ -1118,12 +1017,9 @@ pub enum KyokuError {
 ### Milestone 6: Polish & Robustness
 **Goal**: Production-quality for daily use.
 
-- [ ] Undo/operation log
 - [ ] Batch operations (select multiple albums in TUI)
 - [ ] Performance optimization for large libraries (lazy loading, virtual scrolling, pagination)
 - [ ] Comprehensive error recovery (partial import resumption)
-- [ ] Man page generation (clap)
-- [ ] Shell completions (bash, zsh, fish)
 
 ### Milestone 7: Device Sync
 **Goal**: One-shot sync your library to external devices — MP3 players, SD cards, USB drives — entirely from the TUI. No saved configuration; each sync is an interactive wizard. Device-first workflow: pick the device, not a directory.
