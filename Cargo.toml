@@ -1,0 +1,47 @@
+[package]
+name = "kyoku"
+version = "0.1.0"
+edition = "2024"
+description = "A TUI-first music library manager"
+default-run = "kyoku"
+
+[dependencies]
+# TUI
+ratatui = "0.30"
+crossterm = "0.29"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Audio metadata
+lofty = "0.23"
+
+# Database
+rusqlite = { version = "0.39", features = ["bundled"] }
+
+# Config
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+
+# Interactive prompts
+inquire = "0.9"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Filesystem
+walkdir = "2"
+dirs = "6"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "kyoku"
+path = "src/main.rs"
+
+[[bin]]
+name = "create_fixtures"
+path = "tests/fixtures/create_fixtures.rs"

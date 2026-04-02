@@ -97,7 +97,8 @@ kyoku/
 │   ├── main.rs              # Entry point, CLI dispatch
 │   ├── cli/
 │   │   ├── mod.rs           # clap App definition
-│   │   └── import.rs        # `kyoku import` command
+│   │   ├── import.rs        # `kyoku import` command
+│   │   └── setup.rs         # `kyoku setup` interactive wizard
 │   ├── tui/
 │   │   ├── mod.rs           # TUI app struct, main loop
 │   │   ├── app.rs           # App state, event handling
@@ -143,12 +144,10 @@ kyoku/
 ├── config/
 │   └── default.toml         # Default configuration
 └── tests/
-    ├── integration/
-    │   ├── import_test.rs
-    │   ├── search_test.rs
-    │   └── rename_test.rs
+    ├── tag_reader_test.rs  # Integration tests for tag reading
     └── fixtures/
-        └── sample_library/  # Test audio files (short silence clips with tags)
+        ├── create_fixtures.rs  # Helper to generate test audio files
+        └── sample_library/     # Test audio files (short silence clips with tags)
 ```
 
 ---
@@ -170,6 +169,7 @@ kyoku/
 | `thiserror` / `anyhow` | Error handling | `thiserror` for library errors, `anyhow` in main/CLI |
 | `walkdir` | Recursive directory scanning | Fast filesystem traversal |
 | `dirs` | XDG directory resolution | Config/data/cache paths |
+| `inquire` | Interactive CLI prompts | Setup wizard |
 | `fuzzy-matcher` | Fuzzy search | For library search/filtering |
 | `symphonia` | Audio decoding | Decode audio for fingerprinting (pure Rust) |
 
@@ -328,7 +328,7 @@ pub enum AlbumType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AudioFormat {
-    Mp3, Flac, Ogg, M4a, Wav, Wma, Ape, Opus, Unknown(String),
+    Mp3, Flac, Ogg, M4a, Wav, Wma, Ape, Opus, Aiff, Unknown(String),
 }
 
 /// A collection is a user-defined grouping orthogonal to albums.
@@ -555,8 +555,6 @@ kyoku import <path>
     --auto / -a             Auto-accept matches above threshold, skip below
     --no-fingerprint        Skip AcoustID fingerprinting
     --no-match              Skip MusicBrainz matching entirely (import as-is with existing tags)
-    --set <field>=<value>   Override a tag field for all imported tracks
-    --group-by <strategy>   Album grouping: "directory" (default), "tags", "filename", "none"
     --collection <name>     Add all imported tracks to a collection (creates it if needed)
     --loose                 Treat all files as individual tracks, don't try to group into albums
 ```
@@ -643,7 +641,7 @@ Tag editing is done through the TUI tag editor view. Select a track or album, op
 
 The deliberate "make my filesystem beautiful" command. This is where files actually move.
 
-`kyoku organize` applies the `path_template` to move/copy/link files into the target structure under `music_dir`. It always shows a preview first and requires explicit confirmation.
+`kyoku organize` applies the `path_template` to move/copy files into the target structure under `music_dir`. It always shows a preview first and requires explicit confirmation.
 
 ```bash
 kyoku organize                       # Preview what the entire library would look like
@@ -712,7 +710,55 @@ kyoku relocate --verify                                # Check all DB paths exis
 
 This does a simple string prefix replacement on all `file_path` entries in the database. Combined with `--verify`, it can also detect and report files that have gone missing (e.g. removed drive, deleted files).
 
-### 6.8 TUI Mode (`kyoku` or `kyoku tui`)
+### 6.8 File Info (`kyoku info <path>`)
+
+Display tags and audio properties for a single file. Works without a config file.
+
+```
+kyoku info /path/to/file.flac
+```
+
+Output includes: file path, format, title, artist, album, album artist, year, genre, track/disc number, duration, bitrate, sample rate, and tag status.
+
+### 6.9 Setup (`kyoku setup`)
+
+Interactive setup wizard. Walks you through configuring kyoku — music directory, database location, inbox directories, and theme.
+
+```
+kyoku setup
+```
+
+The wizard:
+1. Explains what the config file is and where it lives
+2. Asks for confirmation if a config already exists (won't silently overwrite)
+3. Prompts for music directory (with current/default pre-filled)
+4. Prompts for database directory (with default pre-filled)
+5. Lets you add inbox directories one by one (Enter to skip/finish)
+6. Lets you pick a theme
+7. Writes a commented config file and confirms
+
+The generated config includes all settings with comments. You can always edit it directly later.
+
+### 6.10 Paths (`kyoku paths`)
+
+Print the resolved paths kyoku is using. Useful for finding your config file or database.
+
+```
+kyoku paths
+```
+
+Output:
+```
+config:   ~/.config/kyoku/config.toml
+database: ~/.local/share/kyoku/library.db
+cache:    ~/.cache/kyoku
+music:    ~/Music
+inboxes:  ~/Downloads, ~/Music/Incoming
+```
+
+If the config file doesn't exist, a note is printed saying defaults are in use. If no inbox dirs are configured, the inboxes line shows `(none)`.
+
+### 6.11 TUI Mode (`kyoku` or `kyoku tui`)
 
 Interactive terminal UI for library management.
 
@@ -934,9 +980,6 @@ pub enum KyokuError {
     #[error("AcoustID error: {0}")]
     AcoustId(String),
     
-    #[error("Network error: {0}")]
-    Network(#[from] reqwest::Error),
-    
     #[error("Template error: {message}")]
     Template { message: String },
     
@@ -965,6 +1008,9 @@ pub enum KyokuError {
 - [ ] Configuration loading (TOML parsing, XDG paths, defaults, inbox_dirs)
 - [ ] Database schema + migrations (rusqlite, `migrations/001_initial.sql`)
 - [ ] Tag reader abstraction over `lofty` (read all supported formats)
+- [ ] `kyoku info <path>` — display file metadata and tags
+- [ ] `kyoku setup` — interactive config wizard
+- [ ] `kyoku paths` — show resolved config/data/cache paths
 - [ ] Basic test fixtures (short silence clips with known tags, including CJK-tagged files)
 
 ### Milestone 2: Library Database + Import
@@ -1145,6 +1191,7 @@ These are unambiguous rules for edge cases. Do not deviate from them.
 15. **Sync — fatsort not installed**: If the user enables fatsort but `fatsort` is not found in PATH, show a warning *before* sync starts (at the options step). Let them proceed without fatsort or cancel.
 16. **Sync — fatsort requires unmount**: After file copy, the wizard unmounts the device, runs `fatsort <device>`, and remounts. Show each step's status in the TUI. If unmount fails (device busy), warn and skip fatsort — do not force unmount.
 17. **Sync with delete**: Always show a confirmation with the count and list of files that will be deleted before proceeding. Never auto-delete.
+18. **Config file required**: All commands except `setup`, `paths`, and `info` require a config file. If missing, print an error directing the user to run `kyoku setup`. Running bare `kyoku` without a config shows a welcome message suggesting `kyoku setup`.
 
 ---
 
@@ -1173,7 +1220,7 @@ just setup            # Install dev dependencies, run initial checks
 
 ```toml
 [tools]
-rust = "1.82"         # Or "latest"
+rust = "1.94.1"
 ```
 
 ### justfile

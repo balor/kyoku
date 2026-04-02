@@ -1,0 +1,57 @@
+[library]
+# Root directory for managed music files
+music_dir = "~/Music"
+
+# Inbox directories — kyoku scans these for new/unimported files.
+# Shown in the TUI as "Inbox" with a count of pending items.
+# `kyoku scan` also checks these paths.
+inbox_dirs = [
+    "~/Downloads",
+]
+
+# Path template for organizing files (used by `kyoku organize`)
+# Available variables: {artist}, {album_artist}, {album}, {year}, {track},
+#                      {title}, {disc}, {genre}, {ext}, {artist_sort}
+# Use {track:02} for zero-padded track numbers
+path_template = "{album_artist}/{album} ({year})/{disc:0}-{track:02} {title}.{ext}"
+
+# Template for single-disc albums (disc_total == 1)
+path_template_single_disc = "{album_artist}/{album} ({year})/{track:02} {title}.{ext}"
+
+[import]
+# What happens when you run `kyoku organize`:
+# Options: "move" (move to music_dir), "copy" (copy, keep originals)
+organize_operation = "move"
+
+# Automatically accept MusicBrainz matches above this similarity (0.0 - 1.0)
+auto_match_threshold = 0.95
+
+# Use AcoustID fingerprinting for matching (requires network)
+use_fingerprint = true
+
+# Number of MusicBrainz match candidates to display
+match_candidates = 5
+
+# Skip files already in the library (by path or fingerprint)
+skip_duplicates = true
+
+[tagging]
+# Write tags back to files (if false, only updates DB)
+write_tags = true
+
+[musicbrainz]
+# User agent for MusicBrainz API (required by their ToS)
+user_agent = "kyoku/0.1.0 (https://github.com/yourname/kyoku)"
+
+# Rate limiting (MB requires max 1 req/sec)
+rate_limit_ms = 1100
+
+[acoustid]
+# AcoustID API key (get one at https://acoustid.org/new-application)
+api_key = ""
+
+[ui]
+# TUI color scheme. 4 built-in themes.
+# Dark:  "tokyo-night", "kanagawa"
+# Light: "tokyo-night-light", "kanagawa-lotus"
+theme = "tokyo-night"
