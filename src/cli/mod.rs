@@ -12,10 +12,10 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Import audio files into the library database
+    /// Import audio files into the library database (defaults to inbox dirs if no path given)
     Import {
-        /// Path to scan for audio files
-        path: PathBuf,
+        /// Path to scan for audio files (defaults to inbox dirs if omitted)
+        path: Option<PathBuf>,
 
         /// Dry run: show what would happen without modifying anything
         #[arg(long, short = 'p')]

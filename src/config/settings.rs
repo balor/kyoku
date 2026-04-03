@@ -163,8 +163,19 @@ impl Settings {
         }
 
         let content = std::fs::read_to_string(path)?;
-        let settings: Self =
+        let mut settings: Self =
             toml::from_str(&content).map_err(|e| KyokuError::Config(e.to_string()))?;
+
+        // Expand tilde in paths
+        settings.library.music_dir =
+            crate::config::paths::expand_tilde(&settings.library.music_dir);
+        settings.library.inbox_dirs = settings
+            .library
+            .inbox_dirs
+            .into_iter()
+            .map(|p| crate::config::paths::expand_tilde(&p))
+            .collect();
+
         Ok(settings)
     }
 }

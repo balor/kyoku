@@ -61,9 +61,7 @@ pub fn run(current: Settings) -> anyhow::Result<()> {
             "Add another inbox directory (or press Enter to finish):"
         };
 
-        let dir = Text::new(prompt)
-            .with_placeholder("~/Downloads")
-            .prompt()?;
+        let dir = Text::new(prompt).with_placeholder("~/Downloads").prompt()?;
 
         if dir.trim().is_empty() {
             break;
@@ -92,7 +90,10 @@ pub fn run(current: Settings) -> anyhow::Result<()> {
     let inbox_toml = if inbox_dirs.is_empty() {
         "[]".to_string()
     } else {
-        let entries: Vec<String> = inbox_dirs.iter().map(|d| format!("    \"{}\"", d)).collect();
+        let entries: Vec<String> = inbox_dirs
+            .iter()
+            .map(|d| format!("    \"{}\"", d))
+            .collect();
         format!("[\n{},\n]", entries.join(",\n"))
     };
 

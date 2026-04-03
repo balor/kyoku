@@ -52,21 +52,60 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Import {
             path,
             pretend,
-            no_match,
             loose,
             collection,
             ..
         }) => {
-            let _db = db::open_database(config::paths::database_file())?;
+            let conn = db::open_database(config::paths::database_file())?;
+
+            let paths: Vec<std::path::PathBuf> = match path {
+                Some(p) => vec![p],
+                None => {
+                    let inbox = &settings.library.inbox_dirs;
+                    if inbox.is_empty() {
+                        eprintln!("No path given and no inbox directories configured.");
+                        eprintln!("Either provide a path: kyoku import <path>");
+                        eprintln!("Or add inbox_dirs to your config (see `kyoku paths`).");
+                        std::process::exit(1);
+                    }
+                    println!("Importing from inbox directories...");
+                    inbox.clone()
+                }
+            };
+
+            let mut total = core::importer::ImportResult::default();
+            for import_path in &paths {
+                if paths.len() > 1 {
+                    println!("\n--- {} ---", import_path.display());
+                }
+                let result = core::importer::import(
+                    &conn,
+                    import_path,
+                    loose,
+                    pretend,
+                    collection.as_deref(),
+                )?;
+                total.imported += result.imported;
+                total.skipped_duplicate += result.skipped_duplicate;
+                total.skipped_error += result.skipped_error;
+                total.albums_created += result.albums_created;
+                total.errors.extend(result.errors);
+            }
+
+            println!();
             println!(
-                "Import from {} (pretend={}, no_match={}, loose={}, collection={:?})",
-                path.display(),
-                pretend,
-                no_match,
-                loose,
-                collection,
+                "Import complete: {} imported, {} skipped (duplicate), {} errors",
+                total.imported, total.skipped_duplicate, total.skipped_error
             );
-            println!("Import pipeline — not yet implemented (milestone 2).");
+            if total.albums_created > 0 {
+                println!("Albums created: {}", total.albums_created);
+            }
+            if !total.errors.is_empty() {
+                println!("\nErrors:");
+                for (path, err) in &total.errors {
+                    println!("  {} — {}", path, err);
+                }
+            }
         }
         Some(Command::Info { path }) => {
             let track = core::tagger::read_track(&path)?;
@@ -145,12 +184,25 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some(Command::Scan) => {
-            let _db = db::open_database(config::paths::database_file())?;
-            println!(
-                "Scanning inbox directories: {:?}",
-                settings.library.inbox_dirs
-            );
-            println!("Scan — not yet implemented (milestone 2).");
+            let conn = db::open_database(config::paths::database_file())?;
+            let inbox_dirs = &settings.library.inbox_dirs;
+
+            if inbox_dirs.is_empty() {
+                println!("No inbox directories configured.");
+                println!("Add inbox_dirs to your config (see `kyoku paths`).");
+            } else {
+                let unimported = core::importer::scan_inbox(&conn, inbox_dirs)?;
+                if unimported.is_empty() {
+                    println!("No new files found in inbox directories.");
+                } else {
+                    println!("Found {} unimported file(s):", unimported.len());
+                    for path in &unimported {
+                        println!("  {}", path.display());
+                    }
+                    println!();
+                    println!("Run `kyoku import <path>` to import them.");
+                }
+            }
         }
         Some(Command::Organize { .. }) => {
             println!("Organize — not yet implemented (milestone 5).");

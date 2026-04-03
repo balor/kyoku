@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Resolve the config directory for kyoku.
 /// Uses $XDG_CONFIG_HOME/kyoku or platform default.
@@ -31,4 +31,15 @@ pub fn config_file() -> PathBuf {
 /// Path to the library database.
 pub fn database_file() -> PathBuf {
     data_dir().join("library.db")
+}
+
+/// Expand `~` at the start of a path to the user's home directory.
+pub fn expand_tilde(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    if let Ok(stripped) = path.strip_prefix("~") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped);
+        }
+    }
+    path.to_path_buf()
 }

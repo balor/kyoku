@@ -550,7 +550,8 @@ Note: the files stay where they are. Their current paths are recorded in the dat
 
 #### CLI Flags
 ```
-kyoku import <path>
+kyoku import [path]
+    (no path)               Import from all configured inbox_dirs
     --pretend / -p          Dry run: show what would happen without modifying anything
     --auto / -a             Auto-accept matches above threshold, skip below
     --no-fingerprint        Skip AcoustID fingerprinting
