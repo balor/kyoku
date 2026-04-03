@@ -1,3 +1,5 @@
+set positional-arguments
+
 # Default: list available tasks
 default:
     @just --list
@@ -18,7 +20,7 @@ release:
 
 # Run kyoku TUI (default, no args)
 run *ARGS:
-    cargo run -- {{ARGS}}
+    cargo run -- "$@"
 
 # Run all tests
 test:
@@ -45,7 +47,7 @@ check: fmt-check lint test
 
 # Run with debug logging
 debug *ARGS:
-    RUST_LOG=debug cargo run -- {{ARGS}}
+    RUST_LOG=debug cargo run -- "$@"
 
 # Clean build artifacts
 clean:
