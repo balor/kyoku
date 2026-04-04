@@ -17,6 +17,7 @@ use crate::tui::widgets::add_to_collection::{AddToCollectionPopup, PopupAction};
 pub enum LibraryAction {
     None,
     OpenAlbum(i64),
+    OpenLoose,
     SortChanged,
 }
 
@@ -149,7 +150,10 @@ impl LibraryView {
             if self.selected < self.albums.len() {
                 return LibraryAction::OpenAlbum(self.albums[self.selected].id);
             }
-            // [loose] entry — could navigate to loose tracks view later
+            // [loose] virtual entry
+            if self.loose_count > 0 {
+                return LibraryAction::OpenLoose;
+            }
             return LibraryAction::None;
         }
 

@@ -27,6 +27,7 @@ pub enum AppView {
     Library,
     Collections,
     AlbumDetail { album_id: i64 },
+    LooseTracks,
     CollectionDetail { collection_id: i64 },
     Import,
     Editor { track_id: i64 },
@@ -168,7 +169,7 @@ impl App {
         match &self.view {
             AppView::Library => self.handle_library_key(key),
             AppView::Collections => self.handle_collections_key(key),
-            AppView::AlbumDetail { .. } => self.handle_detail_key(key),
+            AppView::AlbumDetail { .. } | AppView::LooseTracks => self.handle_detail_key(key),
             AppView::CollectionDetail { .. } => self.handle_collection_detail_key(key),
             AppView::Import => self.handle_import_key(key),
             AppView::Editor { .. } => self.handle_editor_key(key),
@@ -180,7 +181,9 @@ impl App {
     fn current_view_has_popup(&self) -> bool {
         match self.view {
             AppView::Library => self.library.has_popup(),
-            AppView::AlbumDetail { .. } => self.album_detail.has_popup(),
+            AppView::AlbumDetail { .. } | AppView::LooseTracks => {
+                self.album_detail.has_popup()
+            }
             AppView::CollectionDetail { .. } => self.collection_detail.has_popup(),
             AppView::Editor { .. } => self.editor.is_editing(),
             _ => false,
@@ -215,7 +218,7 @@ impl App {
             AppView::Collections => {
                 self.collections.load(&self.conn, query).ok();
             }
-            AppView::AlbumDetail { .. } => {
+            AppView::AlbumDetail { .. } | AppView::LooseTracks => {
                 self.album_detail
                     .set_filter(self.search.value.clone());
             }
@@ -237,6 +240,9 @@ impl App {
             }
             AppView::AlbumDetail { album_id } => {
                 self.album_detail.load(&self.conn, *album_id).ok();
+            }
+            AppView::LooseTracks => {
+                self.album_detail.load_loose(&self.conn).ok();
             }
             AppView::CollectionDetail { collection_id } => {
                 self.collection_detail
@@ -283,6 +289,10 @@ impl App {
             super::views::library::LibraryAction::None => AppAction::None,
             super::views::library::LibraryAction::OpenAlbum(id) => {
                 self.switch_view(AppView::AlbumDetail { album_id: id });
+                AppAction::None
+            }
+            super::views::library::LibraryAction::OpenLoose => {
+                self.switch_view(AppView::LooseTracks);
                 AppAction::None
             }
             super::views::library::LibraryAction::SortChanged => {
@@ -422,6 +432,13 @@ impl App {
                         self.album_detail.selected = prev_selected;
                     }
                 }
+                AppView::LooseTracks => {
+                    let prev_selected = self.album_detail.selected;
+                    self.album_detail.load_loose(&self.conn).ok();
+                    if prev_selected < self.album_detail.tracks.len() {
+                        self.album_detail.selected = prev_selected;
+                    }
+                }
                 AppView::CollectionDetail { collection_id } => {
                     let prev_selected = self.collection_detail.selected;
                     self.collection_detail
@@ -451,7 +468,9 @@ impl App {
         match &self.view {
             AppView::Library => self.render_library(frame, area),
             AppView::Collections => self.render_collections(frame, area),
-            AppView::AlbumDetail { .. } => self.render_detail(frame, area),
+            AppView::AlbumDetail { .. } | AppView::LooseTracks => {
+                self.render_detail(frame, area)
+            }
             AppView::CollectionDetail { .. } => self.render_collection_detail(frame, area),
             AppView::Import => self.render_import(frame, area),
             AppView::Editor { .. } => self.render_editor(frame, area),

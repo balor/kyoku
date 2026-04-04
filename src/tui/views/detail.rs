@@ -68,6 +68,25 @@ impl AlbumDetailView {
         Ok(())
     }
 
+    /// Load all loose tracks (no album). `album` is set to `None`, so the
+    /// view renders as "Loose Tracks" and the rename binding is disabled.
+    pub fn load_loose(&mut self, conn: &Connection) -> Result<()> {
+        self.album = None;
+        // Fetch enough loose tracks for the typical library size
+        self.tracks = queries::list_loose_tracks(conn, 0, 5000)?;
+        self.filter.clear();
+        self.selected = 0;
+        self.scroll_offset = 0;
+        self.rename_input = None;
+        self.add_to_collection = None;
+        self.notice = None;
+        Ok(())
+    }
+
+    fn is_loose(&self) -> bool {
+        self.album.is_none()
+    }
+
     pub fn is_renaming(&self) -> bool {
         self.rename_input.is_some()
     }
@@ -158,7 +177,7 @@ impl AlbumDetailView {
                 }
             }
         }
-        if key.code == KeyCode::Char('R') {
+        if key.code == KeyCode::Char('R') && !self.is_loose() {
             // Rename album
             if let Some(album) = &self.album {
                 let mut input =
@@ -206,14 +225,14 @@ impl AlbumDetailView {
             ])
             .split(area);
 
-        // Album header
-        if let Some(album) = &self.album {
+        // Header
+        let header = if let Some(album) = &self.album {
             let artist = album.album_artist.as_deref().unwrap_or("(unknown)");
             let year = album
                 .year
                 .map(|y| format!(" ({})", y))
                 .unwrap_or_default();
-            let header = Line::from(vec![
+            Line::from(vec![
                 Span::styled(
                     format!(" {} ", artist),
                     Style::default()
@@ -227,14 +246,28 @@ impl AlbumDetailView {
                         .fg(theme.fg)
                         .add_modifier(Modifier::BOLD),
                 ),
-            ]);
-            let p = Paragraph::new(header).block(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .border_style(Style::default().fg(theme.border)),
-            );
-            frame.render_widget(p, chunks[0]);
-        }
+            ])
+        } else {
+            // Loose tracks view
+            Line::from(vec![
+                Span::styled(
+                    " Loose Tracks ",
+                    Style::default()
+                        .fg(theme.accent_alt)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("· {} tracks (not in any album)", self.tracks.len()),
+                    Style::default().fg(theme.fg_dim),
+                ),
+            ])
+        };
+        let p = Paragraph::new(header).block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(theme.border)),
+        );
+        frame.render_widget(p, chunks[0]);
 
         // Track table — iterate over filtered indices
         let visible = self.filtered_indices();
@@ -336,6 +369,21 @@ impl AlbumDetailView {
             let meta = format!(
                 " {} · {} tracks · {}",
                 fmt, album.track_count, duration
+            );
+            let p = Paragraph::new(Span::styled(meta, Style::default().fg(theme.fg_dim)))
+                .style(Style::default().bg(theme.bg_alt));
+            frame.render_widget(p, chunks[2]);
+        } else {
+            // Loose tracks — compute summary from the loaded tracks
+            let total_ms: i64 = self
+                .tracks
+                .iter()
+                .map(|t| t.duration_ms.unwrap_or(0) as i64)
+                .sum();
+            let meta = format!(
+                " {} loose track(s) · {}",
+                self.tracks.len(),
+                format_duration_ms(total_ms),
             );
             let p = Paragraph::new(Span::styled(meta, Style::default().fg(theme.fg_dim)))
                 .style(Style::default().bg(theme.bg_alt));
