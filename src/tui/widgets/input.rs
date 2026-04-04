@@ -12,6 +12,7 @@ pub struct TextInput {
     pub cursor: usize,
     pub focused: bool,
     pub placeholder: String,
+    pub label: String,
 }
 
 impl TextInput {
@@ -21,7 +22,13 @@ impl TextInput {
             cursor: 0,
             focused: false,
             placeholder: placeholder.to_string(),
+            label: " Search: ".to_string(),
         }
+    }
+
+    pub fn with_label(mut self, label: &str) -> Self {
+        self.label = label.to_string();
+        self
     }
 
     pub fn clear(&mut self) {
@@ -98,7 +105,7 @@ impl TextInput {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let label = " Search: ";
+        let label = self.label.as_str();
         let label_span = Span::styled(label, Style::default().fg(theme.fg_dim));
 
         let (text_span, cursor_visible) = if self.value.is_empty() && !self.focused {

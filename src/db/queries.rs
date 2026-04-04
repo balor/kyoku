@@ -354,6 +354,52 @@ fn search_albums_like(conn: &Connection, query: &str, limit: usize) -> Result<Ve
     Ok(result)
 }
 
+/// Search tracks using FTS5 or LIKE fallback. Returns up to `limit` results.
+pub fn search_tracks(conn: &Connection, query: &str, limit: usize) -> Result<Vec<TrackRow>> {
+    let fts_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tracks_fts", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    if fts_count > 0 {
+        let fts_query = query
+            .split_whitespace()
+            .map(|w| format!("\"{}\"*", w.replace('"', "")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.title, t.artist, t.track_number, t.disc_number, t.duration_ms,
+                    t.tag_status, t.bitrate, t.file_format, t.file_path
+             FROM tracks_fts fts
+             JOIN tracks t ON t.id = fts.rowid
+             WHERE tracks_fts MATCH ?1
+             ORDER BY rank
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![fts_query, limit as i64], map_track_row)?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    } else {
+        let pattern = format!("%{}%", query);
+        let mut stmt = conn.prepare(
+            "SELECT id, title, artist, track_number, disc_number, duration_ms,
+                    tag_status, bitrate, file_format, file_path
+             FROM tracks
+             WHERE title LIKE ?1 OR artist LIKE ?1
+             ORDER BY title COLLATE NOCASE
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], map_track_row)?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+}
+
 /// Get an album by ID.
 pub fn get_album(conn: &Connection, album_id: i64) -> Result<Option<AlbumRow>> {
     let row = conn

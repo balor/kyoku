@@ -129,7 +129,7 @@ impl EditorView {
         if keys::is_confirm(&key) {
             // Start editing current field
             if let Some(field) = self.fields.get(self.selected) {
-                self.input = TextInput::new("");
+                self.input = TextInput::new("").with_label("");
                 self.input.value = field.value.clone();
                 self.input.cursor = self.input.value.len();
                 self.input.focused = true;

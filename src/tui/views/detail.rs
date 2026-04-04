@@ -23,15 +23,41 @@ pub enum DetailAction {
 pub struct AlbumDetailView {
     pub album: Option<AlbumRow>,
     pub tracks: Vec<TrackRow>,
+    pub filter: String,
     pub selected: usize,
     pub scroll_offset: usize,
     rename_input: Option<TextInput>,
 }
 
 impl AlbumDetailView {
+    /// Return indices of tracks matching the current filter.
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return (0..self.tracks.len()).collect();
+        }
+        self.tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                let artist = t.artist.as_deref().unwrap_or("");
+                crate::tui::fuzzy::matches_any(&self.filter, &[&t.title, artist])
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    pub fn set_filter(&mut self, filter: String) {
+        self.filter = filter;
+        self.selected = 0;
+        self.scroll_offset = 0;
+    }
+}
+
+impl AlbumDetailView {
     pub fn load(&mut self, conn: &Connection, album_id: i64) -> Result<()> {
         self.album = queries::get_album(conn, album_id)?;
         self.tracks = queries::get_album_tracks(conn, album_id)?;
+        self.filter.clear();
         self.selected = 0;
         self.scroll_offset = 0;
         self.rename_input = None;
@@ -67,7 +93,8 @@ impl AlbumDetailView {
             return DetailAction::None;
         }
 
-        let count = self.tracks.len();
+        let visible = self.filtered_indices();
+        let count = visible.len();
 
         if keys::is_up(&key) && self.selected > 0 {
             self.selected -= 1;
@@ -93,19 +120,23 @@ impl AlbumDetailView {
         if key.code == KeyCode::Char('G') && count > 0 {
             self.selected = count - 1;
         }
+
+        let current_track = visible
+            .get(self.selected)
+            .and_then(|&i| self.tracks.get(i));
+
         if key.code == KeyCode::Char('e') {
-            if let Some(track) = self.tracks.get(self.selected) {
+            if let Some(track) = current_track {
                 return DetailAction::EditTrack(track.id);
             }
         }
         if key.code == KeyCode::Char('a') {
-            if let Some(track) = self.tracks.get(self.selected) {
+            if let Some(track) = current_track {
                 return DetailAction::AddToCollection(track.id);
             }
         }
         if key.code == KeyCode::Char('o') {
-            // Open file location
-            if let Some(track) = self.tracks.get(self.selected) {
+            if let Some(track) = current_track {
                 if let Some(parent) = std::path::Path::new(&track.file_path).parent() {
                     let _ = std::process::Command::new("xdg-open")
                         .arg(parent)
@@ -116,7 +147,8 @@ impl AlbumDetailView {
         if key.code == KeyCode::Char('R') {
             // Rename album
             if let Some(album) = &self.album {
-                let mut input = TextInput::new("New album title...");
+                let mut input =
+                    TextInput::new("New album title...").with_label(" Title: ");
                 input.value = album.title.clone();
                 input.cursor = input.value.len();
                 input.focused = true;
@@ -167,7 +199,9 @@ impl AlbumDetailView {
             frame.render_widget(p, chunks[0]);
         }
 
-        // Track table
+        // Track table — iterate over filtered indices
+        let visible = self.filtered_indices();
+        let total = visible.len();
         let visible_height = chunks[1].height.saturating_sub(1) as usize;
         let scroll = if self.selected < self.scroll_offset {
             self.selected
@@ -178,9 +212,10 @@ impl AlbumDetailView {
         };
 
         let mut rows = Vec::new();
-        for i in scroll..self.tracks.len().min(scroll + visible_height) {
+        for pos in scroll..total.min(scroll + visible_height) {
+            let i = visible[pos];
             let track = &self.tracks[i];
-            let is_selected = i == self.selected;
+            let is_selected = pos == self.selected;
 
             let num = track
                 .track_number
@@ -218,7 +253,7 @@ impl AlbumDetailView {
                     .bg(theme.bg_selected)
                     .fg(theme.fg)
                     .add_modifier(Modifier::BOLD)
-            } else if i % 2 == 0 {
+            } else if pos % 2 == 0 {
                 Style::default().bg(theme.bg).fg(theme.fg)
             } else {
                 Style::default().bg(theme.bg_alt).fg(theme.fg)

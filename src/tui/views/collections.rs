@@ -131,10 +131,9 @@ impl CollectionsView {
             }
         }
         if key.code == KeyCode::Char('n') {
-            self.mode = InputMode::Creating(TextInput::new("Collection name..."));
-            if let InputMode::Creating(input) = &mut self.mode {
-                input.focused = true;
-            }
+            let mut input = TextInput::new("Collection name...").with_label(" Name: ");
+            input.focused = true;
+            self.mode = InputMode::Creating(input);
             return CollectionsAction::None;
         }
         if key.code == KeyCode::Char('d') && !self.collections.is_empty() {
@@ -251,6 +250,7 @@ impl CollectionsView {
 pub struct CollectionDetailView {
     pub collection: Option<CollectionRow>,
     pub tracks: Vec<TrackRow>,
+    pub filter: String,
     pub selected: usize,
     pub scroll_offset: usize,
     confirm_remove: bool,
@@ -261,10 +261,34 @@ impl Default for CollectionDetailView {
         Self {
             collection: None,
             tracks: Vec::new(),
+            filter: String::new(),
             selected: 0,
             scroll_offset: 0,
             confirm_remove: false,
         }
+    }
+}
+
+impl CollectionDetailView {
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return (0..self.tracks.len()).collect();
+        }
+        self.tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                let artist = t.artist.as_deref().unwrap_or("");
+                crate::tui::fuzzy::matches_any(&self.filter, &[&t.title, artist])
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    pub fn set_filter(&mut self, filter: String) {
+        self.filter = filter;
+        self.selected = 0;
+        self.scroll_offset = 0;
     }
 }
 
@@ -274,13 +298,14 @@ impl CollectionDetailView {
         let collections = queries::list_collections(conn)?;
         self.collection = collections.into_iter().find(|c| c.id == collection_id);
         self.tracks = queries::get_collection_tracks(conn, collection_id, 0, 500)?;
+        self.filter.clear();
         self.selected = 0;
         self.scroll_offset = 0;
         self.confirm_remove = false;
         Ok(())
     }
 
-    /// Reload tracks, preserving cursor position (clamped).
+    /// Reload tracks, preserving cursor position (clamped to filtered list).
     fn reload_tracks(&mut self, conn: &Connection) {
         if let Some(coll) = &self.collection {
             if let Ok(tracks) = queries::get_collection_tracks(conn, coll.id, 0, 500) {
@@ -291,10 +316,11 @@ impl CollectionDetailView {
                 self.collection = collections.into_iter().find(|c| c.id == coll.id);
             }
         }
-        if self.tracks.is_empty() {
+        let visible_len = self.filtered_indices().len();
+        if visible_len == 0 {
             self.selected = 0;
-        } else if self.selected >= self.tracks.len() {
-            self.selected = self.tracks.len() - 1;
+        } else if self.selected >= visible_len {
+            self.selected = visible_len - 1;
         }
     }
 
@@ -303,13 +329,16 @@ impl CollectionDetailView {
         key: KeyEvent,
         conn: &Connection,
     ) -> CollectionDetailAction {
+        let visible = self.filtered_indices();
+
         // Confirmation popup captures input
         if self.confirm_remove {
             if key.code == KeyCode::Char('y') {
-                if let (Some(coll), Some(track)) =
-                    (&self.collection, self.tracks.get(self.selected))
-                {
-                    let (coll_id, track_id) = (coll.id, track.id);
+                let target = visible
+                    .get(self.selected)
+                    .and_then(|&i| self.tracks.get(i).map(|t| t.id));
+                if let (Some(coll), Some(track_id)) = (&self.collection, target) {
+                    let coll_id = coll.id;
                     queries::remove_track_from_collection(conn, coll_id, track_id).ok();
                     self.reload_tracks(conn);
                 }
@@ -318,7 +347,7 @@ impl CollectionDetailView {
             return CollectionDetailAction::None;
         }
 
-        let count = self.tracks.len();
+        let count = visible.len();
 
         if keys::is_up(&key) && self.selected > 0 {
             self.selected -= 1;
@@ -344,12 +373,17 @@ impl CollectionDetailView {
         if key.code == KeyCode::Char('G') && count > 0 {
             self.selected = count - 1;
         }
+
+        let current_track = visible
+            .get(self.selected)
+            .and_then(|&i| self.tracks.get(i));
+
         if key.code == KeyCode::Char('e') {
-            if let Some(track) = self.tracks.get(self.selected) {
+            if let Some(track) = current_track {
                 return CollectionDetailAction::EditTrack(track.id);
             }
         }
-        if key.code == KeyCode::Char('x') && !self.tracks.is_empty() {
+        if key.code == KeyCode::Char('x') && current_track.is_some() {
             self.confirm_remove = true;
             return CollectionDetailAction::None;
         }
@@ -390,7 +424,9 @@ impl CollectionDetailView {
             frame.render_widget(p, chunks[0]);
         }
 
-        // Track table
+        // Track table — iterate over filtered indices
+        let visible = self.filtered_indices();
+        let total = visible.len();
         let visible_height = chunks[1].height.saturating_sub(1) as usize;
         let scroll = if self.selected < self.scroll_offset {
             self.selected
@@ -401,9 +437,10 @@ impl CollectionDetailView {
         };
 
         let mut rows = Vec::new();
-        for i in scroll..self.tracks.len().min(scroll + visible_height) {
+        for pos in scroll..total.min(scroll + visible_height) {
+            let i = visible[pos];
             let track = &self.tracks[i];
-            let is_selected = i == self.selected;
+            let is_selected = pos == self.selected;
 
             let artist = track.artist.as_deref().unwrap_or("");
             let duration = track
@@ -426,7 +463,7 @@ impl CollectionDetailView {
                     .bg(theme.bg_selected)
                     .fg(theme.fg)
                     .add_modifier(Modifier::BOLD)
-            } else if i % 2 == 0 {
+            } else if pos % 2 == 0 {
                 Style::default().bg(theme.bg).fg(theme.fg)
             } else {
                 Style::default().bg(theme.bg_alt).fg(theme.fg)
@@ -459,9 +496,9 @@ impl CollectionDetailView {
         // Confirmation popup for removing a track
         if self.confirm_remove {
             use crate::tui::widgets::popup;
-            let title = self
-                .tracks
+            let title = visible
                 .get(self.selected)
+                .and_then(|&i| self.tracks.get(i))
                 .map(|t| t.title.clone())
                 .unwrap_or_default();
             let content = vec![

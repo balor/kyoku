@@ -16,6 +16,7 @@ use super::themes::Theme;
 use super::views::collections::{CollectionDetailView, CollectionsView};
 use super::views::detail::AlbumDetailView;
 use super::views::edit::EditorView;
+use super::views::global_search::{GlobalSearchAction, GlobalSearchView};
 use super::views::help::HelpOverlay;
 use super::views::import::ImportView;
 use super::views::library::LibraryView;
@@ -55,6 +56,8 @@ pub struct App {
     pub import: ImportView,
     pub editor: EditorView,
     pub help: HelpOverlay,
+    pub global_search: GlobalSearchView,
+    pub global_search_open: bool,
 
     // Search
     pub search: TextInput,
@@ -84,6 +87,8 @@ impl App {
             import: ImportView::default(),
             editor: EditorView::default(),
             help: HelpOverlay::default(),
+            global_search: GlobalSearchView::default(),
+            global_search_open: false,
 
             search: TextInput::new("Search..."),
             search_debounce: None,
@@ -109,6 +114,12 @@ impl App {
         // Help overlay captures all input when visible
         if self.help.visible {
             return self.help.handle_key(key);
+        }
+
+        // Global search captures all input when open
+        if self.global_search_open {
+            let action = self.global_search.handle_key(key, &self.conn);
+            return self.handle_global_search_action(action);
         }
 
         // Global keys (always active unless search is focused)
@@ -142,6 +153,13 @@ impl App {
 
         if keys::is_search_focus(&key) {
             self.search.focused = true;
+            return AppAction::None;
+        }
+
+        // Global search: \ opens it from anywhere
+        if key.code == KeyCode::Char('\\') {
+            self.global_search.open();
+            self.global_search_open = true;
             return AppAction::None;
         }
 
@@ -184,6 +202,14 @@ impl App {
             }
             AppView::Collections => {
                 self.collections.load(&self.conn, query).ok();
+            }
+            AppView::AlbumDetail { .. } => {
+                self.album_detail
+                    .set_filter(self.search.value.clone());
+            }
+            AppView::CollectionDetail { .. } => {
+                self.collection_detail
+                    .set_filter(self.search.value.clone());
             }
             _ => {}
         }
@@ -336,6 +362,40 @@ impl App {
         AppAction::None
     }
 
+    fn handle_global_search_action(&mut self, action: GlobalSearchAction) -> AppAction {
+        match action {
+            GlobalSearchAction::None => AppAction::None,
+            GlobalSearchAction::Close => {
+                self.global_search_open = false;
+                AppAction::None
+            }
+            GlobalSearchAction::OpenAlbum(id) => {
+                self.global_search_open = false;
+                self.switch_view(AppView::AlbumDetail { album_id: id });
+                AppAction::None
+            }
+            GlobalSearchAction::OpenCollection(id) => {
+                self.global_search_open = false;
+                self.switch_view(AppView::CollectionDetail { collection_id: id });
+                AppAction::None
+            }
+            GlobalSearchAction::OpenTrackAlbum { track_id, album_id } => {
+                self.global_search_open = false;
+                self.switch_view(AppView::AlbumDetail { album_id });
+                // Try to move cursor to that track
+                if let Some(pos) = self
+                    .album_detail
+                    .tracks
+                    .iter()
+                    .position(|t| t.id == track_id)
+                {
+                    self.album_detail.selected = pos;
+                }
+                AppAction::None
+            }
+        }
+    }
+
     fn handle_editor_key(&mut self, key: KeyEvent) -> AppAction {
         if keys::is_back(&key) && !self.editor.is_editing() {
             // Return to the view we came from without reloading
@@ -391,10 +451,26 @@ impl App {
             }
         }
 
+        // Global search overlay
+        if self.global_search_open {
+            self.render_global_search(frame, area);
+        }
+
         // Help overlay on top of everything
         if self.help.visible {
             self.render_help_overlay(frame, area);
         }
+    }
+
+    fn render_global_search(&self, frame: &mut Frame, area: Rect) {
+        // Centered overlay: ~70% width, 60% height
+        let height = (area.height * 6 / 10).max(10).min(area.height);
+        let width = (area.width * 7 / 10).max(40).min(area.width);
+        let x = (area.width - width) / 2;
+        let y = (area.height - height) / 2;
+        let rect = Rect::new(area.x + x, area.y + y, width, height);
+        frame.render_widget(ratatui::widgets::Clear, rect);
+        self.global_search.render(frame, rect, self.theme);
     }
 
     fn render_header(&self, frame: &mut Frame, area: Rect) {
@@ -477,9 +553,10 @@ impl App {
                 ("j/k", "nav"),
                 ("Enter", "detail"),
                 ("i", "import"),
-                ("/", "search"),
+                ("/", "filter"),
+                ("\\", "global"),
                 ("s", "sort"),
-                ("Tab", "collections"),
+                ("Tab", "colls"),
                 ("q", "quit"),
             ],
         );
@@ -521,22 +598,24 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(1), // search bar
                 Constraint::Min(5),   // content
                 Constraint::Length(1), // status bar
             ])
             .split(area);
 
-        self.album_detail.render(frame, chunks[0], self.theme);
+        self.search.render(frame, chunks[0], self.theme);
+        self.album_detail.render(frame, chunks[1], self.theme);
         super::widgets::status_bar::render(
             frame,
-            chunks[1],
+            chunks[2],
             self.theme,
             &[
                 ("j/k", "nav"),
+                ("/", "filter"),
                 ("e", "edit"),
-                ("R", "rename album"),
+                ("R", "rename"),
                 ("a", "add to coll"),
-                ("o", "open dir"),
                 ("Esc", "back"),
             ],
         );
@@ -546,19 +625,22 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(1), // search bar
                 Constraint::Min(5),   // content
                 Constraint::Length(1), // status bar
             ])
             .split(area);
 
+        self.search.render(frame, chunks[0], self.theme);
         self.collection_detail
-            .render(frame, chunks[0], self.theme);
+            .render(frame, chunks[1], self.theme);
         super::widgets::status_bar::render(
             frame,
-            chunks[1],
+            chunks[2],
             self.theme,
             &[
                 ("j/k", "nav"),
+                ("/", "filter"),
                 ("e", "edit"),
                 ("x", "remove"),
                 ("Esc", "back"),

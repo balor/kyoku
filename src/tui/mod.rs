@@ -1,4 +1,5 @@
 pub mod app;
+pub mod fuzzy;
 pub mod keybindings;
 pub mod themes;
 pub mod views;
