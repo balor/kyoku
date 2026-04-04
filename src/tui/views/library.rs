@@ -150,11 +150,11 @@ impl LibraryView {
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let visible_height = area.height.saturating_sub(1) as usize; // -1 for header
 
-        // Adjust scroll offset
+        // Adjust scroll offset — keep 1 extra row visible below cursor for lookahead
         let scroll_offset = if self.selected < self.scroll_offset {
             self.selected
-        } else if self.selected >= self.scroll_offset + visible_height {
-            self.selected.saturating_sub(visible_height - 1)
+        } else if self.selected + 1 >= self.scroll_offset + visible_height {
+            (self.selected + 2).saturating_sub(visible_height)
         } else {
             self.scroll_offset
         };

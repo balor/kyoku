@@ -392,10 +392,10 @@ impl CollectionDetailView {
 
         // Track table
         let visible_height = chunks[1].height.saturating_sub(1) as usize;
-        let scroll = if self.selected >= self.scroll_offset + visible_height {
-            self.selected.saturating_sub(visible_height - 1)
-        } else if self.selected < self.scroll_offset {
+        let scroll = if self.selected < self.scroll_offset {
             self.selected
+        } else if self.selected + 1 >= self.scroll_offset + visible_height {
+            (self.selected + 2).saturating_sub(visible_height)
         } else {
             self.scroll_offset
         };

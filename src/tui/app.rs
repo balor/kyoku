@@ -59,6 +59,9 @@ pub struct App {
     // Search
     pub search: TextInput,
     pub search_debounce: Option<Instant>,
+
+    // View to return to when leaving the editor
+    editor_return_to: Option<AppView>,
 }
 
 impl App {
@@ -84,6 +87,8 @@ impl App {
 
             search: TextInput::new("Search..."),
             search_debounce: None,
+
+            editor_return_to: None,
         };
 
         // Initial data load
@@ -283,6 +288,7 @@ impl App {
         match action {
             super::views::detail::DetailAction::None => AppAction::None,
             super::views::detail::DetailAction::EditTrack(id) => {
+                self.editor_return_to = Some(self.view.clone());
                 self.switch_view(AppView::Editor { track_id: id });
                 AppAction::None
             }
@@ -303,6 +309,7 @@ impl App {
         match action {
             super::views::collections::CollectionDetailAction::None => AppAction::None,
             super::views::collections::CollectionDetailAction::EditTrack(id) => {
+                self.editor_return_to = Some(self.view.clone());
                 self.switch_view(AppView::Editor { track_id: id });
                 AppAction::None
             }
@@ -331,8 +338,33 @@ impl App {
 
     fn handle_editor_key(&mut self, key: KeyEvent) -> AppAction {
         if keys::is_back(&key) && !self.editor.is_editing() {
-            // Go back to previous view
-            self.switch_view(AppView::Library);
+            // Return to the view we came from without reloading
+            // (preserves cursor position in album/collection detail)
+            let return_view = self.editor_return_to.take().unwrap_or(AppView::Library);
+
+            // If the editor made changes, refresh the underlying view's data
+            // but keep the cursor in place by re-running load (which clamps selection).
+            match &return_view {
+                AppView::AlbumDetail { album_id } => {
+                    let prev_selected = self.album_detail.selected;
+                    self.album_detail.load(&self.conn, *album_id).ok();
+                    if prev_selected < self.album_detail.tracks.len() {
+                        self.album_detail.selected = prev_selected;
+                    }
+                }
+                AppView::CollectionDetail { collection_id } => {
+                    let prev_selected = self.collection_detail.selected;
+                    self.collection_detail
+                        .load(&self.conn, *collection_id)
+                        .ok();
+                    if prev_selected < self.collection_detail.tracks.len() {
+                        self.collection_detail.selected = prev_selected;
+                    }
+                }
+                _ => {}
+            }
+
+            self.view = return_view;
             return AppAction::None;
         }
         self.editor.handle_key(key, &self.conn);
