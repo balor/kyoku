@@ -29,6 +29,7 @@ pub enum CollectionDetailAction {
 enum InputMode {
     Normal,
     Creating(TextInput),
+    Renaming { input: TextInput, id: i64 },
     ConfirmDelete,
 }
 
@@ -85,6 +86,22 @@ impl CollectionsView {
                 input.handle_key(key);
                 return CollectionsAction::None;
             }
+            InputMode::Renaming { input, id } => {
+                if keys::is_back(&key) {
+                    self.mode = InputMode::Normal;
+                    return CollectionsAction::None;
+                }
+                if keys::is_confirm(&key) {
+                    let name = input.value.trim().to_string();
+                    if !name.is_empty() {
+                        queries::rename_collection(conn, *id, &name).ok();
+                    }
+                    self.mode = InputMode::Normal;
+                    return CollectionsAction::Refresh;
+                }
+                input.handle_key(key);
+                return CollectionsAction::None;
+            }
             InputMode::ConfirmDelete => {
                 if key.code == KeyCode::Char('y') {
                     if let Some(coll) = self.collections.get(self.selected) {
@@ -119,9 +136,6 @@ impl CollectionsView {
         if keys::is_half_page_down(&key) && count > 0 {
             self.selected = (self.selected + 10).min(count - 1);
         }
-        if key.code == KeyCode::Char('g') {
-            self.selected = 0;
-        }
         if key.code == KeyCode::Char('G') && count > 0 {
             self.selected = count - 1;
         }
@@ -134,6 +148,20 @@ impl CollectionsView {
             let mut input = TextInput::new("Collection name...").with_label(" Name: ");
             input.focused = true;
             self.mode = InputMode::Creating(input);
+            return CollectionsAction::None;
+        }
+        if key.code == KeyCode::Char('R') {
+            if let Some(coll) = self.collections.get(self.selected) {
+                let mut input =
+                    TextInput::new("New collection name...").with_label(" Name: ");
+                input.value = coll.name.clone();
+                input.cursor = input.value.len();
+                input.focused = true;
+                self.mode = InputMode::Renaming {
+                    input,
+                    id: coll.id,
+                };
+            }
             return CollectionsAction::None;
         }
         if key.code == KeyCode::Char('d') && !self.collections.is_empty() {
@@ -213,6 +241,16 @@ impl CollectionsView {
             input.render(frame, inner, theme);
         }
 
+        // Render input overlay if renaming
+        if let InputMode::Renaming { input, .. } = &self.mode {
+            use crate::tui::widgets::popup;
+            use ratatui::text::Line;
+            let content = vec![Line::from("")];
+            let inner =
+                popup::render_popup(frame, area, theme, "Rename Collection", &content, 50, 5);
+            input.render(frame, inner, theme);
+        }
+
         // Render delete confirmation
         if matches!(self.mode, InputMode::ConfirmDelete) {
             use crate::tui::widgets::popup;
@@ -254,6 +292,7 @@ pub struct CollectionDetailView {
     pub selected: usize,
     pub scroll_offset: usize,
     confirm_remove: bool,
+    rename_input: Option<TextInput>,
 }
 
 impl Default for CollectionDetailView {
@@ -265,6 +304,7 @@ impl Default for CollectionDetailView {
             selected: 0,
             scroll_offset: 0,
             confirm_remove: false,
+            rename_input: None,
         }
     }
 }
@@ -302,7 +342,12 @@ impl CollectionDetailView {
         self.selected = 0;
         self.scroll_offset = 0;
         self.confirm_remove = false;
+        self.rename_input = None;
         Ok(())
+    }
+
+    pub fn has_popup(&self) -> bool {
+        self.confirm_remove || self.rename_input.is_some()
     }
 
     /// Reload tracks, preserving cursor position (clamped to filtered list).
@@ -329,6 +374,33 @@ impl CollectionDetailView {
         key: KeyEvent,
         conn: &Connection,
     ) -> CollectionDetailAction {
+        // Rename mode captures input
+        if let Some(input) = &mut self.rename_input {
+            if keys::is_back(&key) {
+                self.rename_input = None;
+                return CollectionDetailAction::None;
+            }
+            if keys::is_confirm(&key) {
+                let new_name = input.value.trim().to_string();
+                if let Some(coll) = &self.collection {
+                    if !new_name.is_empty() && new_name != coll.name {
+                        let id = coll.id;
+                        queries::rename_collection(conn, id, &new_name).ok();
+                        // Reload collection info while preserving cursor
+                        let prev = self.selected;
+                        self.load(conn, id).ok();
+                        if prev < self.tracks.len() {
+                            self.selected = prev;
+                        }
+                    }
+                }
+                self.rename_input = None;
+                return CollectionDetailAction::None;
+            }
+            input.handle_key(key);
+            return CollectionDetailAction::None;
+        }
+
         let visible = self.filtered_indices();
 
         // Confirmation popup captures input
@@ -367,9 +439,6 @@ impl CollectionDetailView {
         if keys::is_half_page_down(&key) && count > 0 {
             self.selected = (self.selected + 10).min(count - 1);
         }
-        if key.code == KeyCode::Char('g') {
-            self.selected = 0;
-        }
         if key.code == KeyCode::Char('G') && count > 0 {
             self.selected = count - 1;
         }
@@ -385,6 +454,17 @@ impl CollectionDetailView {
         }
         if key.code == KeyCode::Char('x') && current_track.is_some() {
             self.confirm_remove = true;
+            return CollectionDetailAction::None;
+        }
+        if key.code == KeyCode::Char('R') {
+            if let Some(coll) = &self.collection {
+                let mut input =
+                    TextInput::new("New collection name...").with_label(" Name: ");
+                input.value = coll.name.clone();
+                input.cursor = input.value.len();
+                input.focused = true;
+                self.rename_input = Some(input);
+            }
             return CollectionDetailAction::None;
         }
 
@@ -492,6 +572,15 @@ impl CollectionDetailView {
         .header(header);
 
         frame.render_widget(table, chunks[1]);
+
+        // Rename popup
+        if let Some(input) = &self.rename_input {
+            use crate::tui::widgets::popup;
+            let content = vec![Line::from("")];
+            let inner =
+                popup::render_popup(frame, area, theme, "Rename Collection", &content, 50, 5);
+            input.render(frame, inner, theme);
+        }
 
         // Confirmation popup for removing a track
         if self.confirm_remove {

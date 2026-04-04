@@ -156,8 +156,8 @@ impl App {
             return AppAction::None;
         }
 
-        // Global search: \ opens it from anywhere
-        if key.code == KeyCode::Char('\\') {
+        // Global search: g opens it from anywhere
+        if key.code == KeyCode::Char('g') {
             self.global_search.open();
             self.global_search_open = true;
             return AppAction::None;
@@ -306,7 +306,7 @@ impl App {
     }
 
     fn handle_detail_key(&mut self, key: KeyEvent) -> AppAction {
-        if keys::is_back(&key) && !self.album_detail.is_renaming() {
+        if keys::is_back(&key) && !self.album_detail.has_popup() {
             self.switch_view(AppView::Library);
             return AppAction::None;
         }
@@ -318,16 +318,11 @@ impl App {
                 self.switch_view(AppView::Editor { track_id: id });
                 AppAction::None
             }
-            super::views::detail::DetailAction::AddToCollection(track_id) => {
-                // Add to collection via popup - for now just show in status
-                let _ = track_id;
-                AppAction::None
-            }
         }
     }
 
     fn handle_collection_detail_key(&mut self, key: KeyEvent) -> AppAction {
-        if keys::is_back(&key) {
+        if keys::is_back(&key) && !self.collection_detail.has_popup() {
             self.switch_view(AppView::Collections);
             return AppAction::None;
         }
@@ -554,7 +549,7 @@ impl App {
                 ("Enter", "detail"),
                 ("i", "import"),
                 ("/", "filter"),
-                ("\\", "global"),
+                ("g", "search"),
                 ("s", "sort"),
                 ("Tab", "colls"),
                 ("q", "quit"),
@@ -587,6 +582,7 @@ impl App {
                 ("j/k", "nav"),
                 ("Enter", "browse"),
                 ("n", "new"),
+                ("R", "rename"),
                 ("d", "delete"),
                 ("Tab", "albums"),
                 ("q", "quit"),
@@ -615,7 +611,8 @@ impl App {
                 ("/", "filter"),
                 ("e", "edit"),
                 ("R", "rename"),
-                ("a", "add to coll"),
+                ("a", "+track"),
+                ("A", "+album"),
                 ("Esc", "back"),
             ],
         );
@@ -642,6 +639,7 @@ impl App {
                 ("j/k", "nav"),
                 ("/", "filter"),
                 ("e", "edit"),
+                ("R", "rename"),
                 ("x", "remove"),
                 ("Esc", "back"),
             ],

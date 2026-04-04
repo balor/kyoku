@@ -587,26 +587,28 @@ The scan is lightweight — it only checks for new file paths not yet in the dat
 
 **Design goal**: Search should feel like `rg` (ripgrep), not like SQL. A bare query just works.
 
-Search is TUI-only — always-visible at the top of the library browser. Typing immediately filters the view — no mode switching, no special key to "enter search mode." Just start typing. Press `/` to focus the search bar, `Esc` to clear.
+Search is TUI-only and comes in two flavours — a **local filter** scoped to the current view, and a **global search** across the whole library.
 
-#### Simple Search (90% use case)
-A bare query searches FTS5 across title, artist, and album simultaneously. No special syntax needed.
-- `radiohead` — finds anything with "radiohead" in title, artist, or album
-- `"ok computer"` — phrase search
-- `東方` — CJK search works identically
-- `björk homogenic` — multiple terms = AND
+#### Local Filter (`/`)
+Press `/` to focus the search bar at the top of the current view. Typing immediately filters the view in place — no mode switching. `Esc` clears.
 
-#### Filtered Search (when you need precision)
-Filters are always optional and combinable with the freeform query. They narrow, never replace.
+Scope depends on the current view:
+- **Library browser**: filters albums by title/artist (FTS5-backed)
+- **Album detail**: filters tracks inside the album by title/artist (in-memory)
+- **Collection detail**: filters tracks inside the collection by title/artist (in-memory)
+- **Collections**: filters the collection list by name (LIKE)
 
-**Available filters:**
-- Artist, album, title, genre, year, label
-- Audio format (mp3, flac, etc.)
-- Tag status (unmatched, matched, verified, manual)
-- Collection (collection name, supports fuzzy matching)
-- Loose tracks (not in any album)
-- Import date range (added after/before)
-- Bitrate range
+Queries are case-insensitive and multi-term (all terms must match somewhere). Unicode is handled natively — `東方` and `björk` work identically to ASCII.
+
+#### Global Search (`g`)
+Press `g` from any view to open a full-screen overlay that searches **everything** at once — albums, tracks and collections mixed together. Results are grouped by type and labelled `[album]`, `[track]`, `[coll]`. Selecting a result with Enter navigates to it directly (tracks jump to their containing album with the cursor positioned on the track).
+
+Matching is simple fuzzy-ish: each whitespace-separated term must appear as a case-insensitive substring somewhere in the record's searchable fields. Unicode-aware. Backed by FTS5 on the DB side with a client-side fuzzy pass for ranking.
+
+Use local filter when you know where you're looking and want to narrow; use global search when you just want to jump to something by name.
+
+#### Filtered Search (future)
+Planned for a later milestone: structured filters combinable with the freeform query — artist/album/title, genre, year, label, audio format, tag status, collection, loose tracks, import date range, bitrate range.
 
 ### 6.4 Collections (TUI only)
 
@@ -837,37 +839,71 @@ Note: `[loose]` is a virtual entry that groups all tracks without an album. It a
 #### Key Bindings
 ```
 Global:
-  q / Ctrl+C    Quit
-  ?  / F1       Help overlay
-  /             Focus search bar (immediately filters, no mode switch)
-  Esc           Back / cancel / close overlay / clear search
-  Tab           Switch between Albums ↔ Collections views
+  q / Ctrl+C         Quit
+  ? / F1             Help overlay
+  /                  Focus local filter bar (filters current list in place)
+  g                  Open global search (albums, tracks, collections)
+  Esc                Back / cancel / close overlay / clear search
+  Tab                Switch between Albums ↔ Collections views
+
+Navigation (any list view):
+  j / ↓              Move down
+  k / ↑              Move up
+  Ctrl+D             Half page down
+  Ctrl+U             Half page up
+  Ctrl+F / PgDn      Page down
+  Ctrl+B / PgUp      Page up
+  G                  Jump to bottom
 
 Library Browser:
-  j / ↓         Move down
-  k / ↑         Move up
-  Enter         Open album/collection detail
-  i             Start import wizard
-  s             Sort (cycle: artist, album, year, date added)
-  f             Filter menu (genre, format, status, year)
-  c             Switch to collections view
+  Enter              Open album detail
+  i                  Start import wizard
+  s                  Sort (cycle: artist, album, year, tracks)
+  c                  Switch to collections view
 
 Album Detail:
-  e             Edit tags (inline or TUI editor)
-  r             Re-match against MusicBrainz
-  m             Move/rename files (apply path template)
-  a             Add track(s) to a collection
-  o             Open file location in system file manager
-  Esc           Back to library
+  /                  Filter tracks in this album
+  e                  Edit tags (tag editor)
+  R                  Rename album
+  r                  Re-match against MusicBrainz (milestone 4)
+  m                  Move/rename files (milestone 5)
+  a                  Add track(s) to a collection
+  o                  Open file location in system file manager
+  Esc                Back to library
+
+Collections:
+  Enter              Browse collection
+  n                  Create new collection
+  d                  Delete collection (confirms)
+  Tab                Switch to albums
+
+Collection Detail:
+  /                  Filter tracks in this collection
+  e                  Edit tags
+  x                  Remove track from collection (confirms)
+  Esc                Back to collections
+
+Global Search (g):
+  Type               Query across albums, tracks and collections
+  j / k              Navigate results
+  Enter              Open selected result (albums/collections directly,
+                     tracks jump to their album with cursor positioned)
+  Esc                Close
 
 Import Wizard:
-  a             Accept match
-  S             Skip
-  A             Import as-is (no MB match, keep current tags)
-  n             Next candidate
-  p             Previous candidate
-  Enter         Confirm and apply
-  e             Edit before applying
+  A                  Import as-is (no MB match, keep current tags)
+  S                  Skip group
+  L                  Import loose (no album grouping)
+  a                  Accept match (milestone 4)
+  n / p              Next / previous group
+  Enter              Confirm and import
+  e                  Edit before applying (milestone 4)
+
+Tag Editor:
+  Enter              Edit selected field
+  Tab                Next field
+  Ctrl+S             Save changes to DB
+  Esc                Cancel edit / back to previous view
 ```
 
 ---
@@ -1028,15 +1064,18 @@ pub enum KyokuError {
 ### Milestone 3: TUI (primary interface)
 **Goal**: Full interactive terminal UI — this is what users will spend most time in.
 
-- [ ] TUI app skeleton (ratatui + crossterm, event loop, view routing)
-- [ ] Library browser view (sortable table, inline search bar, loose tracks section)
-- [ ] Collections view (Tab to switch, create/browse/delete)
-- [ ] Album detail view
-- [ ] Import wizard (guided pipeline with progress + diff, as-is/loose options prominent)
-- [ ] Tag editor view (inline field editing)
-- [ ] Inbox indicator (shows count of unimported files from inbox_dirs)
-- [ ] Key bindings + help overlay
-- [ ] Theming support (4 built-in themes in `themes.rs`, selected from config, semantic color slots)
+- [x] TUI app skeleton (ratatui + crossterm, event loop, view routing, panic hook)
+- [x] Library browser view (sortable table, inline search bar, loose tracks section)
+- [x] Collections view (Tab to switch, create/browse/delete with confirmation)
+- [x] Collection detail view (track listing, remove track with confirmation)
+- [x] Album detail view (track listing, album rename with `R`)
+- [x] Import wizard (guided pipeline with progress, as-is/skip/loose options; MB matching stubbed for milestone 4)
+- [x] Tag editor view (inline field editing; DB-only for now, file tag writing deferred)
+- [x] Inbox indicator (shows count of unimported files from inbox_dirs)
+- [x] Key bindings + help overlay
+- [x] Theming support (4 built-in themes in `themes.rs`, selected from config, semantic color slots)
+- [x] Two-mode search: local filter (`/`) per-view + global search (`g`) across albums/tracks/collections with fuzzy-ish matching
+- [x] FTS5 triggers (migration `002_fts_triggers.sql`) for auto-synced full-text index
 
 ### Milestone 4: MusicBrainz Integration
 **Goal**: You can match albums against MusicBrainz and auto-tag.

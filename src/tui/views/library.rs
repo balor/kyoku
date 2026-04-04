@@ -132,11 +132,6 @@ impl LibraryView {
             return LibraryAction::SortChanged;
         }
 
-        if key.code == KeyCode::Char('g') {
-            self.selected = 0;
-            return LibraryAction::None;
-        }
-
         if key.code == KeyCode::Char('G') {
             if count > 0 {
                 self.selected = count - 1;

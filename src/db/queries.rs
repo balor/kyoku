@@ -599,6 +599,27 @@ pub fn rename_album(conn: &Connection, album_id: i64, new_title: &str) -> Result
     Ok(())
 }
 
+/// Rename a collection.
+pub fn rename_collection(conn: &Connection, collection_id: i64, new_name: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE collections SET name = ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![new_name, collection_id],
+    )?;
+    Ok(())
+}
+
+/// Find a collection by name (case-insensitive exact match).
+pub fn find_collection_by_name(conn: &Connection, name: &str) -> Result<Option<i64>> {
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM collections WHERE name = ?1 COLLATE NOCASE",
+            [name],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(id)
+}
+
 /// Rebuild the FTS5 index from existing track data.
 pub fn rebuild_fts_index(conn: &Connection) -> Result<()> {
     conn.execute_batch(
