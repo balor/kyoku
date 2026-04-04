@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use crate::error::Result;
 
 /// Current schema version.
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 /// Initialize the database schema. Creates tables if they don't exist
 /// and runs any pending migrations.
@@ -14,8 +14,11 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     let version = get_schema_version(conn)?;
     if version < 1 {
         apply_v1(conn)?;
-        set_schema_version(conn, SCHEMA_VERSION)?;
     }
+    if version < 2 {
+        apply_v2(conn)?;
+    }
+    set_schema_version(conn, SCHEMA_VERSION)?;
 
     Ok(())
 }
@@ -35,6 +38,11 @@ fn apply_v1(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn apply_v2(conn: &Connection) -> Result<()> {
+    conn.execute_batch(include_str!("../../migrations/002_fts_triggers.sql"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45,7 +53,7 @@ mod tests {
         initialize(&conn).unwrap();
 
         let version = get_schema_version(&conn).unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, SCHEMA_VERSION);
 
         // Verify tables exist
         let count: i32 = conn
@@ -65,6 +73,6 @@ mod tests {
         initialize(&conn).unwrap();
 
         let version = get_schema_version(&conn).unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, SCHEMA_VERSION);
     }
 }

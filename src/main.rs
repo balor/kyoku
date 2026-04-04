@@ -44,9 +44,8 @@ fn main() -> anyhow::Result<()> {
                 println!();
                 println!("Run `kyoku setup` to get started.");
             } else {
-                // Launch TUI (future milestone)
-                println!("kyoku TUI — not yet implemented. Use a subcommand.");
-                println!("Run `kyoku --help` for available commands.");
+                let conn = db::open_database(config::paths::database_file())?;
+                tui::run(conn, settings)?;
             }
         }
         Some(Command::Import {

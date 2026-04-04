@@ -34,6 +34,9 @@ anyhow = "1"
 walkdir = "2"
 dirs = "6"
 
+# Unicode
+unicode-width = "0.2"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
