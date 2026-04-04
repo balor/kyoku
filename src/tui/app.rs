@@ -122,8 +122,9 @@ impl App {
             return self.handle_global_search_action(action);
         }
 
-        // Global keys (always active unless search is focused)
-        if !self.search.focused {
+        // Global keys (suppressed when a view popup is accepting text input)
+        let view_captures_input = self.current_view_has_popup();
+        if !self.search.focused && !view_captures_input {
             if keys::is_quit(&key) {
                 return AppAction::Quit;
             }
@@ -151,13 +152,13 @@ impl App {
             return AppAction::None;
         }
 
-        if keys::is_search_focus(&key) {
+        if !view_captures_input && keys::is_search_focus(&key) {
             self.search.focused = true;
             return AppAction::None;
         }
 
         // Global search: g opens it from anywhere
-        if key.code == KeyCode::Char('g') {
+        if !view_captures_input && key.code == KeyCode::Char('g') {
             self.global_search.open();
             self.global_search_open = true;
             return AppAction::None;
@@ -172,6 +173,17 @@ impl App {
             AppView::Import => self.handle_import_key(key),
             AppView::Editor { .. } => self.handle_editor_key(key),
             AppView::Help => AppAction::None,
+        }
+    }
+
+    /// Returns true if the current view has a modal popup that should capture text input.
+    fn current_view_has_popup(&self) -> bool {
+        match self.view {
+            AppView::Library => self.library.has_popup(),
+            AppView::AlbumDetail { .. } => self.album_detail.has_popup(),
+            AppView::CollectionDetail { .. } => self.collection_detail.has_popup(),
+            AppView::Editor { .. } => self.editor.is_editing(),
+            _ => false,
         }
     }
 
@@ -248,15 +260,18 @@ impl App {
     }
 
     fn handle_library_key(&mut self, key: KeyEvent) -> AppAction {
-        if keys::is_tab_switch(&key) || key.code == KeyCode::Char('c') {
-            self.switch_view(AppView::Collections);
-            return AppAction::None;
+        // If the library has an open popup (e.g. add-to-collection), route to it first
+        if !self.library.has_popup() {
+            if keys::is_tab_switch(&key) || key.code == KeyCode::Char('c') {
+                self.switch_view(AppView::Collections);
+                return AppAction::None;
+            }
+            if key.code == KeyCode::Char('i') {
+                self.switch_view(AppView::Import);
+                return AppAction::None;
+            }
         }
-        if key.code == KeyCode::Char('i') {
-            self.switch_view(AppView::Import);
-            return AppAction::None;
-        }
-        let action = self.library.handle_key(key);
+        let action = self.library.handle_key(key, &self.conn);
         self.process_library_action(action)
     }
 
@@ -550,6 +565,7 @@ impl App {
                 ("i", "import"),
                 ("/", "filter"),
                 ("g", "search"),
+                ("a", "add to coll"),
                 ("s", "sort"),
                 ("Tab", "colls"),
                 ("q", "quit"),
@@ -611,8 +627,7 @@ impl App {
                 ("/", "filter"),
                 ("e", "edit"),
                 ("R", "rename"),
-                ("a", "+track"),
-                ("A", "+album"),
+                ("a", "add to coll"),
                 ("Esc", "back"),
             ],
         );

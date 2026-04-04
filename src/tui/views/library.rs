@@ -5,12 +5,14 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use rusqlite::Connection;
+
 use unicode_width::UnicodeWidthStr;
 
 use crate::db::queries::{self, AlbumRow, AlbumSort};
 use crate::error::Result;
 use crate::tui::keybindings as keys;
 use crate::tui::themes::Theme;
+use crate::tui::widgets::add_to_collection::{AddToCollectionPopup, PopupAction};
 
 pub enum LibraryAction {
     None,
@@ -26,6 +28,8 @@ pub struct LibraryView {
     pub loose_count: i64,
     pub sort: AlbumSort,
     pub sort_ascending: bool,
+    pub add_to_collection: Option<AddToCollectionPopup>,
+    pub notice: Option<String>,
 }
 
 impl Default for LibraryView {
@@ -38,6 +42,8 @@ impl Default for LibraryView {
             loose_count: 0,
             sort: AlbumSort::Artist,
             sort_ascending: true,
+            add_to_collection: None,
+            notice: None,
         }
     }
 }
@@ -78,7 +84,27 @@ impl LibraryView {
         }
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> LibraryAction {
+    pub fn has_popup(&self) -> bool {
+        self.add_to_collection.is_some()
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent, conn: &Connection) -> LibraryAction {
+        // Popup captures input
+        if let Some(popup) = &mut self.add_to_collection {
+            match popup.handle_key(key, conn) {
+                PopupAction::None => {}
+                PopupAction::Closed(notice) => {
+                    self.add_to_collection = None;
+                    if let Some(n) = notice {
+                        if !n.is_empty() {
+                            self.notice = Some(n);
+                        }
+                    }
+                }
+            }
+            return LibraryAction::None;
+        }
+
         let count = self.item_count();
 
         if keys::is_up(&key) {
@@ -135,6 +161,23 @@ impl LibraryView {
         if key.code == KeyCode::Char('G') {
             if count > 0 {
                 self.selected = count - 1;
+            }
+            return LibraryAction::None;
+        }
+
+        if key.code == KeyCode::Char('a') {
+            // Add whole album (all tracks of selected album) to a collection
+            if self.selected < self.albums.len() {
+                let album = &self.albums[self.selected];
+                if let Ok(tracks) = queries::get_album_tracks(conn, album.id) {
+                    if !tracks.is_empty() {
+                        let ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
+                        let display =
+                            format!("{} ({} tracks)", album.title, tracks.len());
+                        self.add_to_collection =
+                            Some(AddToCollectionPopup::open(ids, display, conn));
+                    }
+                }
             }
             return LibraryAction::None;
         }
@@ -242,9 +285,23 @@ impl LibraryView {
         );
 
         frame.render_widget(table, area);
+
+        // Add-to-collection popup overlay
+        if let Some(popup) = &self.add_to_collection {
+            popup.render(frame, area, theme);
+        }
     }
 
     pub fn render_detail_bar(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        if let Some(notice) = &self.notice {
+            let p = Paragraph::new(Span::styled(
+                format!(" {} ", notice),
+                Style::default().fg(theme.green),
+            ))
+            .style(Style::default().bg(theme.bg_alt));
+            frame.render_widget(p, area);
+            return;
+        }
         if self.selected < self.albums.len() {
             let album = &self.albums[self.selected];
             let artist = album.album_artist.as_deref().unwrap_or("(unknown)");
