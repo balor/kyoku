@@ -88,18 +88,51 @@ fn main() -> anyhow::Result<()> {
                 total.imported += result.imported;
                 total.skipped_duplicate += result.skipped_duplicate;
                 total.skipped_error += result.skipped_error;
+                total.added_to_collection += result.added_to_collection;
                 total.albums_created += result.albums_created;
+                total.albums_existing += result.albums_existing;
+                total.collection_created |= result.collection_created;
                 total.errors.extend(result.errors);
             }
 
             println!();
+            if total.albums_created > 0 {
+                println!("Albums created: {}", total.albums_created);
+            }
+            if total.albums_existing > 0 {
+                println!("Added to existing albums: {}", total.albums_existing);
+            }
+            if let Some(ref name) = collection {
+                let newly_imported = total.imported;
+                let existing = total.added_to_collection;
+                if newly_imported > 0 || existing > 0 {
+                    let label = if total.collection_created {
+                        "Collection created"
+                    } else {
+                        "Collection"
+                    };
+                    let mut parts = Vec::new();
+                    if newly_imported > 0 {
+                        parts.push(format!(
+                            "{} {}",
+                            newly_imported,
+                            if newly_imported == 1 { "track" } else { "tracks" }
+                        ));
+                    }
+                    if existing > 0 {
+                        parts.push(format!(
+                            "{} existing {} added",
+                            existing,
+                            if existing == 1 { "track" } else { "tracks" }
+                        ));
+                    }
+                    println!("{}: {} ({})", label, name, parts.join(", "));
+                }
+            }
             println!(
                 "Import complete: {} imported, {} skipped (duplicate), {} errors",
                 total.imported, total.skipped_duplicate, total.skipped_error
             );
-            if total.albums_created > 0 {
-                println!("Albums created: {}", total.albums_created);
-            }
             if !total.errors.is_empty() {
                 println!("\nErrors:");
                 for (path, err) in &total.errors {

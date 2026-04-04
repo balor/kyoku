@@ -15,7 +15,10 @@ pub struct ImportResult {
     pub imported: u32,
     pub skipped_duplicate: u32,
     pub skipped_error: u32,
+    pub added_to_collection: u32,
     pub albums_created: u32,
+    pub albums_existing: u32,
+    pub collection_created: bool,
     pub errors: Vec<(String, String)>,
 }
 
@@ -111,6 +114,7 @@ pub fn import(
     // Read tags for all files
     let mut tracks: Vec<Track> = Vec::new();
     let mut tag_data_map: Vec<Option<tagger::TagData>> = Vec::new();
+    let mut duplicate_track_ids: Vec<(i64, String)> = Vec::new();
 
     for file_path in &files {
         let abs_path = std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.clone());
@@ -118,7 +122,13 @@ pub fn import(
 
         // Check for duplicates
         if queries::track_exists_by_path(conn, &path_str)? {
-            eprintln!("  skip (already imported): {}", file_path.display());
+            if collection.is_some() {
+                if let Some(track_id) = queries::get_track_id_by_path(conn, &path_str)? {
+                    duplicate_track_ids.push((track_id, file_path.display().to_string()));
+                }
+            } else {
+                eprintln!("  skip (already imported): {}", file_path.display());
+            }
             result.skipped_duplicate += 1;
             continue;
         }
@@ -140,8 +150,35 @@ pub fn import(
         }
     }
 
+    // Ensure collection exists if requested
+    let collection_id = if let Some(name) = collection {
+        if !pretend {
+            let (id, created) = queries::get_or_create_collection(conn, name)?;
+            result.collection_created = created;
+            Some(id)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Add existing duplicate tracks to the collection
+    if let Some(coll_id) = collection_id {
+        for (track_id, path) in &duplicate_track_ids {
+            if queries::add_track_to_collection(conn, coll_id, *track_id)? {
+                eprintln!("  added to collection: {}", path);
+                result.added_to_collection += 1;
+            } else {
+                eprintln!("  skip (already in collection): {}", path);
+            }
+        }
+    }
+
     if tracks.is_empty() {
-        println!("No new tracks to import.");
+        if result.added_to_collection == 0 {
+            println!("No new tracks to import.");
+        }
         return Ok(result);
     }
 
@@ -170,13 +207,6 @@ pub fn import(
         return Ok(result);
     }
 
-    // Ensure collection exists if requested
-    let collection_id = if let Some(name) = collection {
-        Some(queries::get_or_create_collection(conn, name)?)
-    } else {
-        None
-    };
-
     // Insert into database
     let tx = conn.unchecked_transaction()?;
 
@@ -187,7 +217,7 @@ pub fn import(
 
             if let Some(tag_data) = first_tag {
                 if let Some(album_title) = &tag_data.album {
-                    let id = queries::insert_album(
+                    let (id, created) = queries::get_or_create_album(
                         &tx,
                         album_title,
                         tag_data.album_artist.as_deref(),
@@ -195,7 +225,11 @@ pub fn import(
                         tag_data.genre.as_deref(),
                         indices.len() as u32,
                     )?;
-                    result.albums_created += 1;
+                    if created {
+                        result.albums_created += 1;
+                    } else {
+                        result.albums_existing += 1;
+                    }
                     Some(id)
                 } else {
                     None
@@ -323,6 +357,33 @@ mod tests {
                 "SELECT COUNT(*) FROM collection_tracks ct
                  JOIN collections c ON c.id = ct.collection_id
                  WHERE c.name = 'Test Collection'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(count >= 3);
+    }
+
+    #[test]
+    fn test_reimport_with_collection_adds_existing_tracks() {
+        let conn = db::open_memory().unwrap();
+        // Import once without collection
+        let result1 = import(&conn, fixtures_dir(), true, false, None).unwrap();
+        assert!(result1.imported >= 3);
+
+        // Re-import with collection — duplicates should be added to collection
+        let result2 = import(&conn, fixtures_dir(), true, false, Some("Favorites")).unwrap();
+        assert_eq!(result2.imported, 0);
+        assert!(result2.skipped_duplicate >= 3);
+        assert!(result2.added_to_collection >= 3);
+        assert!(result2.collection_created);
+
+        // Verify tracks are in the collection
+        let count: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM collection_tracks ct
+                 JOIN collections c ON c.id = ct.collection_id
+                 WHERE c.name = 'Favorites'",
                 [],
                 |row| row.get(0),
             )

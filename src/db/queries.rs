@@ -13,6 +13,18 @@ pub fn track_exists_by_path(conn: &Connection, path: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
+/// Get the track ID for a given file path, if it exists.
+pub fn get_track_id_by_path(conn: &Connection, path: &str) -> Result<Option<i64>> {
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM tracks WHERE file_path = ?1",
+            [path],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(id)
+}
+
 /// Insert a track into the database. Returns the new track ID.
 pub fn insert_track(
     conn: &Connection,
@@ -45,25 +57,38 @@ pub fn insert_track(
     Ok(conn.last_insert_rowid())
 }
 
-/// Insert an album into the database. Returns the new album ID.
-pub fn insert_album(
+/// Get or create an album. Returns (album_id, created).
+pub fn get_or_create_album(
     conn: &Connection,
     title: &str,
     album_artist: Option<&str>,
     year: Option<i32>,
     genre: Option<&str>,
     track_total: u32,
-) -> Result<i64> {
+) -> Result<(i64, bool)> {
+    // Match by title + album_artist (both must match, including NULL)
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM albums WHERE title = ?1 AND album_artist IS ?2",
+            rusqlite::params![title, album_artist],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if let Some(id) = existing {
+        return Ok((id, false));
+    }
+
     conn.execute(
         "INSERT INTO albums (title, album_artist, year, genre, track_total)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![title, album_artist, year, genre, track_total],
     )?;
-    Ok(conn.last_insert_rowid())
+    Ok((conn.last_insert_rowid(), true))
 }
 
-/// Get or create a collection by name. Returns the collection ID.
-pub fn get_or_create_collection(conn: &Connection, name: &str) -> Result<i64> {
+/// Get or create a collection by name. Returns (collection_id, created).
+pub fn get_or_create_collection(conn: &Connection, name: &str) -> Result<(i64, bool)> {
     let existing: Option<i64> = conn
         .query_row(
             "SELECT id FROM collections WHERE name = ?1",
@@ -73,20 +98,20 @@ pub fn get_or_create_collection(conn: &Connection, name: &str) -> Result<i64> {
         .ok();
 
     if let Some(id) = existing {
-        return Ok(id);
+        return Ok((id, false));
     }
 
     conn.execute("INSERT INTO collections (name) VALUES (?1)", [name])?;
-    Ok(conn.last_insert_rowid())
+    Ok((conn.last_insert_rowid(), true))
 }
 
-/// Add a track to a collection.
-pub fn add_track_to_collection(conn: &Connection, collection_id: i64, track_id: i64) -> Result<()> {
+/// Add a track to a collection. Returns true if the track was newly added.
+pub fn add_track_to_collection(conn: &Connection, collection_id: i64, track_id: i64) -> Result<bool> {
     conn.execute(
         "INSERT OR IGNORE INTO collection_tracks (collection_id, track_id) VALUES (?1, ?2)",
         rusqlite::params![collection_id, track_id],
     )?;
-    Ok(())
+    Ok(conn.changes() > 0)
 }
 
 /// Count total tracks in the database.
@@ -145,11 +170,18 @@ mod tests {
     #[test]
     fn test_insert_album_and_track() {
         let conn = db::open_memory().unwrap();
-        let album_id =
-            insert_album(&conn, "Test Album", Some("Artist"), Some(2024), None, 10).unwrap();
+        let (album_id, created) =
+            get_or_create_album(&conn, "Test Album", Some("Artist"), Some(2024), None, 10).unwrap();
+        assert!(created);
         let track = test_track();
         let track_id = insert_track(&conn, &track, Some(album_id), None).unwrap();
         assert!(album_id > 0);
+
+        // Same album again — should return existing
+        let (album_id2, created2) =
+            get_or_create_album(&conn, "Test Album", Some("Artist"), Some(2024), None, 10).unwrap();
+        assert!(!created2);
+        assert_eq!(album_id, album_id2);
         assert!(track_id > 0);
 
         let count = count_albums(&conn).unwrap();
@@ -159,12 +191,14 @@ mod tests {
     #[test]
     fn test_collection_create_and_add() {
         let conn = db::open_memory().unwrap();
-        let coll_id = get_or_create_collection(&conn, "My Playlist").unwrap();
+        let (coll_id, created) = get_or_create_collection(&conn, "My Playlist").unwrap();
         assert!(coll_id > 0);
+        assert!(created);
 
-        // Get again — should return same ID
-        let coll_id2 = get_or_create_collection(&conn, "My Playlist").unwrap();
+        // Get again — should return same ID, not created
+        let (coll_id2, created2) = get_or_create_collection(&conn, "My Playlist").unwrap();
         assert_eq!(coll_id, coll_id2);
+        assert!(!created2);
 
         // Add a track
         let track = test_track();
