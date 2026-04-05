@@ -102,7 +102,7 @@ impl ImportView {
         match self.step {
             ImportStep::SelectSource => {
                 if keys::is_confirm(&key) && !self.source_paths.is_empty() {
-                    self.start_scan();
+                    self.start_scan(conn);
                 }
             }
             ImportStep::Scanning => {
@@ -165,19 +165,28 @@ impl ImportView {
         }
     }
 
-    fn start_scan(&mut self) {
+    fn start_scan(&mut self, conn: &Connection) {
         self.step = ImportStep::Scanning;
-        let paths = self.source_paths.clone();
+
+        // Filter out files that are already in the DB (main thread — needs conn).
+        // This is the same logic used by `kyoku scan` for the inbox indicator.
+        let unimported = importer::scan_inbox(conn, &self.source_paths).unwrap_or_default();
+
         let (tx, rx) = mpsc::channel();
         self.scan_rx = Some(rx);
 
-        std::thread::spawn(move || {
-            let mut all_files = Vec::new();
-            for path in &paths {
-                let files = importer::scan_audio_files(path);
-                all_files.extend(files);
-            }
+        // If nothing to import, jump straight to Review (empty) so the user
+        // gets feedback instead of a hanging Scanning screen.
+        if unimported.is_empty() {
+            self.groups.clear();
+            self.current_group = 0;
+            self.step = ImportStep::Review;
+            self.scan_rx = None;
+            return;
+        }
 
+        std::thread::spawn(move || {
+            let all_files = unimported;
             let total = all_files.len();
             let mut groups: std::collections::HashMap<String, Vec<(Track, Option<tagger::TagData>)>> =
                 std::collections::HashMap::new();
@@ -321,14 +330,20 @@ impl ImportView {
         match self.step {
             ImportStep::SelectSource => vec![("Enter", "start scan"), ("Esc", "cancel")],
             ImportStep::Scanning => vec![],
-            ImportStep::Review => vec![
-                ("A", "as-is"),
-                ("S", "skip"),
-                ("L", "loose"),
-                ("n/p", "nav groups"),
-                ("Enter", "import"),
-                ("Esc", "cancel"),
-            ],
+            ImportStep::Review => {
+                if self.groups.is_empty() {
+                    vec![("Esc", "back")]
+                } else {
+                    vec![
+                        ("A", "as-is"),
+                        ("S", "skip"),
+                        ("L", "loose"),
+                        ("n/p", "nav groups"),
+                        ("Enter", "import"),
+                        ("Esc", "cancel"),
+                    ]
+                }
+            }
             ImportStep::Importing => vec![],
             ImportStep::Complete => vec![("Enter/Esc", "done")],
         }

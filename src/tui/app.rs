@@ -250,6 +250,13 @@ impl App {
                     .ok();
             }
             AppView::Import => {
+                // Refresh inbox count on entry so it matches what the wizard will find
+                self.inbox_count = crate::core::importer::scan_inbox(
+                    &self.conn,
+                    &self.settings.library.inbox_dirs,
+                )
+                .map(|v| v.len())
+                .unwrap_or(0);
                 self.import
                     .start(&self.settings.library.inbox_dirs, &self.conn);
             }
@@ -371,15 +378,23 @@ impl App {
     fn handle_import_key(&mut self, key: KeyEvent) -> AppAction {
         if keys::is_back(&key) && self.import.can_cancel() {
             self.switch_view(AppView::Library);
-            self.track_count = queries::count_tracks(&self.conn).unwrap_or(0);
+            self.refresh_counts();
             return AppAction::None;
         }
         self.import.handle_key(key, &self.conn);
         if self.import.is_complete() && keys::is_confirm(&key) {
             self.switch_view(AppView::Library);
-            self.track_count = queries::count_tracks(&self.conn).unwrap_or(0);
+            self.refresh_counts();
         }
         AppAction::None
+    }
+
+    fn refresh_counts(&mut self) {
+        self.track_count = queries::count_tracks(&self.conn).unwrap_or(0);
+        self.inbox_count =
+            crate::core::importer::scan_inbox(&self.conn, &self.settings.library.inbox_dirs)
+                .map(|v| v.len())
+                .unwrap_or(0);
     }
 
     fn handle_global_search_action(&mut self, action: GlobalSearchAction) -> AppAction {

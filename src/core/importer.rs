@@ -282,9 +282,15 @@ pub fn scan_inbox(
         for file_path in files {
             let abs_path = std::fs::canonicalize(&file_path).unwrap_or(file_path);
             let path_str = abs_path.display().to_string();
-            if !queries::track_exists_by_path(conn, &path_str)? {
-                unimported.push(abs_path);
+            if queries::track_exists_by_path(conn, &path_str)? {
+                continue;
             }
+            // Verify the file is actually readable as audio. Files that fail
+            // this check are silently skipped — user can delete or fix them.
+            if tagger::read_track(&abs_path).is_err() {
+                continue;
+            }
+            unimported.push(abs_path);
         }
     }
 
