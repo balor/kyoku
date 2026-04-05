@@ -133,6 +133,10 @@ impl App {
                 self.help.visible = true;
                 return AppAction::None;
             }
+            if keys::is_refresh(&key) {
+                self.refresh();
+                return AppAction::None;
+            }
         }
 
         // Search bar handling
@@ -397,6 +401,55 @@ impl App {
                 .unwrap_or(0);
     }
 
+    /// Full refresh: reloads counts and the current view's data from disk/DB.
+    /// Useful when files are added to the inbox while the TUI is running.
+    fn refresh(&mut self) {
+        self.refresh_counts();
+
+        let search_query = if self.search.value.is_empty() {
+            None
+        } else {
+            Some(self.search.value.clone())
+        };
+
+        match &self.view {
+            AppView::Library => {
+                self.library
+                    .load(&self.conn, search_query.as_deref())
+                    .ok();
+            }
+            AppView::Collections => {
+                self.collections
+                    .load(&self.conn, search_query.as_deref())
+                    .ok();
+            }
+            AppView::AlbumDetail { album_id } => {
+                let prev = self.album_detail.selected;
+                self.album_detail.load(&self.conn, *album_id).ok();
+                if prev < self.album_detail.tracks.len() {
+                    self.album_detail.selected = prev;
+                }
+            }
+            AppView::LooseTracks => {
+                let prev = self.album_detail.selected;
+                self.album_detail.load_loose(&self.conn).ok();
+                if prev < self.album_detail.tracks.len() {
+                    self.album_detail.selected = prev;
+                }
+            }
+            AppView::CollectionDetail { collection_id } => {
+                let prev = self.collection_detail.selected;
+                self.collection_detail
+                    .load(&self.conn, *collection_id)
+                    .ok();
+                if prev < self.collection_detail.tracks.len() {
+                    self.collection_detail.selected = prev;
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn handle_global_search_action(&mut self, action: GlobalSearchAction) -> AppAction {
         match action {
             GlobalSearchAction::None => AppAction::None,
@@ -601,6 +654,7 @@ impl App {
                 ("g", "search"),
                 ("a", "add to coll"),
                 ("s", "sort"),
+                ("F5", "refresh"),
                 ("Tab", "colls"),
                 ("q", "quit"),
             ],

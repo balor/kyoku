@@ -54,3 +54,8 @@ pub fn is_half_page_up(key: &KeyEvent) -> bool {
 pub fn is_half_page_down(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d')
 }
+
+pub fn is_refresh(key: &KeyEvent) -> bool {
+    key.code == KeyCode::F(5)
+        || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r'))
+}

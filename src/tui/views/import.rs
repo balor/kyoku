@@ -125,8 +125,29 @@ impl ImportView {
             return;
         }
 
+        // In summary state: Enter confirms (or closes if nothing to import),
+        // p goes back to the last group to change a decision.
+        if self.is_in_summary() {
+            match key.code {
+                KeyCode::Char('p') => self.prev_group(),
+                KeyCode::Enter => {
+                    if self.groups.iter().all(|g| g.action == GroupAction::Skip) {
+                        // Nothing to import — emit an empty completion so the
+                        // app can close the wizard on the next Enter.
+                        self.result_summary =
+                            Some("Nothing imported (all groups skipped)".to_string());
+                        self.step = ImportStep::Complete;
+                    } else {
+                        self.start_import(conn);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match key.code {
-            KeyCode::Char('A') => {
+            KeyCode::Char('A') | KeyCode::Enter => {
                 if let Some(group) = self.groups.get_mut(self.current_group) {
                     group.action = GroupAction::AcceptAsIs;
                 }
@@ -146,15 +167,14 @@ impl ImportView {
             }
             KeyCode::Char('n') => self.next_group(),
             KeyCode::Char('p') => self.prev_group(),
-            KeyCode::Enter => {
-                self.start_import(conn);
-            }
             _ => {}
         }
     }
 
+    /// Advance cursor by one group. When called on the last group, advances
+    /// *past* the end into the review-summary state (current_group == len()).
     fn next_group(&mut self) {
-        if !self.groups.is_empty() && self.current_group < self.groups.len() - 1 {
+        if self.current_group < self.groups.len() {
             self.current_group += 1;
         }
     }
@@ -163,6 +183,10 @@ impl ImportView {
         if self.current_group > 0 {
             self.current_group -= 1;
         }
+    }
+
+    fn is_in_summary(&self) -> bool {
+        !self.groups.is_empty() && self.current_group >= self.groups.len()
     }
 
     fn start_scan(&mut self, conn: &Connection) {
@@ -241,6 +265,15 @@ impl ImportView {
             .cloned()
             .collect();
 
+        // Count tracks in groups the user marked Skip — we want to show
+        // those in the summary so the user sees what they decided to drop.
+        let user_skipped: u32 = self
+            .groups
+            .iter()
+            .filter(|g| g.action == GroupAction::Skip)
+            .map(|g| g.tracks.len() as u32)
+            .sum();
+
         let total_tracks: usize = groups_to_import.iter().map(|g| g.tracks.len()).sum();
         self.import_progress = (0, total_tracks);
 
@@ -297,10 +330,17 @@ impl ImportView {
             }
         }
 
-        self.result_summary = Some(format!(
-            "Imported: {}, Skipped: {}, Errors: {}",
-            imported, skipped, errors
-        ));
+        let mut parts = vec![format!("Imported: {}", imported)];
+        if skipped > 0 {
+            parts.push(format!("Duplicates: {}", skipped));
+        }
+        if user_skipped > 0 {
+            parts.push(format!("Skipped: {}", user_skipped));
+        }
+        if errors > 0 {
+            parts.push(format!("Errors: {}", errors));
+        }
+        self.result_summary = Some(parts.join(", "));
         self.step = ImportStep::Complete;
     }
 
@@ -333,13 +373,18 @@ impl ImportView {
             ImportStep::Review => {
                 if self.groups.is_empty() {
                     vec![("Esc", "back")]
+                } else if self.is_in_summary() {
+                    if self.groups.iter().all(|g| g.action == GroupAction::Skip) {
+                        vec![("Enter", "close"), ("p", "back"), ("Esc", "cancel")]
+                    } else {
+                        vec![("Enter", "import"), ("p", "back"), ("Esc", "cancel")]
+                    }
                 } else {
                     vec![
-                        ("A", "as-is"),
+                        ("Enter/A", "as-is"),
                         ("S", "skip"),
                         ("L", "loose"),
                         ("n/p", "nav groups"),
-                        ("Enter", "import"),
                         ("Esc", "cancel"),
                     ]
                 }
@@ -474,6 +519,12 @@ impl ImportView {
             return;
         }
 
+        // Review summary state: cursor is past the last group
+        if self.is_in_summary() {
+            self.render_review_summary(frame, inner, theme);
+            return;
+        }
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -531,6 +582,97 @@ impl ImportView {
         }
         let p = Paragraph::new(lines);
         frame.render_widget(p, chunks[2]);
+    }
+
+    fn render_review_summary(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let mut accept = 0usize;
+        let mut loose = 0usize;
+        let mut skip = 0usize;
+        let mut accept_tracks = 0usize;
+        let mut loose_tracks = 0usize;
+        let mut skip_tracks = 0usize;
+        for g in &self.groups {
+            match g.action {
+                GroupAction::AcceptAsIs => {
+                    accept += 1;
+                    accept_tracks += g.tracks.len();
+                }
+                GroupAction::Loose => {
+                    loose += 1;
+                    loose_tracks += g.tracks.len();
+                }
+                GroupAction::Skip => {
+                    skip += 1;
+                    skip_tracks += g.tracks.len();
+                }
+            }
+        }
+
+        let all_skipped = accept == 0 && loose == 0;
+
+        let mut lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                " All groups reviewed",
+                Style::default()
+                    .fg(theme.fg)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+        ];
+
+        if accept > 0 {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {} group(s) ", accept),
+                    Style::default().fg(theme.fg_dim),
+                ),
+                Span::styled("accept as-is", Style::default().fg(theme.green)),
+                Span::styled(
+                    format!(" · {} tracks", accept_tracks),
+                    Style::default().fg(theme.fg_muted),
+                ),
+            ]));
+        }
+        if loose > 0 {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {} group(s) ", loose),
+                    Style::default().fg(theme.fg_dim),
+                ),
+                Span::styled("import loose", Style::default().fg(theme.yellow)),
+                Span::styled(
+                    format!(" · {} tracks", loose_tracks),
+                    Style::default().fg(theme.fg_muted),
+                ),
+            ]));
+        }
+        if skip > 0 {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {} group(s) ", skip),
+                    Style::default().fg(theme.fg_dim),
+                ),
+                Span::styled("skip", Style::default().fg(theme.red)),
+                Span::styled(
+                    format!(" · {} tracks", skip_tracks),
+                    Style::default().fg(theme.fg_muted),
+                ),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            if all_skipped {
+                "  Nothing to import. Press Enter or Esc to close, or p to go back and change."
+            } else {
+                "  Press Enter to import, p to go back and change, Esc to cancel."
+            },
+            Style::default().fg(theme.fg_dim),
+        )));
+
+        let p = Paragraph::new(lines);
+        frame.render_widget(p, area);
     }
 
     fn render_importing(&self, frame: &mut Frame, area: Rect, theme: &Theme) {

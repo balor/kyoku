@@ -72,6 +72,7 @@ fn help_content(theme: &Theme) -> Vec<Line<'static>> {
         section("Global"),
         binding("q / Ctrl+C", "Quit"),
         binding("? / F1", "Help overlay"),
+        binding("F5 / Ctrl+R", "Refresh (rescan inbox, reload view)"),
         binding("/", "Focus local filter (filters current list)"),
         binding("g", "Open global search (albums, tracks, collections)"),
         binding("Esc", "Back / cancel / clear search"),
