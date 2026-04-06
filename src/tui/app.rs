@@ -190,6 +190,7 @@ impl App {
             }
             AppView::CollectionDetail { .. } => self.collection_detail.has_popup(),
             AppView::Editor { .. } => self.editor.is_editing(),
+            AppView::Import => self.import.is_capturing_input(),
             _ => false,
         }
     }
@@ -380,12 +381,26 @@ impl App {
     }
 
     fn handle_import_key(&mut self, key: KeyEvent) -> AppAction {
-        if keys::is_back(&key) && self.import.can_cancel() {
+        // When the wizard is capturing text input (e.g. custom-path field),
+        // Esc is handled inside the view (clear input / exit custom mode)
+        // — don't cancel the whole wizard unless the view itself decides.
+        let capturing = self.import.is_capturing_input();
+
+        if !capturing && keys::is_back(&key) && self.import.can_cancel() {
             self.switch_view(AppView::Library);
             self.refresh_counts();
             return AppAction::None;
         }
         self.import.handle_key(key, &self.conn);
+
+        // If the view cleared its capturing state in response to Esc on an
+        // empty input, treat that as a wizard cancel.
+        if capturing && keys::is_back(&key) && !self.import.is_capturing_input() {
+            self.switch_view(AppView::Library);
+            self.refresh_counts();
+            return AppAction::None;
+        }
+
         if self.import.is_complete() && keys::is_confirm(&key) {
             self.switch_view(AppView::Library);
             self.refresh_counts();

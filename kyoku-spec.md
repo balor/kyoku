@@ -571,6 +571,12 @@ MusicBrainz won't have entries for a lot of music: doujin releases, Bandcamp-onl
 5. Unmatched tracks appear in all views, searches, and operations identically to matched ones
 6. Tag status shows `unmatched` or `manual` — these are informational labels, not errors
 
+#### 6.1.8 Future import wizard enhancements
+Nice-to-haves deferred from milestone 3 — the typed path input in the wizard is good enough for now but these make it noticeably better:
+
+- **Path autocomplete / file picker** — a browsable directory picker in the import wizard (j/k to navigate, Enter to descend, Space to pick). Much nicer than typing absolute paths once users have a deeply-nested music staging area.
+- **Recently-imported paths** — remember the last N paths entered in the wizard and show them as selectable suggestions above the text input. Persisted in a small state file or DB table. Saves re-typing a path when importing several albums from the same parent folder in one session.
+
 ### 6.2 Inbox Scan (`kyoku scan`)
 
 Scans all configured `inbox_dirs` for audio files not yet in the database.

@@ -9,12 +9,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 use rusqlite::Connection;
 
+use crate::config::paths::expand_tilde;
 use crate::core::importer;
 use crate::core::tagger;
 use crate::db::models::Track;
 use crate::db::queries;
 use crate::tui::keybindings as keys;
 use crate::tui::themes::Theme;
+use crate::tui::widgets::input::TextInput;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImportStep {
@@ -47,6 +49,10 @@ pub struct ImportView {
     pub scan_progress: (usize, usize),
     pub import_progress: (usize, usize),
     pub result_summary: Option<String>,
+    // Custom path input on the SelectSource step
+    pub custom_path: TextInput,
+    pub use_custom_path: bool,
+    pub custom_path_error: Option<String>,
     scan_rx: Option<mpsc::Receiver<ScanMessage>>,
 }
 
@@ -65,6 +71,9 @@ impl Default for ImportView {
             scan_progress: (0, 0),
             import_progress: (0, 0),
             result_summary: None,
+            custom_path: TextInput::new("~/Music/new-album").with_label(" Path: "),
+            use_custom_path: false,
+            custom_path_error: None,
             scan_rx: None,
         }
     }
@@ -78,6 +87,11 @@ impl ImportView {
         self.result_summary = None;
         self.scan_rx = None;
 
+        // Reset custom-path state
+        self.custom_path = TextInput::new("~/Music/new-album").with_label(" Path: ");
+        self.use_custom_path = false;
+        self.custom_path_error = None;
+
         // Collect source paths from inbox
         self.source_paths.clear();
         for dir in inbox_dirs {
@@ -85,6 +99,12 @@ impl ImportView {
                 self.source_paths.push(dir.clone());
             }
         }
+    }
+
+    /// True when the wizard is actively capturing text input and global
+    /// key shortcuts (q, g, /) should be suppressed.
+    pub fn is_capturing_input(&self) -> bool {
+        self.step == ImportStep::SelectSource && self.use_custom_path
     }
 
     pub fn can_cancel(&self) -> bool {
@@ -101,9 +121,7 @@ impl ImportView {
     pub fn handle_key(&mut self, key: KeyEvent, conn: &Connection) {
         match self.step {
             ImportStep::SelectSource => {
-                if keys::is_confirm(&key) && !self.source_paths.is_empty() {
-                    self.start_scan(conn);
-                }
+                self.handle_select_source_key(key, conn);
             }
             ImportStep::Scanning => {
                 // Can't interact during scan
@@ -117,6 +135,68 @@ impl ImportView {
             ImportStep::Complete => {
                 // Esc/Enter handled by app
             }
+        }
+    }
+
+    fn handle_select_source_key(&mut self, key: KeyEvent, conn: &Connection) {
+        // Tab toggles focus between "scan inbox dirs" and "enter custom path".
+        if key.code == KeyCode::Tab {
+            self.use_custom_path = !self.use_custom_path;
+            self.custom_path.focused = self.use_custom_path;
+            self.custom_path_error = None;
+            return;
+        }
+
+        if self.use_custom_path {
+            // In custom-path mode
+            if keys::is_back(&key) {
+                // Esc only exits custom mode while text remains; if empty, let
+                // the wizard handle it as a normal cancel (by returning — app
+                // handles Esc for can_cancel).
+                if !self.custom_path.value.is_empty() {
+                    self.custom_path.clear();
+                    self.custom_path_error = None;
+                    return;
+                }
+                // Empty → fall through to default Esc behaviour (wizard cancel)
+                self.use_custom_path = false;
+                self.custom_path.focused = false;
+                return;
+            }
+
+            if keys::is_confirm(&key) {
+                let raw = self.custom_path.value.trim();
+                if raw.is_empty() {
+                    self.custom_path_error = Some("Enter a directory path".to_string());
+                    return;
+                }
+                let expanded = expand_tilde(raw);
+                if !expanded.exists() {
+                    self.custom_path_error =
+                        Some(format!("Path does not exist: {}", expanded.display()));
+                    return;
+                }
+                if !expanded.is_dir() {
+                    self.custom_path_error =
+                        Some(format!("Not a directory: {}", expanded.display()));
+                    return;
+                }
+                self.custom_path_error = None;
+                self.source_paths = vec![expanded];
+                self.start_scan(conn);
+                return;
+            }
+
+            // Any keystroke clears the error and edits the input
+            if self.custom_path.handle_key(key) {
+                self.custom_path_error = None;
+            }
+            return;
+        }
+
+        // Default mode: scan inbox dirs on Enter
+        if keys::is_confirm(&key) && !self.source_paths.is_empty() {
+            self.start_scan(conn);
         }
     }
 
@@ -368,7 +448,21 @@ impl ImportView {
 
     pub fn status_hints(&self) -> Vec<(&str, &str)> {
         match self.step {
-            ImportStep::SelectSource => vec![("Enter", "start scan"), ("Esc", "cancel")],
+            ImportStep::SelectSource => {
+                if self.use_custom_path {
+                    vec![
+                        ("Enter", "scan path"),
+                        ("Tab", "use inbox"),
+                        ("Esc", "cancel"),
+                    ]
+                } else {
+                    vec![
+                        ("Enter", "scan inbox"),
+                        ("Tab", "enter path"),
+                        ("Esc", "cancel"),
+                    ]
+                }
+            }
             ImportStep::Scanning => vec![],
             ImportStep::Review => {
                 if self.groups.is_empty() {
@@ -418,42 +512,94 @@ impl ImportView {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let mut lines = vec![
+        // Split inner into: inbox section / path input / path error
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(4),    // inbox list + heading
+                Constraint::Length(2), // custom-path heading + separator
+                Constraint::Length(1), // path input
+                Constraint::Length(1), // error / hint
+            ])
+            .split(inner);
+
+        // Inbox section
+        let inbox_header_style = if self.use_custom_path {
+            Style::default().fg(theme.fg_dim).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(theme.fg)
+                .add_modifier(Modifier::BOLD)
+        };
+        let mut inbox_lines = vec![
             Line::from(""),
-            Line::from(Span::styled(
-                "Sources to scan:",
-                Style::default()
-                    .fg(theme.fg)
-                    .add_modifier(Modifier::BOLD),
-            )),
+            Line::from(Span::styled("Inbox sources:", inbox_header_style)),
             Line::from(""),
         ];
 
+        let inbox_body_color = if self.use_custom_path {
+            theme.fg_muted
+        } else {
+            theme.fg
+        };
+
         if self.source_paths.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "  No inbox directories configured.",
-                Style::default().fg(theme.fg_muted),
-            )));
-            lines.push(Line::from(Span::styled(
-                "  Add inbox_dirs to your config.",
+            inbox_lines.push(Line::from(Span::styled(
+                "  (no inbox directories configured)",
                 Style::default().fg(theme.fg_muted),
             )));
         } else {
             for path in &self.source_paths {
-                lines.push(Line::from(Span::styled(
+                inbox_lines.push(Line::from(Span::styled(
                     format!("  {}", path.display()),
-                    Style::default().fg(theme.fg),
+                    Style::default().fg(inbox_body_color),
                 )));
             }
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "Press Enter to start scanning.",
-                Style::default().fg(theme.fg_dim),
-            )));
         }
+        let p = Paragraph::new(inbox_lines);
+        frame.render_widget(p, chunks[0]);
 
-        let p = Paragraph::new(lines);
-        frame.render_widget(p, inner);
+        // Custom-path heading
+        let custom_heading_style = if self.use_custom_path {
+            Style::default()
+                .fg(theme.fg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg_dim)
+        };
+        let heading = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "Or import a specific directory:",
+                custom_heading_style,
+            )),
+        ]);
+        frame.render_widget(heading, chunks[1]);
+
+        // Path input
+        self.custom_path.render(frame, chunks[2], theme);
+
+        // Bottom line: error or hint
+        let (text, style) = if let Some(err) = &self.custom_path_error {
+            (err.clone(), Style::default().fg(theme.red))
+        } else if self.use_custom_path {
+            (
+                "  Enter to scan this path · Tab to use inbox".to_string(),
+                Style::default().fg(theme.fg_muted),
+            )
+        } else if self.source_paths.is_empty() {
+            (
+                "  No inbox — Tab to enter a custom path".to_string(),
+                Style::default().fg(theme.fg_muted),
+            )
+        } else {
+            (
+                "  Enter to scan inbox · Tab to enter a custom path".to_string(),
+                Style::default().fg(theme.fg_muted),
+            )
+        };
+        let p = Paragraph::new(Span::styled(text, style));
+        frame.render_widget(p, chunks[3]);
     }
 
     fn render_scanning(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
