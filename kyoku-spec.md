@@ -1047,25 +1047,25 @@ pub enum KyokuError {
 ### Milestone 1: Foundation (Core + basic read-only operations)
 **Goal**: You can scan files and read/display their tags.
 
-- [ ] Project scaffolding (Cargo.toml, module structure, error types)
-- [ ] Configuration loading (TOML parsing, XDG paths, defaults, inbox_dirs)
-- [ ] Database schema + migrations (rusqlite, `migrations/001_initial.sql`)
-- [ ] Tag reader abstraction over `lofty` (read all supported formats)
-- [ ] `kyoku info <path>` — display file metadata and tags
-- [ ] `kyoku setup` — interactive config wizard
-- [ ] `kyoku paths` — show resolved config/data/cache paths
-- [ ] Basic test fixtures (short silence clips with known tags, including CJK-tagged files)
+- [x] Project scaffolding (Cargo.toml, module structure, error types)
+- [x] Configuration loading (TOML parsing, XDG paths, defaults, inbox_dirs)
+- [x] Database schema + migrations (rusqlite, `migrations/001_initial.sql`)
+- [x] Tag reader abstraction over `lofty` (read all supported formats)
+- [x] `kyoku info <path>` — display file metadata and tags
+- [x] `kyoku setup` — interactive config wizard
+- [x] `kyoku paths` — show resolved config/data/cache paths
+- [x] Basic test fixtures (short silence clips with known tags, including CJK-tagged files)
 
 ### Milestone 2: Library Database + Import
 **Goal**: You can import files into a database and query them.
 
-- [ ] Import files into SQLite (scan → read tags → insert, files stay in place)
-- [ ] `kyoku import <path>` (local-only, no MB matching yet)
-- [ ] `kyoku import --loose` and `--no-match` modes
-- [ ] `kyoku scan` — inbox directory scanner (checks configured inbox_dirs)
-- [ ] Search with FTS5 (freeform + filters) — TUI only
-- [ ] Collections (create, add, list, show, remove, delete) — TUI only
-- [ ] `kyoku import --collection` integration
+- [x] Import files into SQLite (scan → read tags → insert, files stay in place)
+- [x] `kyoku import <path>` (local-only, no MB matching yet)
+- [x] `kyoku import --loose` and `--no-match` modes
+- [x] `kyoku scan` — inbox directory scanner (checks configured inbox_dirs)
+- [x] Search with FTS5 (freeform + filters) — TUI only
+- [x] Collections (create, add, list, show, remove, delete) — TUI only
+- [x] `kyoku import --collection` integration
 
 ### Milestone 3: TUI (primary interface)
 **Goal**: Full interactive terminal UI — this is what users will spend most time in.
@@ -1086,13 +1086,13 @@ pub enum KyokuError {
 ### Milestone 4: MusicBrainz Integration
 **Goal**: You can match albums against MusicBrainz and auto-tag.
 
-- [ ] MusicBrainz text search (artist + album)
-- [ ] Match scoring algorithm (fuzzy string comparison + metadata heuristics)
-- [ ] Import wizard MB matching integration (TUI and CLI)
-- [ ] Tag writing (write matched data back to files via lofty)
-- [ ] Tag editing — TUI only (inline field editing in tag editor view)
-- [ ] Chromaprint fingerprinting (symphonia → rusty-chromaprint)
-- [ ] AcoustID lookup integration
+- [x] MusicBrainz text search (artist + album) — `src/external/musicbrainz.rs`, reqwest blocking + JSON
+- [x] Match scoring algorithm (Jaro-Winkler fuzzy matching, weighted multi-field) — `src/external/matching.rs`
+- [x] Import wizard MB matching integration (TUI) — scan → match → review with candidates → import
+- [x] Tag writing (write matched data back to files via lofty) — `tagger::write_tags()`
+- [x] Config cleanup: hardcoded user agent from CARGO_PKG_VERSION, removed from config
+- [ ] Chromaprint fingerprinting (symphonia → rusty-chromaprint) — Phase C, deferred
+- [ ] AcoustID lookup integration — Phase C, deferred
 - [ ] `--pretend` mode for all mutating commands
 
 ### Milestone 5: File Organization + Library Management

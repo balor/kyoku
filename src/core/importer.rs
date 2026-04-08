@@ -285,11 +285,6 @@ pub fn scan_inbox(
             if queries::track_exists_by_path(conn, &path_str)? {
                 continue;
             }
-            // Verify the file is actually readable as audio. Files that fail
-            // this check are silently skipped — user can delete or fix them.
-            if tagger::read_track(&abs_path).is_err() {
-                continue;
-            }
             unimported.push(abs_path);
         }
     }

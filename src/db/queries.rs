@@ -620,6 +620,53 @@ pub fn find_collection_by_name(conn: &Connection, name: &str) -> Result<Option<i
     Ok(id)
 }
 
+/// Update a track with MusicBrainz metadata.
+pub fn update_track_mb(
+    conn: &Connection,
+    track_id: i64,
+    mbid: &str,
+    artist: &str,
+    title: &str,
+    tag_status: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE tracks SET mbid = ?1, artist = ?2, title = ?3, tag_status = ?4,
+                modified_date = datetime('now')
+         WHERE id = ?5",
+        rusqlite::params![mbid, artist, title, tag_status, track_id],
+    )?;
+    Ok(())
+}
+
+/// Update an album with MusicBrainz metadata.
+pub fn update_album_mb(
+    conn: &Connection,
+    album_id: i64,
+    mbid: &str,
+    release_mbid: Option<&str>,
+    artist: &str,
+    title: &str,
+    year: Option<i32>,
+    label: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE albums SET mbid = ?1, release_mbid = ?2, album_artist = ?3,
+                title = ?4, year = ?5, label = ?6, updated_at = datetime('now')
+         WHERE id = ?7",
+        rusqlite::params![mbid, release_mbid, artist, title, year, label, album_id],
+    )?;
+    Ok(())
+}
+
+/// Set a track's tag_status field.
+pub fn set_track_tag_status(conn: &Connection, track_id: i64, status: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE tracks SET tag_status = ?1, modified_date = datetime('now') WHERE id = ?2",
+        rusqlite::params![status, track_id],
+    )?;
+    Ok(())
+}
+
 /// Rebuild the FTS5 index from existing track data.
 pub fn rebuild_fts_index(conn: &Connection) -> Result<()> {
     conn.execute_batch(

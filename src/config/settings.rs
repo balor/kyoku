@@ -18,9 +18,6 @@ pub struct Settings {
     pub musicbrainz: MusicBrainzSettings,
 
     #[serde(default)]
-    pub acoustid: AcoustIdSettings,
-
-    #[serde(default)]
     pub ui: UiSettings,
 }
 
@@ -65,17 +62,8 @@ pub struct TaggingSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MusicBrainzSettings {
-    #[serde(default = "default_user_agent")]
-    pub user_agent: String,
-
     #[serde(default = "default_rate_limit")]
     pub rate_limit_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcoustIdSettings {
-    #[serde(default)]
-    pub api_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,10 +104,6 @@ fn default_match_candidates() -> u32 {
     5
 }
 
-fn default_user_agent() -> String {
-    "kyoku/0.1.0 (https://github.com/yourname/kyoku)".to_string()
-}
-
 fn default_rate_limit() -> u64 {
     1100
 }
@@ -135,7 +119,6 @@ impl Default for Settings {
             import: ImportSettings::default(),
             tagging: TaggingSettings::default(),
             musicbrainz: MusicBrainzSettings::default(),
-            acoustid: AcoustIdSettings::default(),
             ui: UiSettings::default(),
         }
     }
@@ -201,16 +184,7 @@ impl Default for TaggingSettings {
 impl Default for MusicBrainzSettings {
     fn default() -> Self {
         Self {
-            user_agent: default_user_agent(),
             rate_limit_ms: default_rate_limit(),
-        }
-    }
-}
-
-impl Default for AcoustIdSettings {
-    fn default() -> Self {
-        Self {
-            api_key: String::new(),
         }
     }
 }

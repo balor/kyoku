@@ -255,15 +255,11 @@ impl App {
                     .ok();
             }
             AppView::Import => {
-                // Refresh inbox count on entry so it matches what the wizard will find
-                self.inbox_count = crate::core::importer::scan_inbox(
-                    &self.conn,
+                self.import.start(
                     &self.settings.library.inbox_dirs,
-                )
-                .map(|v| v.len())
-                .unwrap_or(0);
-                self.import
-                    .start(&self.settings.library.inbox_dirs, &self.conn);
+                    &self.conn,
+                    self.settings.musicbrainz.rate_limit_ms,
+                );
             }
             AppView::Editor { track_id } => {
                 self.editor.load(&self.conn, *track_id).ok();
