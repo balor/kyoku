@@ -137,6 +137,9 @@ pub struct AlbumRow {
     pub track_count: i64,
     pub formats: String,
     pub total_duration_ms: i64,
+    pub mbid: Option<String>,
+    pub label: Option<String>,
+    pub genre: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -212,7 +215,8 @@ pub fn list_albums(
         "SELECT a.id, a.title, a.album_artist, a.year,
                 COUNT(t.id) as track_count,
                 GROUP_CONCAT(DISTINCT t.file_format) as formats,
-                COALESCE(SUM(t.duration_ms), 0) as total_duration_ms
+                COALESCE(SUM(t.duration_ms), 0) as total_duration_ms,
+                a.mbid, a.label, a.genre
          FROM albums a
          LEFT JOIN tracks t ON t.album_id = a.id
          GROUP BY a.id
@@ -222,17 +226,7 @@ pub fn list_albums(
         dir,
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params![limit as i64, offset as i64], |row| {
-        Ok(AlbumRow {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            album_artist: row.get(2)?,
-            year: row.get(3)?,
-            track_count: row.get(4)?,
-            formats: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-            total_duration_ms: row.get(6)?,
-        })
-    })?;
+    let rows = stmt.query_map(rusqlite::params![limit as i64, offset as i64], map_album_row)?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);
@@ -293,7 +287,8 @@ fn search_albums_fts(conn: &Connection, query: &str, limit: usize) -> Result<Vec
         "SELECT DISTINCT a.id, a.title, a.album_artist, a.year,
                 COUNT(t.id) as track_count,
                 GROUP_CONCAT(DISTINCT t.file_format) as formats,
-                COALESCE(SUM(t.duration_ms), 0) as total_duration_ms
+                COALESCE(SUM(t.duration_ms), 0) as total_duration_ms,
+                a.mbid, a.label, a.genre
          FROM tracks_fts fts
          JOIN tracks t ON t.id = fts.rowid
          LEFT JOIN albums a ON t.album_id = a.id
@@ -303,17 +298,7 @@ fn search_albums_fts(conn: &Connection, query: &str, limit: usize) -> Result<Vec
          ORDER BY a.title COLLATE NOCASE
          LIMIT ?2",
     )?;
-    let rows = stmt.query_map(rusqlite::params![fts_query, limit as i64], |row| {
-        Ok(AlbumRow {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            album_artist: row.get(2)?,
-            year: row.get(3)?,
-            track_count: row.get(4)?,
-            formats: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-            total_duration_ms: row.get(6)?,
-        })
-    })?;
+    let rows = stmt.query_map(rusqlite::params![fts_query, limit as i64], map_album_row)?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);
@@ -327,7 +312,8 @@ fn search_albums_like(conn: &Connection, query: &str, limit: usize) -> Result<Ve
         "SELECT a.id, a.title, a.album_artist, a.year,
                 COUNT(t.id) as track_count,
                 GROUP_CONCAT(DISTINCT t.file_format) as formats,
-                COALESCE(SUM(t.duration_ms), 0) as total_duration_ms
+                COALESCE(SUM(t.duration_ms), 0) as total_duration_ms,
+                a.mbid, a.label, a.genre
          FROM albums a
          LEFT JOIN tracks t ON t.album_id = a.id
          WHERE a.title LIKE ?1 OR a.album_artist LIKE ?1
@@ -336,17 +322,7 @@ fn search_albums_like(conn: &Connection, query: &str, limit: usize) -> Result<Ve
          ORDER BY a.title COLLATE NOCASE
          LIMIT ?2",
     )?;
-    let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], |row| {
-        Ok(AlbumRow {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            album_artist: row.get(2)?,
-            year: row.get(3)?,
-            track_count: row.get(4)?,
-            formats: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-            total_duration_ms: row.get(6)?,
-        })
-    })?;
+    let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], map_album_row)?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);
@@ -407,23 +383,14 @@ pub fn get_album(conn: &Connection, album_id: i64) -> Result<Option<AlbumRow>> {
             "SELECT a.id, a.title, a.album_artist, a.year,
                     COUNT(t.id) as track_count,
                     GROUP_CONCAT(DISTINCT t.file_format) as formats,
-                    COALESCE(SUM(t.duration_ms), 0) as total_duration_ms
+                    COALESCE(SUM(t.duration_ms), 0) as total_duration_ms,
+                    a.mbid, a.label, a.genre
              FROM albums a
              LEFT JOIN tracks t ON t.album_id = a.id
              WHERE a.id = ?1
              GROUP BY a.id",
             [album_id],
-            |row| {
-                Ok(AlbumRow {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    album_artist: row.get(2)?,
-                    year: row.get(3)?,
-                    track_count: row.get(4)?,
-                    formats: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                    total_duration_ms: row.get(6)?,
-                })
-            },
+            map_album_row,
         )
         .ok();
     Ok(row)
@@ -676,6 +643,21 @@ pub fn rebuild_fts_index(conn: &Connection) -> Result<()> {
          FROM tracks t LEFT JOIN albums a ON t.album_id = a.id;",
     )?;
     Ok(())
+}
+
+fn map_album_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AlbumRow> {
+    Ok(AlbumRow {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        album_artist: row.get(2)?,
+        year: row.get(3)?,
+        track_count: row.get(4)?,
+        formats: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+        total_duration_ms: row.get(6)?,
+        mbid: row.get(7)?,
+        label: row.get(8)?,
+        genre: row.get(9)?,
+    })
 }
 
 fn map_track_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRow> {

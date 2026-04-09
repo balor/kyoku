@@ -355,26 +355,45 @@ impl AlbumDetailView {
 
         frame.render_widget(table, chunks[1]);
 
-        // Metadata footer — or notice if one is set
+        // Metadata footer: line 1 = album info, line 2 = selected track path
+        // (or notice if one is active)
+        let footer_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(chunks[2]);
+
+        // Line 1: album metadata or notice
         if let Some(notice) = &self.notice {
             let p = Paragraph::new(Span::styled(
                 format!(" {} ", notice),
                 Style::default().fg(theme.green),
             ))
             .style(Style::default().bg(theme.bg_alt));
-            frame.render_widget(p, chunks[2]);
+            frame.render_widget(p, footer_chunks[0]);
         } else if let Some(album) = &self.album {
             let fmt = album.formats.to_uppercase();
             let duration = format_duration_ms(album.total_duration_ms);
-            let meta = format!(
-                " {} · {} tracks · {}",
-                fmt, album.track_count, duration
-            );
+            let mut parts = vec![format!(" {} · {} tracks · {}", fmt, album.track_count, duration)];
+            if let Some(label) = &album.label {
+                if !label.is_empty() {
+                    parts.push(format!("Label: {}", label));
+                }
+            }
+            if let Some(genre) = &album.genre {
+                if !genre.is_empty() {
+                    parts.push(genre.clone());
+                }
+            }
+            if let Some(mbid) = &album.mbid {
+                if !mbid.is_empty() {
+                    parts.push(format!("MB: {}", &mbid[..mbid.len().min(8)]));
+                }
+            }
+            let meta = parts.join(" · ");
             let p = Paragraph::new(Span::styled(meta, Style::default().fg(theme.fg_dim)))
                 .style(Style::default().bg(theme.bg_alt));
-            frame.render_widget(p, chunks[2]);
+            frame.render_widget(p, footer_chunks[0]);
         } else {
-            // Loose tracks — compute summary from the loaded tracks
             let total_ms: i64 = self
                 .tracks
                 .iter()
@@ -387,7 +406,20 @@ impl AlbumDetailView {
             );
             let p = Paragraph::new(Span::styled(meta, Style::default().fg(theme.fg_dim)))
                 .style(Style::default().bg(theme.bg_alt));
-            frame.render_widget(p, chunks[2]);
+            frame.render_widget(p, footer_chunks[0]);
+        }
+
+        // Line 2: selected track's file path
+        let selected_track = visible
+            .get(self.selected)
+            .and_then(|&i| self.tracks.get(i));
+        if let Some(track) = selected_track {
+            let p = Paragraph::new(Span::styled(
+                format!(" {}", track.file_path),
+                Style::default().fg(theme.fg_muted),
+            ))
+            .style(Style::default().bg(theme.bg_alt));
+            frame.render_widget(p, footer_chunks[1]);
         }
 
         // Rename popup
