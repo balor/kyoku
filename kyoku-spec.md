@@ -1091,8 +1091,6 @@ pub enum KyokuError {
 - [x] Import wizard MB matching integration (TUI) — scan → match → review with candidates → import
 - [x] Tag writing (write matched data back to files via lofty) — `tagger::write_tags()`
 - [x] Config cleanup: hardcoded user agent from CARGO_PKG_VERSION, removed from config
-- [ ] Chromaprint fingerprinting (symphonia → rusty-chromaprint) — Phase C, deferred
-- [ ] AcoustID lookup integration — Phase C, deferred
 - [ ] `--pretend` mode for all mutating commands
 
 ### Milestone 5: File Organization + Library Management
@@ -1136,6 +1134,15 @@ pub enum KyokuError {
 - [ ] Optional delete mode: remove files on destination absent from source, with explicit confirmation showing count
 - [ ] Optional per-sync path template override
 - [ ] fatsort post-sync cycle: unmount → fatsort → remount, with clear TUI status for each step
+
+### Milestone 8: Audio Fingerprinting
+**Goal**: Identify music from its audio content when tags are missing or wrong.
+
+- [ ] Chromaprint fingerprinting (symphonia → rusty-chromaprint) — decode audio to PCM, generate fingerprint
+- [ ] AcoustID lookup integration — query acoustid.org with fingerprint + duration, get MB recording IDs
+- [ ] Import wizard integration: optional fingerprint-based matching alongside text search
+- [ ] AcoustID API key in config (`[acoustid] api_key`)
+- [ ] `--no-fingerprint` flag to skip fingerprinting
 
 ### Future (v2): AI Integration
 **Goal**: Optional AI-powered features via OpenAI-compatible API.
