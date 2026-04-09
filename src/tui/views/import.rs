@@ -384,7 +384,7 @@ impl ImportView {
         let rate_limit_ms = self.rate_limit_ms;
 
         // Get local data for scoring
-        let (artist, album, track_count, titles, total_ms) =
+        let (artist, album, year, track_count, titles, total_ms) =
             if let Some(group) = self.groups.get(idx) {
                 let first_tag = group.tracks.first().and_then(|(_, td)| td.as_ref());
                 let artist = first_tag
@@ -395,6 +395,7 @@ impl ImportView {
                     .and_then(|td| td.album.as_deref())
                     .unwrap_or(&group.name)
                     .to_string();
+                let year = first_tag.and_then(|td| td.year.map(|y| y as i32));
                 let tc = group.tracks.len() as u32;
                 let titles: Vec<String> =
                     group.tracks.iter().map(|(t, _)| t.title.clone()).collect();
@@ -403,7 +404,7 @@ impl ImportView {
                     .iter()
                     .map(|(t, _)| t.duration_ms.unwrap_or(0))
                     .sum();
-                (artist, album, tc, titles, ms)
+                (artist, album, year, tc, titles, ms)
             } else {
                 return;
             };
@@ -418,6 +419,7 @@ impl ImportView {
                     let score = matching::score_release(
                         &artist,
                         &album,
+                        year,
                         track_count,
                         &titles,
                         total_ms,
@@ -546,6 +548,7 @@ impl ImportView {
             .and_then(|td| td.album.as_deref())
             .unwrap_or(&group.name)
             .to_string();
+        let year = first_tag.and_then(|td| td.year.map(|y| y as i32));
         let track_count = group.tracks.len() as u32;
         let titles: Vec<String> = group.tracks.iter().map(|(t, _)| t.title.clone()).collect();
         let total_ms: u64 = group
@@ -576,6 +579,7 @@ impl ImportView {
                             let score = matching::score_release(
                                 &artist,
                                 &album,
+                                year,
                                 track_count,
                                 &titles,
                                 total_ms,

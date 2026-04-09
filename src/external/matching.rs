@@ -8,6 +8,7 @@ pub struct MatchScore {
     pub artist: f64,
     pub album: f64,
     pub track_count: f64,
+    pub year: f64,
     pub duration: f64,
     pub tracks: f64,
 }
@@ -29,33 +30,52 @@ pub struct MatchScore {
 pub fn score_release(
     local_artist: &str,
     local_album: &str,
+    local_year: Option<i32>,
     local_track_count: u32,
     local_track_titles: &[String],
     local_total_duration_ms: u64,
     candidate: &MbRelease,
 ) -> MatchScore {
     let artist = sim(local_artist, &candidate.artist);
-    let album = sim(local_album, &candidate.title);
+
+    // Normalize album titles before comparison: strip parenthesized suffixes
+    // like "(Deluxe Edition)", normalize separators, collapse whitespace.
+    let album = sim(
+        &normalize_title(local_album),
+        &normalize_title(&candidate.title),
+    );
 
     // MB API returns a 0-100 relevance score that handles aliases, fuzzy
     // matching, and other heuristics we can't easily reproduce locally.
     let api_score = candidate.api_score as f64 / 100.0;
 
     // Track count: exact match = 1.0, each missing/extra track is a steep penalty.
-    // This is an objective, reliable signal — 15 local tracks should strongly
-    // prefer a 15-track release over a 13-track one.
     let track_count = if local_track_count == 0 || candidate.track_count == 0 {
         0.5
     } else if local_track_count == candidate.track_count {
         1.0
     } else {
         let diff = (local_track_count as i64 - candidate.track_count as i64).abs() as f64;
-        // Penalty: each track difference costs ~0.15, so 2 tracks off → 0.70
         (1.0 - diff * 0.15).max(0.0)
     };
 
-    // Per-track title similarity (ordered comparison)
-    // None if data is unavailable — excluded from scoring rather than penalizing.
+    // Year: exact = 1.0, 1 off = 0.8, 2 off = 0.5, 3+ = proportional decay.
+    // Excluded if either side is unknown.
+    let year = match (local_year, candidate.year) {
+        (Some(ly), Some(cy)) => {
+            let diff = (ly - cy).unsigned_abs();
+            Some(match diff {
+                0 => 1.0,
+                1 => 0.8,
+                2 => 0.5,
+                _ => (1.0 - diff as f64 * 0.2).max(0.0),
+            })
+        }
+        _ => None,
+    };
+
+    // Per-track title similarity (ordered comparison).
+    // Excluded if data is unavailable (search results don't include tracks).
     let tracks = if local_track_titles.is_empty() || candidate.tracks.is_empty() {
         None
     } else {
@@ -68,7 +88,7 @@ pub fn score_release(
         Some(sum / pairs as f64)
     };
 
-    // Duration comparison — None if data unavailable.
+    // Duration comparison. Excluded if data unavailable.
     let duration = if local_total_duration_ms == 0 {
         None
     } else {
@@ -87,7 +107,7 @@ pub fn score_release(
     };
 
     // Weighted sum — only include factors that have real data.
-    // When duration or tracks are unavailable, redistribute their weight
+    // When optional factors are unavailable, their weight is redistributed
     // proportionally among the factors that DO have data.
     let mut total_weight = 0.0f64;
     let mut weighted_sum = 0.0f64;
@@ -96,8 +116,8 @@ pub fn score_release(
     let factors: &[(f64, f64)] = &[
         (api_score, 0.10),
         (artist, 0.15),
-        (album, 0.20),
-        (track_count, 0.25),
+        (album, 0.15),
+        (track_count, 0.20),
     ];
     for &(score, weight) in factors {
         weighted_sum += score * weight;
@@ -105,9 +125,13 @@ pub fn score_release(
     }
 
     // Conditionally available
+    if let Some(y) = year {
+        weighted_sum += y * 0.15;
+        total_weight += 0.15;
+    }
     if let Some(d) = duration {
-        weighted_sum += d * 0.10;
-        total_weight += 0.10;
+        weighted_sum += d * 0.05;
+        total_weight += 0.05;
     }
     if let Some(t) = tracks {
         weighted_sum += t * 0.20;
@@ -125,9 +149,29 @@ pub fn score_release(
         artist,
         album,
         track_count,
+        year: year.unwrap_or(0.0),
         duration: duration.unwrap_or(0.0),
         tracks: tracks.unwrap_or(0.0),
     }
+}
+
+/// Normalize an album title for comparison: remove parentheses/brackets as
+/// punctuation, normalize separators to spaces, collapse whitespace.
+///
+/// "MMXX (Hypa Hypa edition)" → "MMXX Hypa Hypa edition"
+/// "MMXX - Hypa Hypa Edition" → "MMXX Hypa Hypa Edition"
+/// "Rehab (bonus tracks version)" → "Rehab bonus tracks version"
+fn normalize_title(s: &str) -> String {
+    let normalized = s
+        .replace('(', " ")
+        .replace(')', " ")
+        .replace('[', " ")
+        .replace(']', " ")
+        .replace(" - ", " ")
+        .replace(" — ", " ")
+        .replace(": ", " ");
+
+    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Jaro-Winkler similarity, case-insensitive.
@@ -182,6 +226,7 @@ mod tests {
         let score = score_release(
             "Radiohead",
             "OK Computer",
+            Some(1997),
             2,
             &["Airbag".to_string(), "Paranoid Android".to_string()],
             480_000,
@@ -196,12 +241,12 @@ mod tests {
         let score = score_release(
             "Björk",
             "OK Computer",
+            Some(1997),
             1,
             &["Airbag".to_string()],
             240_000,
             &release,
         );
-        // Artist mismatch should reduce the score noticeably compared to exact
         assert!(
             score.artist < 0.5,
             "artist score should be low: {}",
@@ -220,11 +265,44 @@ mod tests {
         let score = score_release(
             "RADIOHEAD",
             "OK COMPUTER",
+            Some(1997),
             1,
             &["AIRBAG".to_string()],
             240_000,
             &release,
         );
         assert!(score.total > 0.9, "case should not matter: {}", score.total);
+    }
+
+    #[test]
+    fn year_mismatch_penalizes() {
+        let release = make_release("Radiohead", "OK Computer", &["Airbag"]);
+        let score_correct = score_release(
+            "Radiohead", "OK Computer", Some(1997), 1,
+            &["Airbag".to_string()], 240_000, &release,
+        );
+        let score_wrong = score_release(
+            "Radiohead", "OK Computer", Some(2020), 1,
+            &["Airbag".to_string()], 240_000, &release,
+        );
+        assert!(
+            score_correct.total > score_wrong.total,
+            "correct year {} should beat wrong year {}",
+            score_correct.total, score_wrong.total
+        );
+    }
+
+    #[test]
+    fn normalized_album_title_matches() {
+        let release = make_release("Artist", "MMXX Hypa Hypa Edition", &[]);
+        let score = score_release(
+            "Artist", "MMXX (Hypa Hypa edition)", None, 0,
+            &[], 0, &release,
+        );
+        assert!(
+            score.album > 0.9,
+            "normalized titles should match well: {}",
+            score.album
+        );
     }
 }
