@@ -236,11 +236,173 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Some(Command::Organize { .. }) => {
-            println!("Organize — not yet implemented (milestone 5).");
+        Some(Command::Organize {
+            apply,
+            artist,
+            album,
+            path,
+            collection,
+        }) => {
+            let conn = db::open_database(config::paths::database_file())?;
+            let filter = if let Some(a) = artist {
+                core::organizer::OrganizeFilter::Artist(a)
+            } else if let Some(a) = album {
+                core::organizer::OrganizeFilter::Album(a)
+            } else if let Some(p) = path {
+                core::organizer::OrganizeFilter::Path(p)
+            } else if let Some(c) = collection {
+                core::organizer::OrganizeFilter::Collection(c)
+            } else {
+                core::organizer::OrganizeFilter::All
+            };
+
+            let plan = core::organizer::plan_organize(&conn, &settings, filter)?;
+
+            if plan.moves.is_empty() && plan.copies.is_empty() {
+                println!(
+                    "Nothing to do — {} file(s) already in the correct location.",
+                    plan.skipped
+                );
+            } else {
+                // Group moves by source dir → target dir for a compact display
+                let mut dir_groups: std::collections::BTreeMap<
+                    (String, String),
+                    Vec<String>,
+                > = std::collections::BTreeMap::new();
+                for m in &plan.moves {
+                    let from_dir = m
+                        .from
+                        .parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    let to_dir = m
+                        .to
+                        .parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    let filename = m
+                        .to
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    dir_groups
+                        .entry((from_dir, to_dir))
+                        .or_default()
+                        .push(filename);
+                }
+
+                println!("Organize plan:\n");
+                for ((from_dir, to_dir), files) in &dir_groups {
+                    println!("  {} ({} files)", from_dir, files.len());
+                    println!("  → {}\n", to_dir);
+                }
+
+                for c in &plan.copies {
+                    let to_dir = c
+                        .to
+                        .parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    println!(
+                        "  copy → {} (collection: {})",
+                        to_dir, c.collection_name
+                    );
+                }
+
+                println!(
+                    "{} file(s) to move, {} to copy, {} already in place",
+                    plan.moves.len(),
+                    plan.copies.len(),
+                    plan.skipped
+                );
+
+                if apply {
+                    // Check music_dir exists
+                    if !settings.library.music_dir.exists() {
+                        print!(
+                            "Music directory {} does not exist. Create it? [y/N] ",
+                            settings.library.music_dir.display()
+                        );
+                        use std::io::Write;
+                        std::io::stdout().flush()?;
+                        let mut input = String::new();
+                        std::io::stdin().read_line(&mut input)?;
+                        if !input.trim().eq_ignore_ascii_case("y") {
+                            println!("Aborted.");
+                            std::process::exit(0);
+                        }
+                        std::fs::create_dir_all(&settings.library.music_dir)?;
+                    }
+
+                    let result = core::organizer::apply_organize(
+                        &conn,
+                        &plan,
+                        &settings.import.organize_operation,
+                    )?;
+                    println!();
+                    println!(
+                        "Done: {} moved, {} copied, {} dirs cleaned",
+                        result.moved, result.copied, result.dirs_cleaned
+                    );
+                    if !result.errors.is_empty() {
+                        println!("Errors:");
+                        for (path, err) in &result.errors {
+                            println!("  {} — {}", path, err);
+                        }
+                    }
+                } else {
+                    println!("(dry run — use --apply to execute)");
+                }
+            }
         }
-        Some(Command::Relocate { .. }) => {
-            println!("Relocate — not yet implemented (milestone 5).");
+        Some(Command::Relocate {
+            old_prefix,
+            new_prefix,
+            verify,
+            pretend,
+        }) => {
+            let conn = db::open_database(config::paths::database_file())?;
+
+            if verify {
+                let missing = core::relocator::verify_paths(&conn)?;
+                if missing.is_empty() {
+                    println!("All {} track paths verified — no missing files.", {
+                        let count: i64 =
+                            conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))?;
+                        count
+                    });
+                } else {
+                    println!("{} missing file(s):", missing.len());
+                    for (id, path) in &missing {
+                        println!("  [{}] {}", id, path);
+                    }
+                }
+            } else if let (Some(old), Some(new)) = (old_prefix, new_prefix) {
+                let old_str = old.display().to_string();
+                let new_str = new.display().to_string();
+                let plan = core::relocator::plan_relocate(&conn, &old_str, &new_str)?;
+
+                if plan.is_empty() {
+                    println!("No tracks match the prefix '{}'.", old_str);
+                } else {
+                    for (_, old_path, new_path) in &plan {
+                        println!("  {} → {}", old_path, new_path);
+                    }
+                    println!("\n{} path(s) to update.", plan.len());
+
+                    if pretend {
+                        println!("(dry run — remove --pretend to apply)");
+                    } else {
+                        let count = core::relocator::apply_relocate(&conn, &plan)?;
+                        println!("Done: {} path(s) updated.", count);
+                    }
+                }
+            } else {
+                eprintln!("Usage: kyoku relocate <old_prefix> <new_prefix>");
+                eprintln!("       kyoku relocate --verify");
+                std::process::exit(1);
+            }
         }
     }
 

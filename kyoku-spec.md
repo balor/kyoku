@@ -1096,13 +1096,14 @@ pub enum KyokuError {
 ### Milestone 5: File Organization + Library Management
 **Goal**: Beautiful filesystem output, with full user control.
 
-- [ ] Path template engine (variables, formatting, sanitization, conditionals)
-- [ ] `kyoku organize` — preview + apply file reorganization
-- [ ] `kyoku organize` TUI integration (select → preview diff → confirm)
-- [ ] `kyoku relocate` — rebase all paths when library moves
-- [ ] `kyoku relocate --verify` — detect missing files
-- [ ] Atomic file operations (temp file → rename)
-- [ ] Clean up empty directories after moves
+- [x] Path template engine (`src/core/template.rs`) — variables, format specifiers, sanitization, CJK-safe
+- [x] `kyoku organize` — preview + apply file reorganization (`src/core/organizer.rs`)
+- [x] `kyoku organize --apply` with filters: `--artist`, `--album`, `--path`, `--collection`
+- [x] Collection dual-copy support (album copy + collection copy with custom template)
+- [x] `kyoku relocate` — rebase all paths when library moves (`src/core/relocator.rs`)
+- [x] `kyoku relocate --verify` — detect missing files
+- [x] Clean up empty directories after moves (recursive parent cleanup)
+- [ ] `kyoku organize` TUI integration (`O` key in album detail)
 
 ### Milestone 6: Polish & Robustness
 **Goal**: Production-quality for daily use.

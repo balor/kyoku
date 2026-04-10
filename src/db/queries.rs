@@ -634,6 +634,136 @@ pub fn set_track_tag_status(conn: &Connection, track_id: i64, status: &str) -> R
     Ok(())
 }
 
+// ── Organize queries ────────────────────────────────────────────────
+
+/// Track data needed to compute an organize target path.
+#[derive(Debug, Clone)]
+pub struct OrganizeTrackRow {
+    pub id: i64,
+    pub title: String,
+    pub artist: Option<String>,
+    pub track_number: Option<u32>,
+    pub disc_number: u32,
+    pub file_path: String,
+    pub album_title: Option<String>,
+    pub album_artist: Option<String>,
+    pub year: Option<i32>,
+    pub genre: Option<String>,
+    pub label: Option<String>,
+    pub disc_total: Option<u32>,
+    /// (collection_id, collection_name, collection path_template or None)
+    pub collections: Vec<(i64, String, Option<String>)>,
+}
+
+/// Get all tracks with album + collection info for organizing.
+pub fn get_all_tracks_for_organize(
+    conn: &Connection,
+    filter: &crate::core::organizer::OrganizeFilter,
+) -> Result<Vec<OrganizeTrackRow>> {
+    use crate::core::organizer::OrganizeFilter;
+
+    let (where_clause, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match filter {
+        OrganizeFilter::All => ("1=1".to_string(), vec![]),
+        OrganizeFilter::Artist(a) => (
+            "(t.artist = ?1 OR a.album_artist = ?1)".to_string(),
+            vec![Box::new(a.clone())],
+        ),
+        OrganizeFilter::Album(name) => (
+            "a.title = ?1".to_string(),
+            vec![Box::new(name.clone())],
+        ),
+        OrganizeFilter::Path(p) => (
+            "t.file_path LIKE ?1 || '%'".to_string(),
+            vec![Box::new(p.display().to_string())],
+        ),
+        OrganizeFilter::Collection(name) => (
+            "EXISTS (SELECT 1 FROM collection_tracks ct2 JOIN collections c2 ON c2.id = ct2.collection_id WHERE ct2.track_id = t.id AND c2.name = ?1)".to_string(),
+            vec![Box::new(name.clone())],
+        ),
+    };
+
+    let sql = format!(
+        "SELECT t.id, t.title, t.artist, t.track_number, t.disc_number, t.file_path,
+                a.title, a.album_artist, a.year, a.genre, a.label, a.disc_total
+         FROM tracks t
+         LEFT JOIN albums a ON t.album_id = a.id
+         WHERE {}
+         ORDER BY a.album_artist, a.title, t.disc_number, t.track_number",
+        where_clause
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok(OrganizeTrackRow {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            artist: row.get(2)?,
+            track_number: row.get::<_, Option<u32>>(3)?,
+            disc_number: row.get::<_, Option<u32>>(4)?.unwrap_or(1),
+            file_path: row.get(5)?,
+            album_title: row.get(6)?,
+            album_artist: row.get(7)?,
+            year: row.get(8)?,
+            genre: row.get(9)?,
+            label: row.get(10)?,
+            disc_total: row.get(11)?,
+            collections: Vec::new(), // Filled below
+        })
+    })?;
+
+    let mut tracks: Vec<OrganizeTrackRow> = Vec::new();
+    for row in rows {
+        tracks.push(row?);
+    }
+
+    // Load collection memberships
+    let mut coll_stmt = conn.prepare(
+        "SELECT ct.collection_id, c.name, c.path_template
+         FROM collection_tracks ct
+         JOIN collections c ON c.id = ct.collection_id
+         WHERE ct.track_id = ?1",
+    )?;
+    for track in &mut tracks {
+        let colls = coll_stmt.query_map([track.id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        for c in colls {
+            track.collections.push(c?);
+        }
+    }
+
+    Ok(tracks)
+}
+
+/// Update a track's file_path in the database.
+pub fn update_track_path(conn: &Connection, track_id: i64, new_path: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE tracks SET file_path = ?1, modified_date = datetime('now') WHERE id = ?2",
+        rusqlite::params![new_path, track_id],
+    )?;
+    Ok(())
+}
+
+/// Update a collection track's file path.
+pub fn update_collection_track_path(
+    conn: &Connection,
+    collection_id: i64,
+    track_id: i64,
+    path: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE collection_tracks SET collection_file_path = ?1
+         WHERE collection_id = ?2 AND track_id = ?3",
+        rusqlite::params![path, collection_id, track_id],
+    )?;
+    Ok(())
+}
+
 /// Rebuild the FTS5 index from existing track data.
 pub fn rebuild_fts_index(conn: &Connection) -> Result<()> {
     conn.execute_batch(
