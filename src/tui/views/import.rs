@@ -87,6 +87,8 @@ pub struct ImportView {
     mbid_fetch_rx: Option<mpsc::Receiver<MbResult>>,
     /// Per-group collection picker (during Review). When `Some`, captures input.
     collection_picker: Option<PickCollectionPopup>,
+    /// Receives progress messages from the background importer.
+    import_rx: Option<mpsc::Receiver<ImportMessage>>,
 }
 
 enum ScanMessage {
@@ -98,6 +100,12 @@ enum ScanMessage {
 struct MbResult {
     group_idx: usize,
     candidates: Vec<MbCandidate>,
+}
+
+/// Messages from the background import thread.
+enum ImportMessage {
+    Progress(usize, usize),
+    Complete(String),
 }
 
 impl Default for ImportView {
@@ -119,6 +127,7 @@ impl Default for ImportView {
             mbid_input: None,
             mbid_fetch_rx: None,
             collection_picker: None,
+            import_rx: None,
         }
     }
 }
@@ -134,6 +143,7 @@ impl ImportView {
         self.mbid_input = None;
         self.mbid_fetch_rx = None;
         self.collection_picker = None;
+        self.import_rx = None;
         self.rate_limit_ms = rate_limit_ms;
 
         // Reset SelectSource fields
@@ -306,7 +316,7 @@ impl ImportView {
                             Some("Nothing imported (all groups skipped)".to_string());
                         self.step = ImportStep::Complete;
                     } else {
-                        self.start_import(conn);
+                        self.start_import();
                     }
                 }
                 _ => {}
@@ -691,7 +701,7 @@ impl ImportView {
         });
     }
 
-    fn start_import(&mut self, conn: &Connection) {
+    fn start_import(&mut self) {
         self.step = ImportStep::Importing;
 
         let groups_to_import: Vec<ImportGroup> = self
@@ -713,15 +723,46 @@ impl ImportView {
         let total_tracks: usize = groups_to_import.iter().map(|g| g.tracks.len()).sum();
         self.import_progress = (0, total_tracks);
 
-        let mut imported = 0u32;
-        let mut skipped = 0u32;
-        let mut errors = 0u32;
-        let mut added_to_collection = 0u32;
+        let rate_limit_ms = self.rate_limit_ms;
+        let (tx, rx) = mpsc::channel();
+        self.import_rx = Some(rx);
 
-        // Fetch full release data for MB-matched groups (search results don't
-        // include track listings — we need them for per-track metadata).
-        let mut mb_client = MbClient::new(self.rate_limit_ms);
+        std::thread::spawn(move || {
+            run_import_worker(groups_to_import, user_skipped, rate_limit_ms, tx);
+        });
+    }
+}
 
+/// Background worker for the import phase. Opens its own DB connection so we
+/// don't block the TUI's main-thread `Connection`.
+fn run_import_worker(
+    groups_to_import: Vec<ImportGroup>,
+    user_skipped: u32,
+    rate_limit_ms: u64,
+    tx: mpsc::Sender<ImportMessage>,
+) {
+    let conn = match crate::db::open_database(crate::config::paths::database_file()) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(ImportMessage::Complete(format!("DB open failed: {}", e)));
+            return;
+        }
+    };
+    let conn = &conn;
+
+    let total_tracks: usize = groups_to_import.iter().map(|g| g.tracks.len()).sum();
+    let mut done = 0usize;
+    let mut imported = 0u32;
+    let mut skipped = 0u32;
+    let mut errors = 0u32;
+    let mut added_to_collection = 0u32;
+
+    // Fetch full release data for MB-matched groups (search results don't
+    // include track listings — we need them for per-track metadata).
+    let mut mb_client = MbClient::new(rate_limit_ms);
+
+    {
+        let _ = tx.send(ImportMessage::Progress(done, total_tracks));
         for group in &groups_to_import {
             let loose = group.action == GroupAction::Loose;
 
@@ -876,7 +917,8 @@ impl ImportView {
 
                 if queries::track_exists_by_path(conn, &path_str).unwrap_or(false) {
                     skipped += 1;
-                    self.import_progress.0 += 1;
+                    done += 1;
+                    let _ = tx.send(ImportMessage::Progress(done, total_tracks));
                     continue;
                 }
 
@@ -936,30 +978,29 @@ impl ImportView {
                     }
                     Err(_) => errors += 1,
                 }
-                self.import_progress.0 += 1;
+                done += 1;
+                let _ = tx.send(ImportMessage::Progress(done, total_tracks));
             }
         }
-
-        let mut parts = vec![format!("Imported: {}", imported)];
-        if added_to_collection > 0 {
-            parts.push(format!(
-                "Added to collections: {}",
-                added_to_collection
-            ));
-        }
-        if skipped > 0 {
-            parts.push(format!("Duplicates: {}", skipped));
-        }
-        if user_skipped > 0 {
-            parts.push(format!("Skipped: {}", user_skipped));
-        }
-        if errors > 0 {
-            parts.push(format!("Errors: {}", errors));
-        }
-        self.result_summary = Some(parts.join(", "));
-        self.step = ImportStep::Complete;
     }
 
+    let mut parts = vec![format!("Imported: {}", imported)];
+    if added_to_collection > 0 {
+        parts.push(format!("Added to collections: {}", added_to_collection));
+    }
+    if skipped > 0 {
+        parts.push(format!("Duplicates: {}", skipped));
+    }
+    if user_skipped > 0 {
+        parts.push(format!("Skipped: {}", user_skipped));
+    }
+    if errors > 0 {
+        parts.push(format!("Errors: {}", errors));
+    }
+    let _ = tx.send(ImportMessage::Complete(parts.join(", ")));
+}
+
+impl ImportView {
     pub fn tick(&mut self, _conn: &Connection) {
         // Process scan messages
         let mut scan_done = false;
@@ -1026,6 +1067,26 @@ impl ImportView {
         }
         if fetch_done {
             self.mbid_fetch_rx = None;
+        }
+
+        // Process import worker messages
+        let mut import_done = false;
+        if let Some(rx) = &self.import_rx {
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    ImportMessage::Progress(d, t) => {
+                        self.import_progress = (d, t);
+                    }
+                    ImportMessage::Complete(summary) => {
+                        self.result_summary = Some(summary);
+                        self.step = ImportStep::Complete;
+                        import_done = true;
+                    }
+                }
+            }
+        }
+        if import_done {
+            self.import_rx = None;
         }
     }
 
