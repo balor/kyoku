@@ -34,6 +34,14 @@ pub struct LibrarySettings {
 
     #[serde(default = "default_path_template_single_disc")]
     pub path_template_single_disc: String,
+
+    /// Default template for collection copies (when a collection has no override).
+    #[serde(default = "default_collection_path_template")]
+    pub collection_path_template: String,
+
+    /// Template for loose tracks (no album, no collection).
+    #[serde(default = "default_loose_path_template")]
+    pub loose_path_template: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +96,14 @@ fn default_path_template_single_disc() -> String {
     "{album_artist}/{album} ({year})/{track:02} {title}.{ext}".to_string()
 }
 
+fn default_collection_path_template() -> String {
+    "Collections/{collection}/{album_artist} - {album} - {track:02} {title}.{ext}".to_string()
+}
+
+fn default_loose_path_template() -> String {
+    "_loose/{artist} - {title}.{ext}".to_string()
+}
+
 fn default_organize_operation() -> String {
     "move".to_string()
 }
@@ -131,6 +147,8 @@ impl Settings {
             inbox_dirs: Vec::new(),
             path_template: default_path_template(),
             path_template_single_disc: default_path_template_single_disc(),
+            collection_path_template: default_collection_path_template(),
+            loose_path_template: default_loose_path_template(),
         }
     }
 

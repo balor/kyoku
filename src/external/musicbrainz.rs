@@ -63,28 +63,63 @@ impl MbClient {
 
     /// Search for releases matching artist + album name.
     /// Returns up to `limit` results ordered by MB relevance score.
+    ///
+    /// If the initial cleaned-up search returns no results, falls back to a
+    /// looser search using only the artist (without the trailing punctuation).
     pub fn search_releases(
         &mut self,
         artist: &str,
         album: &str,
         limit: u32,
     ) -> Result<Vec<MbRelease>> {
-        self.throttle();
-
-        // Clean up the album title for better MB matching:
-        // - Strip trailing parenthesized qualifiers like "(bonus tracks version)",
-        //   "(deluxe edition)", "(remastered)" — MB stores these in the
-        //   disambiguation field, not the title.
-        // - Trim whitespace left behind.
+        // Clean inputs for matching:
+        // - Artist: strip trailing punctuation (HANABIE. → HANABIE, t.A.T.u → kept)
+        // - Album: strip trailing parenthesized qualifiers like "(bonus tracks)"
+        let clean_artist = strip_trailing_punct(artist);
         let clean_album = strip_parenthesized_suffix(album);
 
-        // Use bare terms (not quoted phrases) for a fuzzier search.
-        // Quoting the whole title fails when file tags differ slightly from MB.
-        let query = format!(
-            "artist:({}) AND release:({})",
-            escape_lucene(artist),
-            escape_lucene(&clean_album),
-        );
+        // First attempt: artist + album
+        let releases = self.run_search(&clean_artist, Some(&clean_album), limit)?;
+        if !releases.is_empty() {
+            return Ok(releases);
+        }
+
+        // Fallback 1: artist only (no album), in case album spelling differs
+        if !clean_artist.trim().is_empty() {
+            let releases = self.run_search(&clean_artist, None, limit)?;
+            if !releases.is_empty() {
+                return Ok(releases);
+            }
+        }
+
+        // Fallback 2: original artist (with punctuation) + album
+        if clean_artist != artist {
+            let releases = self.run_search(artist, Some(&clean_album), limit)?;
+            if !releases.is_empty() {
+                return Ok(releases);
+            }
+        }
+
+        Ok(Vec::new())
+    }
+
+    fn run_search(
+        &mut self,
+        artist: &str,
+        album: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<MbRelease>> {
+        self.throttle();
+
+        let query = if let Some(album) = album {
+            format!(
+                "artist:({}) AND release:({})",
+                escape_lucene(artist),
+                escape_lucene(album),
+            )
+        } else {
+            format!("artist:({})", escape_lucene(artist))
+        };
 
         let url = format!(
             "{}/release/?query={}&fmt=json&limit={}",
@@ -101,13 +136,11 @@ impl MbClient {
             .json()
             .map_err(|e| crate::error::KyokuError::Config(format!("MB parse failed: {}", e)))?;
 
-        let releases = resp
+        Ok(resp
             .releases
             .into_iter()
-            .map(|r| parse_search_release(r))
-            .collect();
-
-        Ok(releases)
+            .map(parse_search_release)
+            .collect())
     }
 
     /// Fetch a specific release with full track listing.
@@ -304,6 +337,26 @@ fn urlencoding(s: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Strip trailing punctuation from an artist name.
+///
+/// Examples:
+///   "HANABIE." → "HANABIE"
+///   "BABYMETAL!" → "BABYMETAL"
+///   "t.A.T.u." → "t.A.T.u"  (only trailing punctuation, internal dots kept)
+///
+/// We don't strip leading punctuation or internal dots — those can be part of
+/// the actual band name.
+fn strip_trailing_punct(s: &str) -> String {
+    s.trim_end_matches(|c: char| {
+        matches!(
+            c,
+            '.' | '!' | '?' | ',' | ';' | ':' | '。' | '！' | '？' | '、'
+        )
+    })
+    .trim()
+    .to_string()
 }
 
 /// Strip trailing parenthesized text from an album title.

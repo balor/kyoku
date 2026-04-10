@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
@@ -6,11 +8,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use rusqlite::Connection;
 
+use crate::core::organizer::{self, remove_empty_parents, DeleteCollectionPlan};
 use crate::db::queries::{self, CollectionRow, TrackRow};
 use crate::error::Result;
 use crate::tui::keybindings as keys;
 use crate::tui::themes::Theme;
 use crate::tui::views::library::format_duration_ms;
+use crate::tui::widgets::confirm_delete::{ConfirmAction, ConfirmDelete};
 use crate::tui::widgets::input::TextInput;
 
 pub enum CollectionsAction {
@@ -30,7 +34,10 @@ enum InputMode {
     Normal,
     Creating(TextInput),
     Renaming { input: TextInput, id: i64 },
-    ConfirmDelete,
+    ConfirmDelete {
+        plan: DeleteCollectionPlan,
+        widget: ConfirmDelete,
+    },
 }
 
 pub struct CollectionsView {
@@ -68,7 +75,16 @@ impl CollectionsView {
         Ok(())
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent, conn: &Connection) -> CollectionsAction {
+    pub fn has_popup(&self) -> bool {
+        !matches!(self.mode, InputMode::Normal)
+    }
+
+    pub fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        conn: &Connection,
+        music_dir: &Path,
+    ) -> CollectionsAction {
         match &mut self.mode {
             InputMode::Creating(input) => {
                 if keys::is_back(&key) {
@@ -102,16 +118,20 @@ impl CollectionsView {
                 input.handle_key(key);
                 return CollectionsAction::None;
             }
-            InputMode::ConfirmDelete => {
-                if key.code == KeyCode::Char('y') {
-                    if let Some(coll) = self.collections.get(self.selected) {
-                        queries::delete_collection(conn, coll.id).ok();
+            InputMode::ConfirmDelete { plan, widget } => {
+                let action = widget.handle_key(key);
+                match action {
+                    ConfirmAction::None => return CollectionsAction::None,
+                    ConfirmAction::Cancel => {
+                        self.mode = InputMode::Normal;
+                        return CollectionsAction::None;
                     }
-                    self.mode = InputMode::Normal;
-                    return CollectionsAction::Refresh;
+                    ConfirmAction::Confirm { delete_files } => {
+                        organizer::apply_delete_collection(conn, plan, delete_files).ok();
+                        self.mode = InputMode::Normal;
+                        return CollectionsAction::Refresh;
+                    }
                 }
-                self.mode = InputMode::Normal;
-                return CollectionsAction::None;
             }
             InputMode::Normal => {}
         }
@@ -165,10 +185,46 @@ impl CollectionsView {
             return CollectionsAction::None;
         }
         if key.code == KeyCode::Char('d') && !self.collections.is_empty() {
-            self.mode = InputMode::ConfirmDelete;
+            if let Some(coll) = self.collections.get(self.selected) {
+                if let Ok(plan) = organizer::plan_delete_collection(conn, coll.id, music_dir) {
+                    let mut widget = ConfirmDelete::new(
+                        "Confirm Delete",
+                        format!("Delete collection '{}'?", plan.collection_name),
+                    );
+
+                    let total_files = plan.files_to_delete.len();
+                    if total_files > 0 {
+                        widget = widget.with_summary(format!(
+                            "{} file(s) under {}",
+                            total_files,
+                            music_dir.display()
+                        ));
+                    } else {
+                        widget = widget.without_checkbox();
+                    }
+
+                    if !plan.orphaned_track_ids.is_empty() {
+                        widget = widget.with_warning(format!(
+                            "{} track(s) only exist in this collection — they'll be \
+                             removed entirely if you delete files",
+                            plan.orphaned_track_ids.len()
+                        ));
+                    }
+
+                    if !plan.files_outside_music_dir.is_empty() {
+                        widget = widget.with_warning(format!(
+                            "{} file(s) outside music_dir will NOT be touched",
+                            plan.files_outside_music_dir.len()
+                        ));
+                    }
+
+                    self.mode = InputMode::ConfirmDelete { plan, widget };
+                }
+            }
             return CollectionsAction::None;
         }
 
+        let _ = music_dir;
         CollectionsAction::None
     }
 
@@ -251,24 +307,9 @@ impl CollectionsView {
             input.render(frame, inner, theme);
         }
 
-        // Render delete confirmation
-        if matches!(self.mode, InputMode::ConfirmDelete) {
-            use crate::tui::widgets::popup;
-            use ratatui::text::Line;
-            let name = self
-                .collections
-                .get(self.selected)
-                .map(|c| c.name.as_str())
-                .unwrap_or("?");
-            let content = vec![
-                Line::from(format!("Delete collection '{}'?", name)),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "y = yes, any other key = cancel",
-                    Style::default().fg(theme.fg_muted),
-                )),
-            ];
-            popup::render_popup(frame, area, theme, "Confirm Delete", &content, 50, 7);
+        // Render delete confirmation widget
+        if let InputMode::ConfirmDelete { widget, .. } = &self.mode {
+            widget.render(frame, area, theme);
         }
     }
 
@@ -291,8 +332,15 @@ pub struct CollectionDetailView {
     pub filter: String,
     pub selected: usize,
     pub scroll_offset: usize,
-    confirm_remove: bool,
+    confirm_remove: Option<RemoveTrackConfirm>,
     rename_input: Option<TextInput>,
+}
+
+struct RemoveTrackConfirm {
+    track_id: i64,
+    file_path: Option<PathBuf>,
+    will_orphan: bool,
+    widget: ConfirmDelete,
 }
 
 impl Default for CollectionDetailView {
@@ -303,7 +351,7 @@ impl Default for CollectionDetailView {
             filter: String::new(),
             selected: 0,
             scroll_offset: 0,
-            confirm_remove: false,
+            confirm_remove: None,
             rename_input: None,
         }
     }
@@ -341,13 +389,13 @@ impl CollectionDetailView {
         self.filter.clear();
         self.selected = 0;
         self.scroll_offset = 0;
-        self.confirm_remove = false;
+        self.confirm_remove = None;
         self.rename_input = None;
         Ok(())
     }
 
     pub fn has_popup(&self) -> bool {
-        self.confirm_remove || self.rename_input.is_some()
+        self.confirm_remove.is_some() || self.rename_input.is_some()
     }
 
     /// Reload tracks, preserving cursor position (clamped to filtered list).
@@ -373,6 +421,7 @@ impl CollectionDetailView {
         &mut self,
         key: KeyEvent,
         conn: &Connection,
+        music_dir: &Path,
     ) -> CollectionDetailAction {
         // Rename mode captures input
         if let Some(input) = &mut self.rename_input {
@@ -404,19 +453,45 @@ impl CollectionDetailView {
         let visible = self.filtered_indices();
 
         // Confirmation popup captures input
-        if self.confirm_remove {
-            if key.code == KeyCode::Char('y') {
-                let target = visible
-                    .get(self.selected)
-                    .and_then(|&i| self.tracks.get(i).map(|t| t.id));
-                if let (Some(coll), Some(track_id)) = (&self.collection, target) {
-                    let coll_id = coll.id;
-                    queries::remove_track_from_collection(conn, coll_id, track_id).ok();
-                    self.reload_tracks(conn);
+        if let Some(state) = &mut self.confirm_remove {
+            let action = state.widget.handle_key(key);
+            match action {
+                ConfirmAction::None => return CollectionDetailAction::None,
+                ConfirmAction::Cancel => {
+                    self.confirm_remove = None;
+                    return CollectionDetailAction::None;
+                }
+                ConfirmAction::Confirm { delete_files } => {
+                    let track_id = state.track_id;
+                    let file_path = state.file_path.clone();
+                    let will_orphan = state.will_orphan;
+                    self.confirm_remove = None;
+
+                    if let Some(coll) = &self.collection {
+                        let coll_id = coll.id;
+                        queries::remove_track_from_collection(conn, coll_id, track_id).ok();
+
+                        if delete_files {
+                            if let Some(p) = &file_path {
+                                if p.exists() && p.starts_with(music_dir) {
+                                    let _ = std::fs::remove_file(p);
+                                    if let Some(parent) = p.parent() {
+                                        let _ = remove_empty_parents(parent);
+                                    }
+                                }
+                            }
+                            // If removing this would leave the track with no
+                            // file home, delete the track entirely.
+                            if will_orphan {
+                                queries::delete_track(conn, track_id).ok();
+                            }
+                        }
+
+                        self.reload_tracks(conn);
+                    }
+                    return CollectionDetailAction::None;
                 }
             }
-            self.confirm_remove = false;
-            return CollectionDetailAction::None;
         }
 
         let count = visible.len();
@@ -452,8 +527,46 @@ impl CollectionDetailView {
                 return CollectionDetailAction::EditTrack(track.id);
             }
         }
-        if key.code == KeyCode::Char('x') && current_track.is_some() {
-            self.confirm_remove = true;
+        if key.code == KeyCode::Char('x') {
+            if let Some(track) = current_track {
+                if let Some(coll) = &self.collection {
+                    // Look up the collection_file_path and other-homes info
+                    let homes = queries::get_collection_tracks_with_other_homes(conn, coll.id)
+                        .unwrap_or_default();
+                    let info = homes.iter().find(|h| h.track_id == track.id);
+                    let file_path = info.and_then(|i| i.collection_file_path.clone()).map(PathBuf::from);
+                    let will_orphan = info
+                        .map(|i| !i.has_album && i.other_collection_count == 0)
+                        .unwrap_or(false);
+
+                    let mut widget = ConfirmDelete::new(
+                        "Confirm Remove",
+                        format!("Remove '{}' from collection '{}'?", track.title, coll.name),
+                    );
+                    if let Some(p) = &file_path {
+                        if p.starts_with(music_dir) {
+                            widget = widget.with_summary(format!("File: {}", p.display()));
+                        } else {
+                            widget = widget.without_checkbox();
+                        }
+                    } else {
+                        widget = widget.without_checkbox();
+                    }
+                    if will_orphan {
+                        widget = widget.with_warning(
+                            "This is the only place this track lives — \
+                             checking the box will remove it from the library entirely",
+                        );
+                    }
+
+                    self.confirm_remove = Some(RemoveTrackConfirm {
+                        track_id: track.id,
+                        file_path,
+                        will_orphan,
+                        widget,
+                    });
+                }
+            }
             return CollectionDetailAction::None;
         }
         if key.code == KeyCode::Char('R') {
@@ -583,22 +696,8 @@ impl CollectionDetailView {
         }
 
         // Confirmation popup for removing a track
-        if self.confirm_remove {
-            use crate::tui::widgets::popup;
-            let title = visible
-                .get(self.selected)
-                .and_then(|&i| self.tracks.get(i))
-                .map(|t| t.title.clone())
-                .unwrap_or_default();
-            let content = vec![
-                Line::from(format!("Remove '{}' from collection?", title)),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "y = yes, any other key = cancel",
-                    Style::default().fg(theme.fg_muted),
-                )),
-            ];
-            popup::render_popup(frame, area, theme, "Confirm Remove", &content, 60, 7);
+        if let Some(state) = &self.confirm_remove {
+            state.widget.render(frame, area, theme);
         }
     }
 }

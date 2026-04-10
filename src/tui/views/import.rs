@@ -19,6 +19,7 @@ use crate::external::musicbrainz::{MbRelease, MbClient};
 use crate::tui::keybindings as keys;
 use crate::tui::themes::Theme;
 use crate::tui::widgets::input::TextInput;
+use crate::tui::widgets::pick_collection::{PickAction, PickCollectionPopup};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImportStep {
@@ -50,6 +51,9 @@ pub struct ImportGroup {
     pub mb_candidates: Vec<MbCandidate>,
     pub selected_candidate: Option<usize>,
     pub mb_state: MbMatchState,
+    /// If non-empty, all tracks in this group will be added to this collection
+    /// (created if it doesn't exist) during the Importing step.
+    pub target_collection: String,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -68,7 +72,7 @@ pub struct ImportView {
     pub scan_progress: (usize, usize),
     pub import_progress: (usize, usize),
     pub result_summary: Option<String>,
-    // Custom path input on the SelectSource step
+    // SelectSource step state
     pub custom_path: TextInput,
     pub use_custom_path: bool,
     pub custom_path_error: Option<String>,
@@ -81,6 +85,8 @@ pub struct ImportView {
     mbid_input: Option<TextInput>,
     /// Receives a fetched release from a manual MBID lookup.
     mbid_fetch_rx: Option<mpsc::Receiver<MbResult>>,
+    /// Per-group collection picker (during Review). When `Some`, captures input.
+    collection_picker: Option<PickCollectionPopup>,
 }
 
 enum ScanMessage {
@@ -112,6 +118,7 @@ impl Default for ImportView {
             mb_rx: None,
             mbid_input: None,
             mbid_fetch_rx: None,
+            collection_picker: None,
         }
     }
 }
@@ -126,9 +133,10 @@ impl ImportView {
         self.mb_rx = None;
         self.mbid_input = None;
         self.mbid_fetch_rx = None;
+        self.collection_picker = None;
         self.rate_limit_ms = rate_limit_ms;
 
-        // Reset custom-path state
+        // Reset SelectSource fields
         self.custom_path = TextInput::new("~/Music/new-album").with_label(" Path: ");
         self.use_custom_path = false;
         self.custom_path_error = None;
@@ -147,6 +155,7 @@ impl ImportView {
     pub fn is_capturing_input(&self) -> bool {
         (self.step == ImportStep::SelectSource && self.use_custom_path)
             || self.mbid_input.is_some()
+            || self.collection_picker.is_some()
     }
 
     pub fn can_cancel(&self) -> bool {
@@ -191,17 +200,12 @@ impl ImportView {
         }
 
         if self.use_custom_path {
-            // In custom-path mode
             if keys::is_back(&key) {
-                // Esc only exits custom mode while text remains; if empty, let
-                // the wizard handle it as a normal cancel (by returning — app
-                // handles Esc for can_cancel).
                 if !self.custom_path.value.is_empty() {
                     self.custom_path.clear();
                     self.custom_path_error = None;
                     return;
                 }
-                // Empty → fall through to default Esc behaviour (wizard cancel)
                 self.use_custom_path = false;
                 self.custom_path.focused = false;
                 return;
@@ -230,20 +234,36 @@ impl ImportView {
                 return;
             }
 
-            // Any keystroke clears the error and edits the input
             if self.custom_path.handle_key(key) {
                 self.custom_path_error = None;
             }
             return;
         }
 
-        // Default mode: scan inbox dirs on Enter
         if keys::is_confirm(&key) && !self.source_paths.is_empty() {
             self.start_scan(conn);
         }
     }
 
     fn handle_review_key(&mut self, key: KeyEvent, conn: &Connection) {
+        // Per-group collection picker captures all keys
+        if let Some(picker) = &mut self.collection_picker {
+            match picker.handle_key(key) {
+                PickAction::None => return,
+                PickAction::Cancel => {
+                    self.collection_picker = None;
+                    return;
+                }
+                PickAction::Picked(name) => {
+                    if let Some(group) = self.groups.get_mut(self.current_group) {
+                        group.target_collection = name.trim().to_string();
+                    }
+                    self.collection_picker = None;
+                    return;
+                }
+            }
+        }
+
         // Manual MBID input captures all keys
         if let Some(input) = &mut self.mbid_input {
             if keys::is_back(&key) {
@@ -361,6 +381,24 @@ impl ImportView {
                             group.action = GroupAction::AcceptMb;
                         }
                     }
+                }
+            }
+            KeyCode::Char('c') => {
+                // Open per-group collection picker
+                if let Some(group) = self.groups.get(self.current_group) {
+                    let current = group.target_collection.clone();
+                    // Default name = the last component of the group's source dir
+                    let default_name = std::path::Path::new(&group.name)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&group.name)
+                        .to_string();
+                    self.collection_picker = Some(PickCollectionPopup::open(
+                        format!("Add to collection — {}", group.name),
+                        default_name,
+                        &current,
+                        conn,
+                    ));
                 }
             }
             KeyCode::Char('m') => {
@@ -522,6 +560,7 @@ impl ImportView {
                     mb_candidates: Vec::new(),
                     selected_candidate: None,
                     mb_state: MbMatchState::NotStarted,
+                    target_collection: String::new(),
                 })
                 .collect();
 
@@ -571,33 +610,79 @@ impl ImportView {
             }
 
             let mut client = MbClient::new(rate_limit_ms);
-            let candidates = match client.search_releases(&artist, &album, 5) {
-                Ok(releases) => {
-                    let mut scored: Vec<MbCandidate> = releases
-                        .into_iter()
-                        .map(|r| {
-                            let score = matching::score_release(
-                                &artist,
-                                &album,
-                                year,
-                                track_count,
-                                &titles,
-                                total_ms,
-                                &r,
-                            );
-                            MbCandidate { release: r, score }
-                        })
-                        .collect();
-                    scored.sort_by(|a, b| {
-                        b.score
-                            .total
-                            .partial_cmp(&a.score.total)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    scored
-                }
+            let mut candidates: Vec<MbCandidate> = match client
+                .search_releases(&artist, &album, 5)
+            {
+                Ok(releases) => releases
+                    .into_iter()
+                    .map(|r| {
+                        let score = matching::score_release(
+                            &artist,
+                            &album,
+                            year,
+                            track_count,
+                            &titles,
+                            total_ms,
+                            &r,
+                        );
+                        MbCandidate { release: r, score }
+                    })
+                    .collect(),
                 Err(_) => Vec::new(),
             };
+
+            // Initial sort by coarse score
+            candidates.sort_by(|a, b| {
+                b.score
+                    .total
+                    .partial_cmp(&a.score.total)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            // Tiebreaker: when top candidates are within 10% of the leader,
+            // fetch the full release for each tied candidate so we can compare
+            // track titles and durations. The search API doesn't return tracks,
+            // so this is the only way to differentiate releases by translated
+            // titles, alternate editions, etc.
+            let leader_score = candidates.first().map(|c| c.score.total).unwrap_or(0.0);
+            let tied_count = candidates
+                .iter()
+                .take_while(|c| (leader_score - c.score.total).abs() < 0.10)
+                .count()
+                .min(3); // never refetch more than top 3
+
+            if tied_count > 1 {
+                for i in 0..tied_count {
+                    let mbid = candidates[i].release.id.clone();
+                    if let Ok(full) = client.fetch_release(&mbid) {
+                        let new_score = matching::score_release(
+                            &artist,
+                            &album,
+                            year,
+                            track_count,
+                            &titles,
+                            total_ms,
+                            &full,
+                        );
+                        // Preserve the search-result API score (full release fetch
+                        // returns api_score = 100 because it's not a search hit)
+                        let preserved_api = candidates[i].release.api_score;
+                        let mut full = full;
+                        full.api_score = preserved_api;
+                        candidates[i] = MbCandidate {
+                            release: full,
+                            score: new_score,
+                        };
+                    }
+                }
+                // Re-sort after refetching
+                candidates.sort_by(|a, b| {
+                    b.score
+                        .total
+                        .partial_cmp(&a.score.total)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
 
             let _ = tx.send(MbResult {
                 group_idx: idx,
@@ -631,6 +716,7 @@ impl ImportView {
         let mut imported = 0u32;
         let mut skipped = 0u32;
         let mut errors = 0u32;
+        let mut added_to_collection = 0u32;
 
         // Fetch full release data for MB-matched groups (search results don't
         // include track listings — we need them for per-track metadata).
@@ -638,6 +724,16 @@ impl ImportView {
 
         for group in &groups_to_import {
             let loose = group.action == GroupAction::Loose;
+
+            // Resolve this group's target collection (if any)
+            let target_collection_name = group.target_collection.trim();
+            let target_collection_id = if !target_collection_name.is_empty() {
+                queries::get_or_create_collection(conn, target_collection_name)
+                    .ok()
+                    .map(|(id, _)| id)
+            } else {
+                None
+            };
 
             // If MB match, fetch the full release once for the whole group
             let mb_full = if group.action == GroupAction::AcceptMb {
@@ -649,9 +745,9 @@ impl ImportView {
                 None
             };
 
-            // When MB matched, use MB data for album creation (avoids
-            // creating a duplicate with a different artist name from file tags).
-            let album_id = if loose {
+            // For MB-matched groups, all tracks share one album (the MB release).
+            // Precompute it once.
+            let mb_album_id = if loose {
                 None
             } else if let Some(mb) = &mb_full {
                 queries::get_or_create_album(
@@ -665,30 +761,11 @@ impl ImportView {
                 .ok()
                 .map(|(id, _)| id)
             } else {
-                // As-is: use file tags
-                let first_tag = group.tracks.first().and_then(|(_, td)| td.as_ref());
-                if let Some(td) = first_tag {
-                    if let Some(album_title) = &td.album {
-                        queries::get_or_create_album(
-                            conn,
-                            album_title,
-                            td.album_artist.as_deref(),
-                            td.year.map(|y| y as i32),
-                            td.genre.as_deref(),
-                            group.tracks.len() as u32,
-                        )
-                        .ok()
-                        .map(|(id, _)| id)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+                None
             };
 
-            // Update album with MB metadata (mbid, label, etc.)
-            if let (Some(aid), Some(mb)) = (album_id, &mb_full) {
+            // Update MB album with MB metadata
+            if let (Some(aid), Some(mb)) = (mb_album_id, &mb_full) {
                 queries::update_album_mb(
                     conn,
                     aid,
@@ -702,6 +779,98 @@ impl ImportView {
                 .ok();
             }
 
+            // For "Accept as-is" mode, decide if this group is a real album
+            // (all tracks share the same album+album_artist tags) or a compilation.
+            // Compilations get NO per-track albums — those tracks become loose
+            // and live entirely in their assigned collection (if any).
+            //
+            // Rules for "real album":
+            // 1. All tracks share the same (album, album_artist) tuple
+            // 2. The album_artist is NOT a "various" marker
+            //    (Various, Various Artists, VA, Compilation, etc.)
+            // 3. Track-level artists are not wildly diverse
+            //    (compilations often have one unique artist per track)
+            let group_is_real_album = !loose && mb_full.is_none() && {
+                let key = |td: &Option<tagger::TagData>| -> Option<(String, Option<String>)> {
+                    td.as_ref().and_then(|t| {
+                        t.album.as_ref().map(|a| {
+                            (
+                                a.clone(),
+                                t.album_artist.clone().or_else(|| t.artist.clone()),
+                            )
+                        })
+                    })
+                };
+                let first_key = group.tracks.first().and_then(|(_, td)| key(td));
+                let consistent_album_key =
+                    first_key.is_some() && group.tracks.iter().all(|(_, td)| key(td) == first_key);
+
+                if !consistent_album_key {
+                    false
+                } else {
+                    // Check rule 2: album_artist isn't a "various" marker
+                    let album_artist_lower = first_key
+                        .as_ref()
+                        .and_then(|(_, aa)| aa.as_ref())
+                        .map(|s| s.to_lowercase())
+                        .unwrap_or_default();
+                    let is_various_marker = matches!(
+                        album_artist_lower.as_str(),
+                        "various"
+                            | "various artists"
+                            | "various artist"
+                            | "va"
+                            | "v.a."
+                            | "compilation"
+                            | "compilations"
+                            | "soundtrack"
+                            | "ost"
+                    );
+
+                    if is_various_marker {
+                        false
+                    } else {
+                        // Check rule 3: track-level artist diversity
+                        // Real albums typically have 1-3 distinct artists (main + features).
+                        // If >= 4 distinct artists OR >= 40% of tracks have unique artists,
+                        // it's a compilation.
+                        use std::collections::HashSet;
+                        let unique_artists: HashSet<String> = group
+                            .tracks
+                            .iter()
+                            .filter_map(|(_, td)| {
+                                td.as_ref().and_then(|t| t.artist.as_ref()).cloned()
+                            })
+                            .collect();
+                        let n_tracks = group.tracks.len().max(1);
+                        let too_diverse = unique_artists.len() >= 4
+                            || (unique_artists.len() * 100 / n_tracks) >= 40;
+                        !too_diverse
+                    }
+                }
+            };
+
+            // Precompute the as-is album once if we determined this is a real album
+            let asis_album_id = if group_is_real_album {
+                let first_tag = group.tracks.first().and_then(|(_, td)| td.as_ref());
+                first_tag.and_then(|td| {
+                    td.album.as_ref().and_then(|album_title| {
+                        queries::get_or_create_album(
+                            conn,
+                            album_title,
+                            td.album_artist.as_deref().or(td.artist.as_deref()),
+                            td.year.map(|y| y as i32),
+                            td.genre.as_deref(),
+                            group.tracks.len() as u32,
+                        )
+                        .ok()
+                        .map(|(id, _)| id)
+                    })
+                })
+            } else {
+                None
+            };
+
             for (i, (track, _tag_data)) in group.tracks.iter().enumerate() {
                 let path_str = track.file_path.display().to_string();
 
@@ -710,6 +879,22 @@ impl ImportView {
                     self.import_progress.0 += 1;
                     continue;
                 }
+
+                // Per-track album resolution:
+                // - Loose: no album
+                // - MB-matched: use the precomputed MB album (one per group)
+                // - Real album (as-is): use the precomputed shared album
+                // - Compilation (as-is): no album → tracks become loose, but
+                //   they can still be in a collection
+                let album_id = if loose {
+                    None
+                } else if let Some(id) = mb_album_id {
+                    Some(id)
+                } else if let Some(id) = asis_album_id {
+                    Some(id)
+                } else {
+                    None
+                };
 
                 let file_size = std::fs::metadata(&track.file_path)
                     .map(|m| m.len() as i64)
@@ -739,6 +924,15 @@ impl ImportView {
                                     .ok();
                             }
                         }
+
+                        // Add to target collection if user requested one
+                        if let Some(coll_id) = target_collection_id {
+                            if queries::add_track_to_collection(conn, coll_id, track_id)
+                                .unwrap_or(false)
+                            {
+                                added_to_collection += 1;
+                            }
+                        }
                     }
                     Err(_) => errors += 1,
                 }
@@ -747,6 +941,12 @@ impl ImportView {
         }
 
         let mut parts = vec![format!("Imported: {}", imported)];
+        if added_to_collection > 0 {
+            parts.push(format!(
+                "Added to collections: {}",
+                added_to_collection
+            ));
+        }
         if skipped > 0 {
             parts.push(format!("Duplicates: {}", skipped));
         }
@@ -860,6 +1060,7 @@ impl ImportView {
                     vec![
                         ("↑↓/1-5", "pick MB"),
                         ("m", "MBID"),
+                        ("c", "+coll"),
                         ("A", "as-is"),
                         ("S", "skip"),
                         ("L", "loose"),
@@ -897,7 +1098,6 @@ impl ImportView {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // Split inner into: inbox section / path input / path error
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -912,9 +1112,7 @@ impl ImportView {
         let inbox_header_style = if self.use_custom_path {
             Style::default().fg(theme.fg_dim).add_modifier(Modifier::BOLD)
         } else {
-            Style::default()
-                .fg(theme.fg)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)
         };
         let mut inbox_lines = vec![
             Line::from(""),
@@ -946,9 +1144,7 @@ impl ImportView {
 
         // Custom-path heading
         let custom_heading_style = if self.use_custom_path {
-            Style::default()
-                .fg(theme.fg)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.fg_dim)
         };
@@ -961,7 +1157,6 @@ impl ImportView {
         ]);
         frame.render_widget(heading, chunks[1]);
 
-        // Path input
         self.custom_path.render(frame, chunks[2], theme);
 
         // Bottom line: error or hint
@@ -1094,7 +1289,7 @@ impl ImportView {
                 Span::styled("[Import loose]", Style::default().fg(theme.yellow))
             }
         };
-        let nav = Line::from(vec![
+        let mut nav_spans = vec![
             Span::styled(
                 format!(
                     " Group {}/{}: {} ({} tracks) ",
@@ -1106,7 +1301,16 @@ impl ImportView {
                 Style::default().fg(theme.fg),
             ),
             action_label,
-        ]);
+        ];
+        if !group.target_collection.is_empty() {
+            nav_spans.push(Span::styled(
+                format!(" → coll: {}", group.target_collection),
+                Style::default()
+                    .fg(theme.accent_alt)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        let nav = Line::from(nav_spans);
         let p = Paragraph::new(nav);
         frame.render_widget(p, chunks[0]);
 
@@ -1231,6 +1435,11 @@ impl ImportView {
                 5,
             );
             input.render(frame, popup_inner, theme);
+        }
+
+        // Per-group collection picker popup
+        if let Some(picker) = &self.collection_picker {
+            picker.render(frame, area, theme);
         }
 
         // Show "Fetching..." if MBID lookup is in progress

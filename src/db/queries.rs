@@ -587,6 +587,58 @@ pub fn find_collection_by_name(conn: &Connection, name: &str) -> Result<Option<i
     Ok(id)
 }
 
+/// Track in a collection with information about its other "homes".
+/// Used by collection deletion to decide which tracks would be orphaned.
+#[derive(Debug, Clone)]
+pub struct CollectionTrackHomes {
+    pub track_id: i64,
+    pub track_file_path: String,
+    pub collection_file_path: Option<String>,
+    pub has_album: bool,
+    pub other_collection_count: u32,
+}
+
+/// For each track in a collection, return its file paths and how many other
+/// "homes" it has (an album, or other collections-with-files).
+pub fn get_collection_tracks_with_other_homes(
+    conn: &Connection,
+    collection_id: i64,
+) -> Result<Vec<CollectionTrackHomes>> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            t.id,
+            t.file_path,
+            ct.collection_file_path,
+            (t.album_id IS NOT NULL) as has_album,
+            (SELECT COUNT(*) FROM collection_tracks ct2
+             WHERE ct2.track_id = t.id AND ct2.collection_id != ?1
+                AND ct2.collection_file_path IS NOT NULL) as other_collection_count
+         FROM collection_tracks ct
+         JOIN tracks t ON t.id = ct.track_id
+         WHERE ct.collection_id = ?1",
+    )?;
+    let rows = stmt.query_map([collection_id], |row| {
+        Ok(CollectionTrackHomes {
+            track_id: row.get(0)?,
+            track_file_path: row.get(1)?,
+            collection_file_path: row.get(2)?,
+            has_album: row.get::<_, i64>(3)? != 0,
+            other_collection_count: row.get::<_, i64>(4)? as u32,
+        })
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
+/// Delete a track entirely from the database (cascades collection_tracks).
+pub fn delete_track(conn: &Connection, track_id: i64) -> Result<()> {
+    conn.execute("DELETE FROM tracks WHERE id = ?1", [track_id])?;
+    Ok(())
+}
+
 /// Update a track with MusicBrainz metadata.
 pub fn update_track_mb(
     conn: &Connection,

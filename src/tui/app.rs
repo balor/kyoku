@@ -188,6 +188,7 @@ impl App {
             AppView::AlbumDetail { .. } | AppView::LooseTracks => {
                 self.album_detail.has_popup()
             }
+            AppView::Collections => self.collections.has_popup(),
             AppView::CollectionDetail { .. } => self.collection_detail.has_popup(),
             AppView::Editor { .. } => self.editor.is_editing(),
             AppView::Import => self.import.is_capturing_input(),
@@ -320,7 +321,9 @@ impl App {
             self.switch_view(AppView::Library);
             return AppAction::None;
         }
-        let action = self.collections.handle_key(key, &self.conn);
+        let action =
+            self.collections
+                .handle_key(key, &self.conn, &self.settings.library.music_dir);
         match action {
             super::views::collections::CollectionsAction::None => AppAction::None,
             super::views::collections::CollectionsAction::OpenCollection(id) => {
@@ -359,7 +362,11 @@ impl App {
             self.switch_view(AppView::Collections);
             return AppAction::None;
         }
-        let action = self.collection_detail.handle_key(key, &self.conn);
+        let action = self.collection_detail.handle_key(
+            key,
+            &self.conn,
+            &self.settings.library.music_dir,
+        );
         match action {
             super::views::collections::CollectionDetailAction::None => AppAction::None,
             super::views::collections::CollectionDetailAction::EditTrack(id) => {

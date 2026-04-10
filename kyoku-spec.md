@@ -571,6 +571,27 @@ MusicBrainz won't have entries for a lot of music: doujin releases, Bandcamp-onl
 5. Unmatched tracks appear in all views, searches, and operations identically to matched ones
 6. Tag status shows `unmatched` or `manual` — these are informational labels, not errors
 
+#### 6.1.7 The import → organize flow
+
+kyoku has two phases for getting your music into the library: **import** (cataloging) and **organize** (moving files into place). They're deliberately separate so you can review before anything moves on disk.
+
+1. **Drop files into an inbox directory** — any path you've configured under `inbox_dirs`, or pass a path explicitly to `kyoku import <path>`.
+2. **Run import.** kyoku scans the inbox, reads tags, optionally matches against MusicBrainz for clean metadata, checks for duplicates, and adds new tracks to the library database. Files stay where they are at this point — nothing is moved yet.
+3. **Pick a flow per group during the wizard:**
+   - **Album flow** (default) — kyoku detects albums automatically and keeps them grouped.
+   - **Loose flow** (`--loose`) — each file is treated as standalone, no album grouping.
+   - **Direct to collection** (`--collection "X"`) — every imported track joins the named collection (creating it if needed). Stack with `--loose` for "drop a folder of stray MP3s into a playlist".
+4. **Run organize.** This is where files actually move from the inbox into your `music_dir`:
+   - **Album tracks** → moved into the artist/album hierarchy via `path_template` (or `path_template_single_disc` for single-disc albums).
+   - **Tracks in any collection** → an additional copy is placed in `Collections/<name>/...` via `collection_path_template`. One copy per collection. The per-collection `path_template` (if set) overrides the default.
+   - **Loose tracks not in any collection** → moved into the special `_loose/` folder via `loose_path_template`.
+
+   After organize, the inbox should be empty. Every file in your library lives somewhere under `music_dir`.
+
+If a track exists in both an album and N collections, you end up with `1 + N` physical files: one in the album hierarchy, one per collection. Each is a real file that any file-browser music player can navigate independently.
+
+When you delete a collection or remove a track from a collection in the TUI, you're offered an opt-in checkbox to also delete the corresponding files from disk. Files outside `music_dir` (e.g. user-relocated copies) are never touched. Tracks that would be left with no file home if you delete files are removed from the library entirely.
+
 #### 6.1.8 Future import wizard enhancements
 Nice-to-haves deferred from milestone 3 — the typed path input in the wizard is good enough for now but these make it noticeably better:
 
@@ -917,6 +938,19 @@ Tag Editor:
 ## 7. Path Template Engine
 
 The path template engine replaces `{variable}` placeholders with sanitized tag values.
+
+### Config templates
+
+There are four templates in `[library]`, each used in a different situation by `kyoku organize`:
+
+| Setting | Used for | Default |
+|---------|----------|---------|
+| `path_template` | Multi-disc album tracks (album hierarchy) | `{album_artist}/{album} ({year})/{disc:0}-{track:02} {title}.{ext}` |
+| `path_template_single_disc` | Single-disc album tracks (album hierarchy) | `{album_artist}/{album} ({year})/{track:02} {title}.{ext}` |
+| `collection_path_template` | Collection copies (one per collection a track is in) | `Collections/{collection}/{album_artist} - {album} - {track:02} {title}.{ext}` |
+| `loose_path_template` | Loose tracks with no album and no collection | `_loose/{artist} - {title}.{ext}` |
+
+A collection can also have its own per-collection `path_template` (in the `collections` table) that overrides `collection_path_template` for that collection only.
 
 ### Variables
 

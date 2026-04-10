@@ -298,16 +298,24 @@ fn main() -> anyhow::Result<()> {
                     println!("  → {}\n", to_dir);
                 }
 
+                // Group copies by collection + target dir
+                let mut copy_groups: std::collections::BTreeMap<(String, String), usize> =
+                    std::collections::BTreeMap::new();
                 for c in &plan.copies {
                     let to_dir = c
                         .to
                         .parent()
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
-                    println!(
-                        "  copy → {} (collection: {})",
-                        to_dir, c.collection_name
-                    );
+                    *copy_groups
+                        .entry((c.collection_name.clone(), to_dir))
+                        .or_insert(0) += 1;
+                }
+                for ((coll, to_dir), count) in &copy_groups {
+                    println!("  copy ({} files) → {} (collection: {})", count, to_dir, coll);
+                }
+                if !copy_groups.is_empty() {
+                    println!();
                 }
 
                 println!(
