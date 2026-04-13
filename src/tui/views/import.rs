@@ -1131,7 +1131,7 @@ impl ImportView {
                 }
             }
             ImportStep::Importing => vec![],
-            ImportStep::Complete => vec![("Enter/Esc", "done")],
+            ImportStep::Complete => vec![("any key", "done")],
         }
     }
 
@@ -1691,7 +1691,7 @@ impl ImportView {
             Line::from(Span::styled(summary, Style::default().fg(theme.fg))),
             Line::from(""),
             Line::from(Span::styled(
-                "Press Enter or Esc to return to library.",
+                "Press any key to return to library.",
                 Style::default().fg(theme.fg_dim),
             )),
         ];

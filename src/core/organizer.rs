@@ -32,6 +32,10 @@ pub struct OrganizePlan {
     pub moves: Vec<FileMove>,
     pub copies: Vec<FileCopy>,
     pub skipped: usize,
+    /// Tracks whose source file no longer exists on disk. These rows are
+    /// orphaned — they point at paths that have been moved/deleted/renamed
+    /// outside of kyoku. `apply_organize` will delete these DB rows.
+    pub missing_sources: Vec<(i64, PathBuf, String)>,
 }
 
 #[derive(Debug, Default)]
@@ -40,6 +44,7 @@ pub struct OrganizeResult {
     pub copied: u32,
     pub errors: Vec<(String, String)>,
     pub dirs_cleaned: u32,
+    pub orphans_cleaned: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -62,7 +67,71 @@ pub fn plan_organize(
 
     let tracks = queries::get_all_tracks_for_organize(conn, &filter)?;
 
+    // Collision tracking: `tracks.file_path` has a UNIQUE constraint in the
+    // DB, so two tracks cannot end up with the same destination path.
+    // We start with every existing track path, remove the ones being moved
+    // (those slots will be freed), and disambiguate proposed targets
+    // against this set before committing them to the plan.
+    use std::collections::HashSet;
+    let mut used_paths: HashSet<PathBuf> = queries::list_all_track_paths(conn)?
+        .into_iter()
+        .map(|(_, p)| PathBuf::from(p))
+        .collect();
     for t in &tracks {
+        used_paths.remove(&PathBuf::from(&t.file_path));
+    }
+
+    // Helper: return a variant of `target` that isn't already in `used`,
+    // appending " (2)", " (3)", … before the extension. Inserts the final
+    // chosen path into `used` as a side effect.
+    let disambiguate = |target: PathBuf, used: &mut HashSet<PathBuf>| -> PathBuf {
+        if !used.contains(&target) {
+            used.insert(target.clone());
+            return target;
+        }
+        let parent = target.parent().map(|p| p.to_path_buf());
+        let stem = target
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let ext = target
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        for i in 2..1000 {
+            let new_name = if ext.is_empty() {
+                format!("{} ({})", stem, i)
+            } else {
+                format!("{} ({}).{}", stem, i, ext)
+            };
+            let candidate = match &parent {
+                Some(p) => p.join(&new_name),
+                None => PathBuf::from(&new_name),
+            };
+            if !used.contains(&candidate) {
+                used.insert(candidate.clone());
+                return candidate;
+            }
+        }
+        // Fallback: just return the original and let the DB complain
+        used.insert(target.clone());
+        target
+    };
+
+    for t in &tracks {
+        // Detect orphaned DB rows: tracks whose source file no longer exists.
+        // These happen when a previous organize run partially succeeded and
+        // left the DB pointing at gone files, or when the user deleted files
+        // manually. We collect them and clean up the rows during apply.
+        let from_check = PathBuf::from(&t.file_path);
+        if !from_check.exists() {
+            plan.missing_sources
+                .push((t.id, from_check, t.title.clone()));
+            continue;
+        }
+
         let vars = TemplateVars {
             artist: t.artist.clone().unwrap_or_default(),
             album_artist: t.album_artist.clone().unwrap_or_default(),
@@ -88,7 +157,7 @@ pub fn plan_organize(
         let mut collections = t.collections.clone();
         collections.sort_by_key(|(id, _, _)| *id);
 
-        // Helper to compute a collection's target path
+        // Helper to compute a collection's raw target path (pre-disambiguation)
         let collection_target = |coll_name: &str, coll_template: &Option<String>| -> PathBuf {
             let tmpl = coll_template
                 .as_deref()
@@ -105,11 +174,14 @@ pub fn plan_organize(
             } else {
                 &settings.library.path_template
             };
-            let target = music_dir.join(template::render_path(tmpl, &vars));
+            let raw_target = music_dir.join(template::render_path(tmpl, &vars));
 
-            if from == target {
+            if from == raw_target {
+                // Already in place — reserve the slot so nothing else takes it
+                used_paths.insert(raw_target);
                 plan.skipped += 1;
             } else {
+                let target = disambiguate(raw_target, &mut used_paths);
                 plan.moves.push(FileMove {
                     track_id: t.id,
                     from: from.clone(),
@@ -118,9 +190,12 @@ pub fn plan_organize(
                 });
             }
 
-            // One copy per collection (using per-collection template or default)
+            // One copy per collection (collection_file_path has no UNIQUE
+            // constraint, so raw targets are fine here — but we still
+            // disambiguate on disk to avoid overwriting files.)
             for (coll_id, coll_name, coll_template) in &collections {
-                let target = collection_target(coll_name, coll_template);
+                let raw = collection_target(coll_name, coll_template);
+                let target = disambiguate(raw, &mut used_paths);
                 plan.copies.push(FileCopy {
                     track_id: t.id,
                     collection_id: *coll_id,
@@ -130,14 +205,15 @@ pub fn plan_organize(
                 });
             }
         } else if !collections.is_empty() {
-            // Loose track in collections: MOVE to first collection's folder,
-            // and the same target serves as that collection's file location.
+            // Loose track in collections: MOVE to first collection's folder
             let (first_id, first_name, first_template) = &collections[0];
-            let primary_target = collection_target(first_name, first_template);
+            let raw_primary = collection_target(first_name, first_template);
 
-            if from == primary_target {
+            if from == raw_primary {
+                used_paths.insert(raw_primary);
                 plan.skipped += 1;
             } else {
+                let primary_target = disambiguate(raw_primary, &mut used_paths);
                 plan.moves.push(FileMove {
                     track_id: t.id,
                     from: from.clone(),
@@ -148,7 +224,8 @@ pub fn plan_organize(
 
             // COPY to each additional collection's folder
             for (coll_id, coll_name, coll_template) in &collections[1..] {
-                let target = collection_target(coll_name, coll_template);
+                let raw = collection_target(coll_name, coll_template);
+                let target = disambiguate(raw, &mut used_paths);
                 plan.copies.push(FileCopy {
                     track_id: t.id,
                     collection_id: *coll_id,
@@ -160,11 +237,13 @@ pub fn plan_organize(
         } else {
             // Loose track, no collections: move to _loose/ folder
             let tmpl = &settings.library.loose_path_template;
-            let target = music_dir.join(template::render_path(tmpl, &vars));
+            let raw_target = music_dir.join(template::render_path(tmpl, &vars));
 
-            if from == target {
+            if from == raw_target {
+                used_paths.insert(raw_target);
                 plan.skipped += 1;
             } else {
+                let target = disambiguate(raw_target, &mut used_paths);
                 plan.moves.push(FileMove {
                     track_id: t.id,
                     from,
@@ -249,6 +328,13 @@ pub fn apply_organize(
             Err(e) => {
                 result.errors.push((c.from.display().to_string(), e.to_string()));
             }
+        }
+    }
+
+    // Delete orphaned DB rows (tracks whose source file no longer exists)
+    for (track_id, _, _) in &plan.missing_sources {
+        if queries::delete_track(conn, *track_id).is_ok() {
+            result.orphans_cleaned += 1;
         }
     }
 

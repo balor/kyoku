@@ -258,7 +258,10 @@ fn main() -> anyhow::Result<()> {
 
             let plan = core::organizer::plan_organize(&conn, &settings, filter)?;
 
-            if plan.moves.is_empty() && plan.copies.is_empty() {
+            if plan.moves.is_empty()
+                && plan.copies.is_empty()
+                && plan.missing_sources.is_empty()
+            {
                 println!(
                     "Nothing to do — {} file(s) already in the correct location.",
                     plan.skipped
@@ -318,11 +321,26 @@ fn main() -> anyhow::Result<()> {
                     println!();
                 }
 
+                if !plan.missing_sources.is_empty() {
+                    println!(
+                        "\nMissing source files ({} — DB rows will be pruned):",
+                        plan.missing_sources.len()
+                    );
+                    for (id, path, title) in plan.missing_sources.iter().take(10) {
+                        println!("  [{}] {} — {}", id, title, path.display());
+                    }
+                    if plan.missing_sources.len() > 10 {
+                        println!("  … and {} more", plan.missing_sources.len() - 10);
+                    }
+                    println!();
+                }
+
                 println!(
-                    "{} file(s) to move, {} to copy, {} already in place",
+                    "{} file(s) to move, {} to copy, {} already in place, {} orphaned",
                     plan.moves.len(),
                     plan.copies.len(),
-                    plan.skipped
+                    plan.skipped,
+                    plan.missing_sources.len(),
                 );
 
                 if apply {
@@ -350,8 +368,11 @@ fn main() -> anyhow::Result<()> {
                     )?;
                     println!();
                     println!(
-                        "Done: {} moved, {} copied, {} dirs cleaned",
-                        result.moved, result.copied, result.dirs_cleaned
+                        "Done: {} moved, {} copied, {} dirs cleaned, {} orphans pruned",
+                        result.moved,
+                        result.copied,
+                        result.dirs_cleaned,
+                        result.orphans_cleaned,
                     );
                     if !result.errors.is_empty() {
                         println!("Errors:");

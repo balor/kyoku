@@ -252,7 +252,7 @@ impl App {
             }
             AppView::CollectionDetail { collection_id } => {
                 self.collection_detail
-                    .load(&self.conn, *collection_id)
+                    .load(&self.conn, *collection_id, &self.settings.library.music_dir)
                     .ok();
             }
             AppView::Import => {
@@ -376,7 +376,13 @@ impl App {
             }
             super::views::collections::CollectionDetailAction::Refresh => {
                 if let AppView::CollectionDetail { collection_id } = self.view {
-                    self.collection_detail.load(&self.conn, collection_id).ok();
+                    self.collection_detail
+                        .load(
+                            &self.conn,
+                            collection_id,
+                            &self.settings.library.music_dir,
+                        )
+                        .ok();
                 }
                 AppAction::None
             }
@@ -384,6 +390,13 @@ impl App {
     }
 
     fn handle_import_key(&mut self, key: KeyEvent) -> AppAction {
+        // On the Complete step: any keypress returns to the library.
+        if self.import.is_complete() {
+            self.switch_view(AppView::Library);
+            self.refresh_counts();
+            return AppAction::None;
+        }
+
         // When the wizard is capturing text input (e.g. custom-path field),
         // Esc is handled inside the view (clear input / exit custom mode)
         // — don't cancel the whole wizard unless the view itself decides.
@@ -402,11 +415,6 @@ impl App {
             self.switch_view(AppView::Library);
             self.refresh_counts();
             return AppAction::None;
-        }
-
-        if self.import.is_complete() && keys::is_confirm(&key) {
-            self.switch_view(AppView::Library);
-            self.refresh_counts();
         }
         AppAction::None
     }
@@ -458,7 +466,7 @@ impl App {
             AppView::CollectionDetail { collection_id } => {
                 let prev = self.collection_detail.selected;
                 self.collection_detail
-                    .load(&self.conn, *collection_id)
+                    .load(&self.conn, *collection_id, &self.settings.library.music_dir)
                     .ok();
                 if prev < self.collection_detail.tracks.len() {
                     self.collection_detail.selected = prev;
@@ -528,7 +536,7 @@ impl App {
                 AppView::CollectionDetail { collection_id } => {
                     let prev_selected = self.collection_detail.selected;
                     self.collection_detail
-                        .load(&self.conn, *collection_id)
+                        .load(&self.conn, *collection_id, &self.settings.library.music_dir)
                         .ok();
                     if prev_selected < self.collection_detail.tracks.len() {
                         self.collection_detail.selected = prev_selected;

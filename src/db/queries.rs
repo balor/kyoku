@@ -497,6 +497,28 @@ pub fn get_collection_tracks(
     Ok(result)
 }
 
+/// Load every `collection_file_path` for a collection, keyed by track_id.
+/// Used by the TUI collection detail view to show where each track
+/// physically lives (organized collection copy vs the track's main path).
+pub fn get_collection_file_paths(
+    conn: &Connection,
+    collection_id: i64,
+) -> Result<std::collections::HashMap<i64, String>> {
+    let mut stmt = conn.prepare(
+        "SELECT track_id, collection_file_path FROM collection_tracks
+         WHERE collection_id = ?1 AND collection_file_path IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([collection_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut map = std::collections::HashMap::new();
+    for row in rows {
+        let (id, path) = row?;
+        map.insert(id, path);
+    }
+    Ok(map)
+}
+
 /// Create a new collection.
 pub fn create_collection(conn: &Connection, name: &str) -> Result<i64> {
     conn.execute("INSERT INTO collections (name) VALUES (?1)", [name])?;
@@ -793,6 +815,20 @@ pub fn get_all_tracks_for_organize(
 }
 
 /// Update a track's file_path in the database.
+/// List every (track_id, file_path) currently in the library.
+/// Used by the organizer for collision detection.
+pub fn list_all_track_paths(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare("SELECT id, file_path FROM tracks")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
 pub fn update_track_path(conn: &Connection, track_id: i64, new_path: &str) -> Result<()> {
     conn.execute(
         "UPDATE tracks SET file_path = ?1, modified_date = datetime('now') WHERE id = ?2",

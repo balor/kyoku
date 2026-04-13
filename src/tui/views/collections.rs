@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
@@ -329,6 +329,12 @@ impl CollectionsView {
 pub struct CollectionDetailView {
     pub collection: Option<CollectionRow>,
     pub tracks: Vec<TrackRow>,
+    /// Maps track_id → collection_file_path (if the track has an organized
+    /// copy inside the collection folder). Populated on load.
+    pub collection_paths: std::collections::HashMap<i64, String>,
+    /// Cached music_dir for detecting whether a track's file_path is
+    /// inside the organized library or still in the inbox.
+    pub music_dir: PathBuf,
     pub filter: String,
     pub selected: usize,
     pub scroll_offset: usize,
@@ -348,6 +354,8 @@ impl Default for CollectionDetailView {
         Self {
             collection: None,
             tracks: Vec::new(),
+            collection_paths: std::collections::HashMap::new(),
+            music_dir: PathBuf::new(),
             filter: String::new(),
             selected: 0,
             scroll_offset: 0,
@@ -381,11 +389,19 @@ impl CollectionDetailView {
 }
 
 impl CollectionDetailView {
-    pub fn load(&mut self, conn: &Connection, collection_id: i64) -> Result<()> {
+    pub fn load(
+        &mut self,
+        conn: &Connection,
+        collection_id: i64,
+        music_dir: &Path,
+    ) -> Result<()> {
         // Get collection info
         let collections = queries::list_collections(conn)?;
         self.collection = collections.into_iter().find(|c| c.id == collection_id);
         self.tracks = queries::get_collection_tracks(conn, collection_id, 0, 500)?;
+        self.collection_paths =
+            queries::get_collection_file_paths(conn, collection_id).unwrap_or_default();
+        self.music_dir = music_dir.to_path_buf();
         self.filter.clear();
         self.selected = 0;
         self.scroll_offset = 0;
@@ -401,12 +417,15 @@ impl CollectionDetailView {
     /// Reload tracks, preserving cursor position (clamped to filtered list).
     fn reload_tracks(&mut self, conn: &Connection) {
         if let Some(coll) = &self.collection {
-            if let Ok(tracks) = queries::get_collection_tracks(conn, coll.id, 0, 500) {
+            let coll_id = coll.id;
+            if let Ok(tracks) = queries::get_collection_tracks(conn, coll_id, 0, 500) {
                 self.tracks = tracks;
             }
+            self.collection_paths =
+                queries::get_collection_file_paths(conn, coll_id).unwrap_or_default();
             // Refresh collection metadata for track count/duration in header
             if let Ok(collections) = queries::list_collections(conn) {
-                self.collection = collections.into_iter().find(|c| c.id == coll.id);
+                self.collection = collections.into_iter().find(|c| c.id == coll_id);
             }
         }
         let visible_len = self.filtered_indices().len();
@@ -437,7 +456,8 @@ impl CollectionDetailView {
                         queries::rename_collection(conn, id, &new_name).ok();
                         // Reload collection info while preserving cursor
                         let prev = self.selected;
-                        self.load(conn, id).ok();
+                        let cached_music_dir = self.music_dir.clone();
+                        self.load(conn, id, &cached_music_dir).ok();
                         if prev < self.tracks.len() {
                             self.selected = prev;
                         }
@@ -591,6 +611,7 @@ impl CollectionDetailView {
             .constraints([
                 Constraint::Length(2), // header
                 Constraint::Min(5),   // tracks
+                Constraint::Length(2), // footer (status + path)
             ])
             .split(area);
 
@@ -685,6 +706,66 @@ impl CollectionDetailView {
         .header(header);
 
         frame.render_widget(table, chunks[1]);
+
+        // Footer: selected track's path and its location status
+        let footer_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(chunks[2]);
+
+        if let Some(selected_track) = visible
+            .get(self.selected)
+            .and_then(|&i| self.tracks.get(i))
+        {
+            // Line 1: status badge indicating where the file lives
+            let has_collection_copy = self.collection_paths.contains_key(&selected_track.id);
+            let track_path = Path::new(&selected_track.file_path);
+            let track_in_library = !self.music_dir.as_os_str().is_empty()
+                && track_path.starts_with(&self.music_dir);
+            let (badge, badge_color, desc) = if has_collection_copy {
+                (
+                    "[copy]",
+                    theme.green,
+                    "organized collection copy exists on disk",
+                )
+            } else if track_in_library {
+                (
+                    "[linked]",
+                    theme.cyan,
+                    "linked to album/loose file — collection copy will be created on organize",
+                )
+            } else {
+                (
+                    "[inbox]",
+                    theme.yellow,
+                    "still in inbox — run `kyoku organize` to move it",
+                )
+            };
+            let status = Line::from(vec![
+                Span::styled(
+                    format!(" {} ", badge),
+                    Style::default()
+                        .fg(badge_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(desc, Style::default().fg(theme.fg_dim)),
+            ]);
+            let p = Paragraph::new(status).style(Style::default().bg(theme.bg_alt));
+            frame.render_widget(p, footer_chunks[0]);
+
+            // Line 2: the actual path
+            let path_display = self
+                .collection_paths
+                .get(&selected_track.id)
+                .cloned()
+                .unwrap_or_else(|| selected_track.file_path.clone());
+            let p = Paragraph::new(Span::styled(
+                format!(" {}", path_display),
+                Style::default().fg(theme.fg_muted),
+            ))
+            .style(Style::default().bg(theme.bg_alt));
+            frame.render_widget(p, footer_chunks[1]);
+        }
 
         // Rename popup
         if let Some(input) = &self.rename_input {
