@@ -52,6 +52,8 @@ pub enum OrganizeFilter {
     All,
     Artist(String),
     Album(String),
+    AlbumId(i64),
+    Loose,
     Path(PathBuf),
     Collection(String),
 }

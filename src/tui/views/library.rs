@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use rusqlite::Connection;
 
@@ -19,6 +19,7 @@ pub enum LibraryAction {
     OpenAlbum(i64),
     OpenLoose,
     SortChanged,
+    OrganizeAll,
 }
 
 pub struct LibraryView {
@@ -30,6 +31,9 @@ pub struct LibraryView {
     pub sort: AlbumSort,
     pub sort_ascending: bool,
     pub add_to_collection: Option<AddToCollectionPopup>,
+    pub organize_plan: Option<crate::core::organizer::OrganizePlan>,
+    pub organize_details: bool,
+    pub organize_scroll: usize,
     pub notice: Option<String>,
 }
 
@@ -44,6 +48,9 @@ impl Default for LibraryView {
             sort: AlbumSort::Artist,
             sort_ascending: true,
             add_to_collection: None,
+            organize_plan: None,
+            organize_details: false,
+            organize_scroll: 0,
             notice: None,
         }
     }
@@ -86,11 +93,55 @@ impl LibraryView {
     }
 
     pub fn has_popup(&self) -> bool {
-        self.add_to_collection.is_some()
+        self.add_to_collection.is_some() || self.organize_plan.is_some()
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, conn: &Connection) -> LibraryAction {
-        // Popup captures input
+        // Organize popup captures input
+        if self.organize_plan.is_some() {
+            if keys::is_confirm(&key) {
+                // Apply is handled by the caller (app.rs) — return the action
+                return LibraryAction::OrganizeAll;
+            }
+            if keys::is_back(&key) {
+                if self.organize_details {
+                    self.organize_details = false;
+                    self.organize_scroll = 0;
+                } else {
+                    self.organize_plan = None;
+                }
+                return LibraryAction::None;
+            }
+            if key.code == KeyCode::Char('d') {
+                self.organize_details = !self.organize_details;
+                self.organize_scroll = 0;
+                return LibraryAction::None;
+            }
+            // Scroll in detail view
+            if self.organize_details {
+                if keys::is_down(&key) {
+                    self.organize_scroll += 1;
+                }
+                if keys::is_up(&key) {
+                    self.organize_scroll = self.organize_scroll.saturating_sub(1);
+                }
+                if keys::is_page_down(&key) {
+                    self.organize_scroll += 20;
+                }
+                if keys::is_page_up(&key) {
+                    self.organize_scroll = self.organize_scroll.saturating_sub(20);
+                }
+                if keys::is_half_page_down(&key) {
+                    self.organize_scroll += 10;
+                }
+                if keys::is_half_page_up(&key) {
+                    self.organize_scroll = self.organize_scroll.saturating_sub(10);
+                }
+            }
+            return LibraryAction::None;
+        }
+
+        // Add-to-collection popup captures input
         if let Some(popup) = &mut self.add_to_collection {
             match popup.handle_key(key, conn) {
                 PopupAction::None => {}
@@ -167,6 +218,10 @@ impl LibraryView {
                 self.selected = count - 1;
             }
             return LibraryAction::None;
+        }
+
+        if key.code == KeyCode::Char('O') {
+            return LibraryAction::OrganizeAll;
         }
 
         if key.code == KeyCode::Char('a') {
@@ -294,6 +349,292 @@ impl LibraryView {
         if let Some(popup) = &self.add_to_collection {
             popup.render(frame, area, theme);
         }
+
+        // Organize preview popup
+        if let Some(plan) = &self.organize_plan {
+            use crate::tui::widgets::popup;
+
+            if self.organize_details {
+                // Detail view: scrollable per-file listing
+                self.render_organize_details(frame, area, theme, plan);
+            } else {
+                // Summary view: compact grouped overview
+                self.render_organize_summary(frame, area, theme, plan);
+            }
+        }
+    }
+
+    fn render_organize_summary(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        plan: &crate::core::organizer::OrganizePlan,
+    ) {
+        use crate::tui::widgets::popup;
+
+        let mut lines = vec![Line::from("")];
+
+        if plan.moves.is_empty() && plan.copies.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "Nothing to organize — all files already in place.",
+                Style::default().fg(theme.fg_muted),
+            )));
+        } else {
+            // Group moves by (source dir → target dir)
+            let mut dir_groups: std::collections::BTreeMap<(String, String), usize> =
+                std::collections::BTreeMap::new();
+            for m in &plan.moves {
+                let from_dir = m
+                    .from
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                let to_dir = m
+                    .to
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                *dir_groups.entry((from_dir, to_dir)).or_insert(0) += 1;
+            }
+            lines.push(Line::from(Span::styled(
+                format!(" {} file(s) to move:", plan.moves.len()),
+                Style::default()
+                    .fg(theme.fg)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for ((from_dir, to_dir), count) in dir_groups.iter().take(12) {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("   {} ", from_dir),
+                        Style::default().fg(theme.fg_dim),
+                    ),
+                    Span::styled(
+                        format!("({}) ", count),
+                        Style::default().fg(theme.fg_muted),
+                    ),
+                ]));
+                lines.push(Line::from(Span::styled(
+                    format!("   → {}", to_dir),
+                    Style::default().fg(theme.accent),
+                )));
+            }
+            if dir_groups.len() > 12 {
+                lines.push(Line::from(Span::styled(
+                    format!("   … and {} more groups", dir_groups.len() - 12),
+                    Style::default().fg(theme.fg_muted),
+                )));
+            }
+
+            // Collection copies grouped by collection name
+            if !plan.copies.is_empty() {
+                let mut coll_counts: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for c in &plan.copies {
+                    *coll_counts.entry(c.collection_name.clone()).or_insert(0) += 1;
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!(" {} collection copy/copies:", plan.copies.len()),
+                    Style::default()
+                        .fg(theme.fg)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                for (name, count) in &coll_counts {
+                    lines.push(Line::from(Span::styled(
+                        format!("   {} ({} files)", name, count),
+                        Style::default().fg(theme.accent_alt),
+                    )));
+                }
+            }
+        }
+
+        lines.push(Line::from(""));
+        let mut stats = Vec::new();
+        if plan.skipped > 0 {
+            stats.push(format!("{} in place", plan.skipped));
+        }
+        if !plan.missing_sources.is_empty() {
+            stats.push(format!("{} orphaned", plan.missing_sources.len()));
+        }
+        if !stats.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!(" {}", stats.join(" · ")),
+                Style::default().fg(theme.fg_muted),
+            )));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Enter = apply · d = show details · Esc = cancel",
+            Style::default().fg(theme.fg_muted),
+        )));
+
+        let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
+        popup::render_popup(frame, area, theme, "Organize Library", &lines, 85, height);
+    }
+
+    fn render_organize_details(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        plan: &crate::core::organizer::OrganizePlan,
+    ) {
+        use crate::tui::widgets::popup;
+
+        // Build the full line list (could be very long)
+        let mut all_lines: Vec<Line<'_>> = Vec::new();
+
+        // Moves
+        if !plan.moves.is_empty() {
+            all_lines.push(Line::from(Span::styled(
+                format!(" Moves ({}):", plan.moves.len()),
+                Style::default()
+                    .fg(theme.fg)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            )));
+            all_lines.push(Line::from(""));
+            for m in &plan.moves {
+                let from_name = m
+                    .from
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or("?");
+                let from_dir = m
+                    .from
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                let to_dir = m
+                    .to
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                let to_name = m.to.file_name().and_then(|f| f.to_str()).unwrap_or("?");
+
+                all_lines.push(Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(from_name, Style::default().fg(theme.fg)),
+                ]));
+                all_lines.push(Line::from(vec![
+                    Span::styled("    from: ", Style::default().fg(theme.fg_muted)),
+                    Span::styled(from_dir, Style::default().fg(theme.fg_dim)),
+                ]));
+                all_lines.push(Line::from(vec![
+                    Span::styled("    → to: ", Style::default().fg(theme.fg_muted)),
+                    Span::styled(to_dir, Style::default().fg(theme.accent)),
+                    Span::styled(
+                        if from_name != to_name {
+                            format!("/{}", to_name)
+                        } else {
+                            String::new()
+                        },
+                        Style::default().fg(theme.yellow),
+                    ),
+                ]));
+                if let Some((_, coll_name)) = &m.also_collection {
+                    all_lines.push(Line::from(Span::styled(
+                        format!("    (also collection: {})", coll_name),
+                        Style::default().fg(theme.accent_alt),
+                    )));
+                }
+                all_lines.push(Line::from(""));
+            }
+        }
+
+        // Copies
+        if !plan.copies.is_empty() {
+            all_lines.push(Line::from(Span::styled(
+                format!(" Collection copies ({}):", plan.copies.len()),
+                Style::default()
+                    .fg(theme.fg)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            )));
+            all_lines.push(Line::from(""));
+            for c in &plan.copies {
+                let name = c.to.file_name().and_then(|f| f.to_str()).unwrap_or("?");
+                let to_dir = c
+                    .to
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                all_lines.push(Line::from(vec![
+                    Span::styled(format!("  {} ", name), Style::default().fg(theme.fg)),
+                    Span::styled(
+                        format!("→ {}", to_dir),
+                        Style::default().fg(theme.accent_alt),
+                    ),
+                    Span::styled(
+                        format!(" ({})", c.collection_name),
+                        Style::default().fg(theme.fg_muted),
+                    ),
+                ]));
+            }
+            all_lines.push(Line::from(""));
+        }
+
+        // Orphans
+        if !plan.missing_sources.is_empty() {
+            all_lines.push(Line::from(Span::styled(
+                format!(
+                    " Orphaned tracks ({} — will be pruned):",
+                    plan.missing_sources.len()
+                ),
+                Style::default()
+                    .fg(theme.yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for (id, path, title) in &plan.missing_sources {
+                all_lines.push(Line::from(Span::styled(
+                    format!("  [{}] {} — {}", id, title, path.display()),
+                    Style::default().fg(theme.fg_dim),
+                )));
+            }
+            all_lines.push(Line::from(""));
+        }
+
+        // Stats footer
+        all_lines.push(Line::from(Span::styled(
+            format!(
+                " {} move(s), {} copy/copies, {} in place",
+                plan.moves.len(),
+                plan.copies.len(),
+                plan.skipped,
+            ),
+            Style::default().fg(theme.fg_muted),
+        )));
+        all_lines.push(Line::from(""));
+        all_lines.push(Line::from(Span::styled(
+            "Enter = apply · d = summary · j/k = scroll · Esc = back",
+            Style::default().fg(theme.fg_muted),
+        )));
+
+        // Apply scroll + viewport
+        let popup_height = area.height.saturating_sub(4);
+        let content_height = popup_height.saturating_sub(2) as usize; // -2 for popup borders
+        let max_scroll = all_lines.len().saturating_sub(content_height);
+        let scroll = self.organize_scroll.min(max_scroll);
+
+        let visible: Vec<Line<'_>> = all_lines
+            .into_iter()
+            .skip(scroll)
+            .take(content_height)
+            .collect();
+
+        popup::render_popup(
+            frame,
+            area,
+            theme,
+            &format!(
+                "Organize Library — Details [{}/{}]",
+                scroll + 1,
+                max_scroll + 1
+            ),
+            &visible,
+            90,
+            popup_height,
+        );
     }
 
     pub fn render_detail_bar(&self, frame: &mut Frame, area: Rect, theme: &Theme) {

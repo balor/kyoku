@@ -6,6 +6,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use rusqlite::Connection;
 
+use crate::config::Settings;
+use crate::core::organizer::{self, OrganizeFilter, OrganizePlan};
 use crate::db::queries::{self, AlbumRow, TrackRow};
 use crate::error::Result;
 use crate::tui::keybindings as keys;
@@ -17,6 +19,7 @@ use crate::tui::widgets::input::TextInput;
 pub enum DetailAction {
     None,
     EditTrack(i64),
+    Organize,
 }
 
 #[derive(Default)]
@@ -28,6 +31,7 @@ pub struct AlbumDetailView {
     pub scroll_offset: usize,
     rename_input: Option<TextInput>,
     add_to_collection: Option<AddToCollectionPopup>,
+    organize_plan: Option<OrganizePlan>,
     notice: Option<String>,
 }
 
@@ -92,10 +96,73 @@ impl AlbumDetailView {
     }
 
     pub fn has_popup(&self) -> bool {
-        self.rename_input.is_some() || self.add_to_collection.is_some()
+        self.rename_input.is_some()
+            || self.add_to_collection.is_some()
+            || self.organize_plan.is_some()
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent, conn: &Connection) -> DetailAction {
+    pub fn set_organize_plan(&mut self, plan: OrganizePlan) {
+        self.organize_plan = Some(plan);
+    }
+
+    pub fn set_notice(&mut self, msg: String) {
+        self.notice = Some(msg);
+    }
+
+    pub fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        conn: &Connection,
+        settings: &Settings,
+    ) -> DetailAction {
+        // Organize popup captures input
+        if self.organize_plan.is_some() {
+            if keys::is_confirm(&key) {
+                if let Some(plan) = self.organize_plan.take() {
+                    match organizer::apply_organize(
+                        conn,
+                        &plan,
+                        &settings.import.organize_operation,
+                    ) {
+                        Ok(result) => {
+                            let mut parts = Vec::new();
+                            if result.moved > 0 {
+                                parts.push(format!("{} moved", result.moved));
+                            }
+                            if result.copied > 0 {
+                                parts.push(format!("{} copied", result.copied));
+                            }
+                            if result.dirs_cleaned > 0 {
+                                parts.push(format!("{} dirs cleaned", result.dirs_cleaned));
+                            }
+                            if !result.errors.is_empty() {
+                                parts.push(format!("{} errors", result.errors.len()));
+                            }
+                            self.notice =
+                                Some(format!("Organized: {}", parts.join(", ")));
+                        }
+                        Err(e) => {
+                            self.notice = Some(format!("Organize failed: {}", e));
+                        }
+                    }
+                    // Reload to reflect new paths
+                    if let Some(album) = &self.album {
+                        let prev = self.selected;
+                        self.load(conn, album.id).ok();
+                        if prev < self.tracks.len() {
+                            self.selected = prev;
+                        }
+                    }
+                }
+                return DetailAction::None;
+            }
+            if keys::is_back(&key) {
+                self.organize_plan = None;
+                return DetailAction::None;
+            }
+            return DetailAction::None;
+        }
+
         // Add-to-collection popup captures input
         if self.add_to_collection.is_some() {
             return self.handle_add_to_collection_key(key, conn);
@@ -187,6 +254,10 @@ impl AlbumDetailView {
                 input.focused = true;
                 self.rename_input = Some(input);
             }
+        }
+
+        if key.code == KeyCode::Char('O') {
+            return DetailAction::Organize;
         }
 
         DetailAction::None
@@ -433,6 +504,88 @@ impl AlbumDetailView {
         // Add-to-collection popup
         if let Some(popup) = &self.add_to_collection {
             popup.render(frame, area, theme);
+        }
+
+        // Organize preview popup
+        if let Some(plan) = &self.organize_plan {
+            use crate::tui::widgets::popup;
+
+            let mut lines = vec![Line::from("")];
+
+            if plan.moves.is_empty() && plan.copies.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "Nothing to organize — all files already in place.",
+                    Style::default().fg(theme.fg_muted),
+                )));
+            } else {
+                if !plan.moves.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!(" {} file(s) to move:", plan.moves.len()),
+                        Style::default()
+                            .fg(theme.fg)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                    for m in plan.moves.iter().take(8) {
+                        let filename = m
+                            .to
+                            .file_name()
+                            .and_then(|f| f.to_str())
+                            .unwrap_or("?");
+                        let to_dir = m
+                            .to
+                            .parent()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default();
+                        lines.push(Line::from(Span::styled(
+                            format!("   {} → {}", filename, to_dir),
+                            Style::default().fg(theme.fg_dim),
+                        )));
+                    }
+                    if plan.moves.len() > 8 {
+                        lines.push(Line::from(Span::styled(
+                            format!("   … and {} more", plan.moves.len() - 8),
+                            Style::default().fg(theme.fg_muted),
+                        )));
+                    }
+                }
+
+                if !plan.copies.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!(" {} collection copy/copies:", plan.copies.len()),
+                        Style::default()
+                            .fg(theme.fg)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                    for c in plan.copies.iter().take(5) {
+                        lines.push(Line::from(Span::styled(
+                            format!("   → {} ({})", c.to.display(), c.collection_name),
+                            Style::default().fg(theme.fg_dim),
+                        )));
+                    }
+                    if plan.copies.len() > 5 {
+                        lines.push(Line::from(Span::styled(
+                            format!("   … and {} more", plan.copies.len() - 5),
+                            Style::default().fg(theme.fg_muted),
+                        )));
+                    }
+                }
+            }
+
+            if plan.skipped > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!(" {} already in place", plan.skipped),
+                    Style::default().fg(theme.fg_muted),
+                )));
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Enter = apply · Esc = cancel",
+                Style::default().fg(theme.fg_muted),
+            )));
+
+            let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
+            popup::render_popup(frame, area, theme, "Organize Preview", &lines, 80, height);
         }
     }
 }

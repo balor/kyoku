@@ -726,7 +726,13 @@ If `music_dir` does not exist when `kyoku organize --apply` is run, kyoku **asks
 5. On confirmation: move/copy files, update DB paths, delete empty source directories
 6. Files already in the correct location are skipped
 
-The TUI equivalent: select tracks/albums, press `o` to organize, review the diff, confirm.
+#### TUI organize (`O` key)
+Press `O` in the library browser to organize the entire library, or in album detail to organize just that album. The TUI shows a popup with two views:
+
+- **Summary view** (default): groups of source → target directories with file counts, collection copy counts, orphan count, and "already in place" count. Press `d` to expand.
+- **Detail view**: scrollable per-file listing showing each file's source path, target path, renamed filenames (highlighted), collection associations, and orphaned tracks. Navigate with `j`/`k`, `PgUp`/`PgDn`, `Ctrl+U`/`Ctrl+D`. Press `d` to toggle back to summary.
+
+`Enter` applies from either view. `Esc` goes back (detail → summary → close).
 
 ### 6.7 Library Relocation (`kyoku relocate`)
 
@@ -885,6 +891,7 @@ Navigation (any list view):
 Library Browser:
   Enter              Open album detail
   i                  Start import wizard
+  O                  Organize entire library (preview → d for details → Enter apply)
   s                  Sort (cycle: artist, album, year, tracks)
   c                  Switch to collections view
 
@@ -892,8 +899,7 @@ Album Detail:
   /                  Filter tracks in this album
   e                  Edit tags (tag editor)
   R                  Rename album
-  r                  Re-match against MusicBrainz (milestone 4)
-  m                  Move/rename files (milestone 5)
+  O                  Organize this album (preview → Enter apply)
   a                  Add track(s) to a collection
   o                  Open file location in system file manager
   Esc                Back to library
@@ -1137,7 +1143,7 @@ pub enum KyokuError {
 - [x] `kyoku relocate` — rebase all paths when library moves (`src/core/relocator.rs`)
 - [x] `kyoku relocate --verify` — detect missing files
 - [x] Clean up empty directories after moves (recursive parent cleanup)
-- [ ] `kyoku organize` TUI integration (`O` key in album detail)
+- [x] `kyoku organize` TUI integration (`O` key — library: organize all, album detail: organize album; summary/detail views with scrollable per-file listing)
 
 ### Milestone 6: Polish & Robustness
 **Goal**: Production-quality for daily use.

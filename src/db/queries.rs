@@ -746,6 +746,11 @@ pub fn get_all_tracks_for_organize(
             "a.title = ?1".to_string(),
             vec![Box::new(name.clone())],
         ),
+        OrganizeFilter::AlbumId(id) => (
+            "t.album_id = ?1".to_string(),
+            vec![Box::new(*id)],
+        ),
+        OrganizeFilter::Loose => ("t.album_id IS NULL".to_string(), vec![]),
         OrganizeFilter::Path(p) => (
             "t.file_path LIKE ?1 || '%'".to_string(),
             vec![Box::new(p.display().to_string())],

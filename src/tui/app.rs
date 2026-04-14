@@ -313,6 +313,66 @@ impl App {
                 self.library.load(&self.conn, query).ok();
                 AppAction::None
             }
+            super::views::library::LibraryAction::OrganizeAll => {
+                if self.library.organize_plan.is_some() {
+                    // Plan is already showing — Enter was pressed, so apply it
+                    if let Some(plan) = self.library.organize_plan.take() {
+                        match crate::core::organizer::apply_organize(
+                            &self.conn,
+                            &plan,
+                            &self.settings.import.organize_operation,
+                        ) {
+                            Ok(result) => {
+                                let mut parts = Vec::new();
+                                if result.moved > 0 {
+                                    parts.push(format!("{} moved", result.moved));
+                                }
+                                if result.copied > 0 {
+                                    parts.push(format!("{} copied", result.copied));
+                                }
+                                if result.dirs_cleaned > 0 {
+                                    parts.push(format!("{} dirs cleaned", result.dirs_cleaned));
+                                }
+                                if result.orphans_cleaned > 0 {
+                                    parts.push(format!(
+                                        "{} orphans pruned",
+                                        result.orphans_cleaned
+                                    ));
+                                }
+                                if !result.errors.is_empty() {
+                                    parts.push(format!("{} errors", result.errors.len()));
+                                }
+                                self.library.notice =
+                                    Some(format!("Organized: {}", parts.join(", ")));
+                            }
+                            Err(e) => {
+                                self.library.notice =
+                                    Some(format!("Organize failed: {}", e));
+                            }
+                        }
+                        self.library.load(&self.conn, None).ok();
+                        self.refresh_counts();
+                    }
+                } else {
+                    // Compute the plan and show it
+                    match crate::core::organizer::plan_organize(
+                        &self.conn,
+                        &self.settings,
+                        crate::core::organizer::OrganizeFilter::All,
+                    ) {
+                        Ok(plan) => {
+                            self.library.organize_plan = Some(plan);
+                            self.library.organize_details = false;
+                            self.library.organize_scroll = 0;
+                        }
+                        Err(e) => {
+                            self.library.notice =
+                                Some(format!("Organize plan failed: {}", e));
+                        }
+                    }
+                }
+                AppAction::None
+            }
         }
     }
 
@@ -346,12 +406,34 @@ impl App {
             self.switch_view(AppView::Library);
             return AppAction::None;
         }
-        let action = self.album_detail.handle_key(key, &self.conn);
+        let action = self.album_detail.handle_key(key, &self.conn, &self.settings);
         match action {
             super::views::detail::DetailAction::None => AppAction::None,
             super::views::detail::DetailAction::EditTrack(id) => {
                 self.editor_return_to = Some(self.view.clone());
                 self.switch_view(AppView::Editor { track_id: id });
+                AppAction::None
+            }
+            super::views::detail::DetailAction::Organize => {
+                // Compute organize plan for the current album (or loose tracks)
+                let filter = if let Some(album) = &self.album_detail.album {
+                    crate::core::organizer::OrganizeFilter::AlbumId(album.id)
+                } else {
+                    crate::core::organizer::OrganizeFilter::Loose
+                };
+                match crate::core::organizer::plan_organize(
+                    &self.conn,
+                    &self.settings,
+                    filter,
+                ) {
+                    Ok(plan) => {
+                        self.album_detail.set_organize_plan(plan);
+                    }
+                    Err(e) => {
+                        self.album_detail
+                            .set_notice(format!("Organize plan failed: {}", e));
+                    }
+                }
                 AppAction::None
             }
         }
@@ -676,6 +758,7 @@ impl App {
                 ("j/k", "nav"),
                 ("Enter", "detail"),
                 ("i", "import"),
+                ("O", "organize"),
                 ("/", "filter"),
                 ("g", "search"),
                 ("a", "add to coll"),
@@ -741,6 +824,7 @@ impl App {
                 ("/", "filter"),
                 ("e", "edit"),
                 ("R", "rename"),
+                ("O", "organize"),
                 ("a", "add to coll"),
                 ("Esc", "back"),
             ],
