@@ -597,8 +597,8 @@ impl LibraryView {
             all_lines.push(Line::from(""));
         }
 
-        // Stats footer
-        all_lines.push(Line::from(Span::styled(
+        // Pinned footer lines (always visible — not scrolled with content)
+        let stats_line = Line::from(Span::styled(
             format!(
                 " {} move(s), {} copy/copies, {} in place",
                 plan.moves.len(),
@@ -606,26 +606,23 @@ impl LibraryView {
                 plan.skipped,
             ),
             Style::default().fg(theme.fg_muted),
-        )));
-        all_lines.push(Line::from(""));
-        all_lines.push(Line::from(Span::styled(
+        ));
+        let hint_line = Line::from(Span::styled(
             "Enter = apply · d = summary · j/k = scroll · Esc = back",
             Style::default().fg(theme.fg_muted),
-        )));
+        ));
+        let footer_height: u16 = 3; // separator + stats + hint
 
-        // Apply scroll + viewport
+        // Pre-compute the content viewport so the title can show the page
+        // indicator. inner = popup_height - 2 (borders); content = inner - footer.
         let popup_height = area.height.saturating_sub(4);
-        let content_height = popup_height.saturating_sub(2) as usize; // -2 for popup borders
+        let content_height = (popup_height as usize)
+            .saturating_sub(2)
+            .saturating_sub(footer_height as usize);
         let max_scroll = all_lines.len().saturating_sub(content_height);
         let scroll = self.organize_scroll.min(max_scroll);
 
-        let visible: Vec<Line<'_>> = all_lines
-            .into_iter()
-            .skip(scroll)
-            .take(content_height)
-            .collect();
-
-        popup::render_popup(
+        let inner = popup::render_popup(
             frame,
             area,
             theme,
@@ -634,10 +631,38 @@ impl LibraryView {
                 scroll + 1,
                 max_scroll + 1
             ),
-            &visible,
+            &[],
             90,
             popup_height,
         );
+
+        // Split inner into scrollable content area + pinned footer
+        let chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Min(1),
+                ratatui::layout::Constraint::Length(footer_height),
+            ])
+            .split(inner);
+
+        let visible: Vec<Line<'_>> = all_lines
+            .into_iter()
+            .skip(scroll)
+            .take(chunks[0].height as usize)
+            .collect();
+
+        let content_p = ratatui::widgets::Paragraph::new(visible)
+            .style(Style::default().fg(theme.fg));
+        frame.render_widget(content_p, chunks[0]);
+
+        // Footer: separator + stats + hint
+        let separator = Line::from(Span::styled(
+            "─".repeat(chunks[1].width as usize),
+            Style::default().fg(theme.border),
+        ));
+        let footer_p = ratatui::widgets::Paragraph::new(vec![separator, stats_line, hint_line])
+            .style(Style::default().fg(theme.fg));
+        frame.render_widget(footer_p, chunks[1]);
     }
 
     pub fn render_detail_bar(&self, frame: &mut Frame, area: Rect, theme: &Theme) {

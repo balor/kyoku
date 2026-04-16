@@ -1403,8 +1403,14 @@ impl ImportView {
 
         // MB candidates
         if group.mb_state == MbMatchState::Searching {
+            const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let frame_idx = (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() / 80)
+                .unwrap_or(0) as usize)
+                % FRAMES.len();
             let p = Paragraph::new(Span::styled(
-                " Searching MusicBrainz...",
+                format!(" {} Searching MusicBrainz...", FRAMES[frame_idx]),
                 Style::default()
                     .fg(theme.accent_alt)
                     .add_modifier(Modifier::ITALIC),
