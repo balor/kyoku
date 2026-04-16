@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use walkdir::WalkDir;
 
 use crate::core::tagger;
-use crate::db::models::{AudioFormat, SUPPORTED_EXTENSIONS, Track};
+use crate::db::models::{SUPPORTED_EXTENSIONS, Track};
 use crate::db::queries;
 use crate::error::Result;
 
@@ -210,7 +210,7 @@ pub fn import(
     // Insert into database
     let tx = conn.unchecked_transaction()?;
 
-    for (key, indices) in &groups {
+    for (_key, indices) in &groups {
         // Create album if not loose and we have album info
         let album_id = if !loose {
             let first_tag = tag_data_map.get(indices[0]).and_then(|td| td.as_ref());

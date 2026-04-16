@@ -79,7 +79,6 @@ fn run_loop(
             let action = app.handle_event(ev);
             match action {
                 AppAction::Quit => break,
-                AppAction::ChangeView(v) => app.switch_view(v),
                 AppAction::None => {}
             }
         }

@@ -121,6 +121,7 @@ pub fn count_tracks(conn: &Connection) -> Result<i64> {
 }
 
 /// Count total albums in the database.
+#[allow(dead_code)] // used by tests; may be reused by future `stats` CLI
 pub fn count_albums(conn: &Connection) -> Result<i64> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM albums", [], |row| row.get(0))?;
     Ok(count)

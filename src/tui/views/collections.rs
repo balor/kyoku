@@ -21,14 +21,12 @@ pub enum CollectionsAction {
     None,
     OpenCollection(i64),
     Refresh,
-    SwitchToLibrary,
     OrganizeAll,
 }
 
 pub enum CollectionDetailAction {
     None,
     EditTrack(i64),
-    Refresh,
     Organize,
     OpenDir,
 }

@@ -31,12 +31,10 @@ pub enum AppView {
     CollectionDetail { collection_id: i64 },
     Import,
     Editor { track_id: i64 },
-    Help,
 }
 
 pub enum AppAction {
     None,
-    ChangeView(AppView),
     Quit,
 }
 
@@ -177,7 +175,6 @@ impl App {
             AppView::CollectionDetail { .. } => self.handle_collection_detail_key(key),
             AppView::Import => self.handle_import_key(key),
             AppView::Editor { .. } => self.handle_editor_key(key),
-            AppView::Help => AppAction::None,
         }
     }
 
@@ -192,7 +189,6 @@ impl App {
             AppView::CollectionDetail { .. } => self.collection_detail.has_popup(),
             AppView::Editor { .. } => self.editor.is_editing(),
             AppView::Import => self.import.is_capturing_input(),
-            _ => false,
         }
     }
 
@@ -264,9 +260,6 @@ impl App {
             }
             AppView::Editor { track_id } => {
                 self.editor.load(&self.conn, *track_id).ok();
-            }
-            AppView::Help => {
-                self.help.visible = true;
             }
         }
         self.search.clear();
@@ -394,10 +387,6 @@ impl App {
                 self.collections.load(&self.conn, None).ok();
                 AppAction::None
             }
-            super::views::collections::CollectionsAction::SwitchToLibrary => {
-                self.switch_view(AppView::Library);
-                AppAction::None
-            }
             super::views::collections::CollectionsAction::OrganizeAll => {
                 if self.collections.organize_plan.is_some() {
                     // Plan showing — Enter applies
@@ -484,18 +473,6 @@ impl App {
             super::views::collections::CollectionDetailAction::EditTrack(id) => {
                 self.editor_return_to = Some(self.view.clone());
                 self.switch_view(AppView::Editor { track_id: id });
-                AppAction::None
-            }
-            super::views::collections::CollectionDetailAction::Refresh => {
-                if let AppView::CollectionDetail { collection_id } = self.view {
-                    self.collection_detail
-                        .load(
-                            &self.conn,
-                            collection_id,
-                            &self.settings.library.music_dir,
-                        )
-                        .ok();
-                }
                 AppAction::None
             }
             super::views::collections::CollectionDetailAction::OpenDir => {
@@ -774,10 +751,6 @@ impl App {
             AppView::CollectionDetail { .. } => self.render_collection_detail(frame, area),
             AppView::Import => self.render_import(frame, area),
             AppView::Editor { .. } => self.render_editor(frame, area),
-            AppView::Help => {
-                // Render library underneath, then help overlay
-                self.render_library(frame, area);
-            }
         }
 
         // Global search overlay

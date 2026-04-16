@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use rusqlite::Connection;
 
 use crate::config::Settings;
-use crate::core::organizer::{self, OrganizeFilter, OrganizePlan};
+use crate::core::organizer::{self, OrganizePlan};
 use crate::db::queries::{self, AlbumRow, TrackRow};
 use crate::error::Result;
 use crate::tui::keybindings as keys;
@@ -89,10 +89,6 @@ impl AlbumDetailView {
 
     fn is_loose(&self) -> bool {
         self.album.is_none()
-    }
-
-    pub fn is_renaming(&self) -> bool {
-        self.rename_input.is_some()
     }
 
     pub fn has_popup(&self) -> bool {

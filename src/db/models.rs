@@ -36,52 +36,6 @@ impl TagStatus {
             Self::Manual => "manual",
         }
     }
-
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "matched" => Self::Matched,
-            "verified" => Self::Verified,
-            "manual" => Self::Manual,
-            _ => Self::Unmatched,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum AlbumType {
-    Album,
-    Compilation,
-    Single,
-    Ep,
-    Soundtrack,
-    Live,
-    Other,
-}
-
-impl AlbumType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Album => "album",
-            Self::Compilation => "compilation",
-            Self::Single => "single",
-            Self::Ep => "ep",
-            Self::Soundtrack => "soundtrack",
-            Self::Live => "live",
-            Self::Other => "other",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "compilation" => Self::Compilation,
-            "single" => Self::Single,
-            "ep" => Self::Ep,
-            "soundtrack" => Self::Soundtrack,
-            "live" => Self::Live,
-            "other" => Self::Other,
-            _ => Self::Album,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,32 +87,6 @@ impl AudioFormat {
     pub fn is_supported(&self) -> bool {
         !matches!(self, Self::Unknown(_))
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Album {
-    pub id: Option<i64>,
-    pub title: String,
-    pub album_artist: Option<String>,
-    pub year: Option<i32>,
-    pub mbid: Option<String>,
-    pub release_mbid: Option<String>,
-    pub disc_total: u32,
-    pub track_total: Option<u32>,
-    pub genre: Option<String>,
-    pub label: Option<String>,
-    pub media_type: Option<String>,
-    pub album_type: AlbumType,
-    pub cover_art_path: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Collection {
-    pub id: Option<i64>,
-    pub name: String,
-    pub description: Option<String>,
-    pub path_template: Option<String>,
-    pub track_count: u32,
 }
 
 /// Audio extensions that kyoku recognizes.

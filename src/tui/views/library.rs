@@ -352,8 +352,6 @@ impl LibraryView {
 
         // Organize preview popup
         if let Some(plan) = &self.organize_plan {
-            use crate::tui::widgets::popup;
-
             if self.organize_details {
                 // Detail view: scrollable per-file listing
                 self.render_organize_details(frame, area, theme, plan);

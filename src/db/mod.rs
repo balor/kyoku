@@ -20,6 +20,7 @@ pub fn open_database(path: impl AsRef<Path>) -> Result<Connection> {
 }
 
 /// Open an in-memory database (for testing).
+#[allow(dead_code)] // used by unit + integration tests
 pub fn open_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
     schema::initialize(&conn)?;

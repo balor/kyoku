@@ -3,6 +3,7 @@ use strsim::jaro_winkler;
 use super::musicbrainz::MbRelease;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // per-component fields used by unit tests for fine-grained assertions
 pub struct MatchScore {
     pub total: f64,
     pub artist: f64,
