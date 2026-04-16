@@ -377,7 +377,10 @@ impl LibraryView {
 
         if plan.moves.is_empty() && plan.copies.is_empty() {
             lines.push(Line::from(Span::styled(
-                "Nothing to organize — all files already in place.",
+                format!(
+                    "Nothing to organize — {} file(s) already in place.",
+                    plan.skipped
+                ),
                 Style::default().fg(theme.fg_muted),
             )));
         } else {

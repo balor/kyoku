@@ -237,10 +237,16 @@ impl AlbumDetailView {
         }
         if key.code == KeyCode::Char('o') {
             if let Some(track) = current_track {
-                if let Some(parent) = std::path::Path::new(&track.file_path).parent() {
-                    let _ = std::process::Command::new("xdg-open")
-                        .arg(parent)
-                        .spawn();
+                let path = std::path::Path::new(&track.file_path);
+                if let Some(parent) = path.parent() {
+                    if !parent.exists() {
+                        self.notice = Some(format!("Directory not found: {}", parent.display()));
+                    } else if !open_directory(parent) {
+                        self.notice = Some(format!(
+                            "Could not open file manager — path: {}",
+                            parent.display()
+                        ));
+                    }
                 }
             }
         }
@@ -514,7 +520,10 @@ impl AlbumDetailView {
 
             if plan.moves.is_empty() && plan.copies.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    "Nothing to organize — all files already in place.",
+                    format!(
+                        "Nothing to organize — {} file(s) already in place.",
+                        plan.skipped
+                    ),
                     Style::default().fg(theme.fg_muted),
                 )));
             } else {
@@ -571,7 +580,7 @@ impl AlbumDetailView {
                 }
             }
 
-            if plan.skipped > 0 {
+            if plan.skipped > 0 && !(plan.moves.is_empty() && plan.copies.is_empty()) {
                 lines.push(Line::from(Span::styled(
                     format!(" {} already in place", plan.skipped),
                     Style::default().fg(theme.fg_muted),
@@ -580,12 +589,99 @@ impl AlbumDetailView {
 
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "Enter = apply · Esc = cancel",
+                if plan.moves.is_empty() && plan.copies.is_empty() {
+                    "Esc = close"
+                } else {
+                    "Enter = apply · Esc = cancel"
+                },
                 Style::default().fg(theme.fg_muted),
             )));
 
             let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
             popup::render_popup(frame, area, theme, "Organize Preview", &lines, 80, height);
         }
+    }
+}
+
+/// Open a directory in the system file manager.
+/// Returns true if a file manager was successfully contacted.
+///
+/// On Linux, uses the D-Bus `org.freedesktop.FileManager1` interface first
+/// (works even from terminal multiplexers like zellij/tmux where env vars
+/// like DISPLAY/WAYLAND_DISPLAY aren't propagated). Falls back to spawning
+/// common file managers directly.
+/// On macOS, uses `open`.
+pub fn open_directory(path: &std::path::Path) -> bool {
+    let null = std::process::Stdio::null;
+
+    #[cfg(target_os = "macos")]
+    {
+        return std::process::Command::new("open")
+            .arg(path)
+            .stdout(null())
+            .stderr(null())
+            .stdin(null())
+            .spawn()
+            .is_ok();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let has_dbus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some();
+        let has_display = std::env::var_os("DISPLAY").is_some()
+            || std::env::var_os("WAYLAND_DISPLAY").is_some();
+
+        // No graphical session reachable (e.g. SSH without X forwarding) — bail
+        // up-front so the caller can show a notice instead of silently
+        // "spawning" a file manager that immediately dies.
+        if !has_dbus && !has_display {
+            return false;
+        }
+
+        // Try D-Bus FileManager1 interface (works from zellij/tmux on Wayland).
+        // dbus-send exits non-zero if the bus isn't reachable or the service
+        // isn't registered, so the status check is meaningful.
+        if has_dbus {
+            let uri = format!("file://{}", path.display());
+            if std::process::Command::new("dbus-send")
+                .args([
+                    "--session",
+                    "--print-reply",
+                    "--type=method_call",
+                    "--dest=org.freedesktop.FileManager1",
+                    "/org/freedesktop/FileManager1",
+                    "org.freedesktop.FileManager1.ShowFolders",
+                    &format!("array:string:{}", uri),
+                    "string:",
+                ])
+                .stdout(null())
+                .stderr(null())
+                .stdin(null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+
+        // Fallback: spawn a file manager directly. Requires a display —
+        // .spawn() returns Ok even if the child immediately exits, but
+        // checking has_display avoids the obvious "no display" case.
+        if has_display {
+            for cmd in &["nautilus", "dolphin", "thunar", "nemo", "pcmanfm", "xdg-open"] {
+                if std::process::Command::new(cmd)
+                    .arg(path)
+                    .stdout(null())
+                    .stderr(null())
+                    .stdin(null())
+                    .spawn()
+                    .is_ok()
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }

@@ -398,6 +398,36 @@ impl App {
                 self.switch_view(AppView::Library);
                 AppAction::None
             }
+            super::views::collections::CollectionsAction::OrganizeAll => {
+                if self.collections.organize_plan.is_some() {
+                    // Plan showing — Enter applies
+                    if let Some(plan) = self.collections.organize_plan.take() {
+                        match crate::core::organizer::apply_organize(
+                            &self.conn,
+                            &plan,
+                            &self.settings.import.organize_operation,
+                        ) {
+                            Ok(_result) => {}
+                            Err(_) => {}
+                        }
+                        self.collections.load(&self.conn, None).ok();
+                        self.refresh_counts();
+                    }
+                } else {
+                    // Compute and show
+                    match crate::core::organizer::plan_organize(
+                        &self.conn,
+                        &self.settings,
+                        crate::core::organizer::OrganizeFilter::All,
+                    ) {
+                        Ok(plan) => {
+                            self.collections.organize_plan = Some(plan);
+                        }
+                        Err(_) => {}
+                    }
+                }
+                AppAction::None
+            }
         }
     }
 
@@ -465,6 +495,100 @@ impl App {
                             &self.settings.library.music_dir,
                         )
                         .ok();
+                }
+                AppAction::None
+            }
+            super::views::collections::CollectionDetailAction::OpenDir => {
+                let visible = self.collection_detail.filtered_indices();
+                let track = visible
+                    .get(self.collection_detail.selected)
+                    .and_then(|&i| self.collection_detail.tracks.get(i));
+                if let Some(track) = track {
+                    let file_path = self
+                        .collection_detail
+                        .collection_paths
+                        .get(&track.id)
+                        .cloned()
+                        .unwrap_or_else(|| track.file_path.clone());
+                    let path = std::path::Path::new(&file_path);
+                    if let Some(parent) = path.parent() {
+                        if !parent.exists() {
+                            self.collection_detail.notice =
+                                Some(format!("Directory not found: {}", parent.display()));
+                        } else if !super::views::detail::open_directory(parent) {
+                            self.collection_detail.notice = Some(format!(
+                                "Could not open file manager — path: {}",
+                                parent.display()
+                            ));
+                        }
+                    }
+                }
+                AppAction::None
+            }
+            super::views::collections::CollectionDetailAction::Organize => {
+                if let Some(coll) = &self.collection_detail.collection {
+                    let coll_name = coll.name.clone();
+
+                    if self.collection_detail.organize_plan.is_some() {
+                        // Plan already showing — Enter was pressed, apply it
+                        if let Some(plan) = self.collection_detail.organize_plan.take() {
+                            match crate::core::organizer::apply_organize(
+                                &self.conn,
+                                &plan,
+                                &self.settings.import.organize_operation,
+                            ) {
+                                Ok(result) => {
+                                    let mut parts = Vec::new();
+                                    if result.moved > 0 {
+                                        parts.push(format!("{} moved", result.moved));
+                                    }
+                                    if result.copied > 0 {
+                                        parts.push(format!("{} copied", result.copied));
+                                    }
+                                    if result.dirs_cleaned > 0 {
+                                        parts.push(format!(
+                                            "{} dirs cleaned",
+                                            result.dirs_cleaned
+                                        ));
+                                    }
+                                    if !result.errors.is_empty() {
+                                        parts.push(format!(
+                                            "{} errors",
+                                            result.errors.len()
+                                        ));
+                                    }
+                                    // Stash notice — we can't set it on the view
+                                    // directly since we'll reload below
+                                    let _notice =
+                                        format!("Organized: {}", parts.join(", "));
+                                }
+                                Err(_) => {}
+                            }
+                            // Reload to reflect new paths
+                            if let AppView::CollectionDetail { collection_id } = self.view {
+                                self.collection_detail
+                                    .load(
+                                        &self.conn,
+                                        collection_id,
+                                        &self.settings.library.music_dir,
+                                    )
+                                    .ok();
+                            }
+                            self.refresh_counts();
+                        }
+                    } else {
+                        // Compute and show the plan
+                        match crate::core::organizer::plan_organize(
+                            &self.conn,
+                            &self.settings,
+                            crate::core::organizer::OrganizeFilter::Collection(coll_name),
+                        ) {
+                            Ok(plan) => {
+                                self.collection_detail.organize_plan = Some(plan);
+                            }
+                            Err(_) => {}
+                        }
+                    }
                 }
                 AppAction::None
             }
@@ -796,6 +920,7 @@ impl App {
                 ("Enter", "browse"),
                 ("n", "new"),
                 ("R", "rename"),
+                ("O", "organize all"),
                 ("d", "delete"),
                 ("Tab", "albums"),
                 ("q", "quit"),
@@ -819,6 +944,18 @@ impl App {
             frame,
             chunks[2],
             self.theme,
+            #[cfg(not(target_os = "windows"))]
+            &[
+                ("j/k", "nav"),
+                ("/", "filter"),
+                ("e", "edit"),
+                ("R", "rename"),
+                ("O", "organize"),
+                ("a", "add to coll"),
+                ("o", "open dir"),
+                ("Esc", "back"),
+            ],
+            #[cfg(target_os = "windows")]
             &[
                 ("j/k", "nav"),
                 ("/", "filter"),
@@ -848,11 +985,24 @@ impl App {
             frame,
             chunks[2],
             self.theme,
+            #[cfg(not(target_os = "windows"))]
             &[
                 ("j/k", "nav"),
                 ("/", "filter"),
                 ("e", "edit"),
                 ("R", "rename"),
+                ("O", "organize"),
+                ("o", "open dir"),
+                ("x", "remove"),
+                ("Esc", "back"),
+            ],
+            #[cfg(target_os = "windows")]
+            &[
+                ("j/k", "nav"),
+                ("/", "filter"),
+                ("e", "edit"),
+                ("R", "rename"),
+                ("O", "organize"),
                 ("x", "remove"),
                 ("Esc", "back"),
             ],

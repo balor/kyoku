@@ -192,19 +192,23 @@ pub fn plan_organize(
                 });
             }
 
-            // One copy per collection (collection_file_path has no UNIQUE
-            // constraint, so raw targets are fine here — but we still
-            // disambiguate on disk to avoid overwriting files.)
+            // One copy per collection — skip if the target already exists on disk
+            // (collection was already organized).
             for (coll_id, coll_name, coll_template) in &collections {
                 let raw = collection_target(coll_name, coll_template);
-                let target = disambiguate(raw, &mut used_paths);
-                plan.copies.push(FileCopy {
-                    track_id: t.id,
-                    collection_id: *coll_id,
-                    collection_name: coll_name.clone(),
-                    from: from.clone(),
-                    to: target,
-                });
+                if raw.exists() {
+                    used_paths.insert(raw);
+                    plan.skipped += 1;
+                } else {
+                    let target = disambiguate(raw, &mut used_paths);
+                    plan.copies.push(FileCopy {
+                        track_id: t.id,
+                        collection_id: *coll_id,
+                        collection_name: coll_name.clone(),
+                        from: from.clone(),
+                        to: target,
+                    });
+                }
             }
         } else if !collections.is_empty() {
             // Loose track in collections: MOVE to first collection's folder
@@ -224,17 +228,22 @@ pub fn plan_organize(
                 });
             }
 
-            // COPY to each additional collection's folder
+            // COPY to each additional collection's folder — skip if already exists
             for (coll_id, coll_name, coll_template) in &collections[1..] {
                 let raw = collection_target(coll_name, coll_template);
-                let target = disambiguate(raw, &mut used_paths);
-                plan.copies.push(FileCopy {
-                    track_id: t.id,
-                    collection_id: *coll_id,
-                    collection_name: coll_name.clone(),
-                    from: from.clone(),
-                    to: target,
-                });
+                if raw.exists() {
+                    used_paths.insert(raw);
+                    plan.skipped += 1;
+                } else {
+                    let target = disambiguate(raw, &mut used_paths);
+                    plan.copies.push(FileCopy {
+                        track_id: t.id,
+                        collection_id: *coll_id,
+                        collection_name: coll_name.clone(),
+                        from: from.clone(),
+                        to: target,
+                    });
+                }
             }
         } else {
             // Loose track, no collections: move to _loose/ folder

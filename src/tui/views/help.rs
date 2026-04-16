@@ -111,6 +111,7 @@ fn help_content(theme: &Theme) -> Vec<Line<'static>> {
         section("Collection Detail"),
         binding("e", "Edit track tags"),
         binding("R", "Rename collection"),
+        binding("O", "Organize this collection (preview + apply)"),
         binding("x", "Remove track from collection (confirms)"),
         binding("Esc", "Back to collections"),
         Line::from(""),

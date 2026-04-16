@@ -22,12 +22,15 @@ pub enum CollectionsAction {
     OpenCollection(i64),
     Refresh,
     SwitchToLibrary,
+    OrganizeAll,
 }
 
 pub enum CollectionDetailAction {
     None,
     EditTrack(i64),
     Refresh,
+    Organize,
+    OpenDir,
 }
 
 enum InputMode {
@@ -43,6 +46,7 @@ enum InputMode {
 pub struct CollectionsView {
     pub collections: Vec<CollectionRow>,
     pub selected: usize,
+    pub organize_plan: Option<crate::core::organizer::OrganizePlan>,
     mode: InputMode,
 }
 
@@ -51,6 +55,7 @@ impl Default for CollectionsView {
         Self {
             collections: Vec::new(),
             selected: 0,
+            organize_plan: None,
             mode: InputMode::Normal,
         }
     }
@@ -76,7 +81,7 @@ impl CollectionsView {
     }
 
     pub fn has_popup(&self) -> bool {
-        !matches!(self.mode, InputMode::Normal)
+        !matches!(self.mode, InputMode::Normal) || self.organize_plan.is_some()
     }
 
     pub fn handle_key(
@@ -85,6 +90,17 @@ impl CollectionsView {
         conn: &Connection,
         music_dir: &Path,
     ) -> CollectionsAction {
+        // Organize popup captures input
+        if self.organize_plan.is_some() {
+            if keys::is_confirm(&key) {
+                return CollectionsAction::OrganizeAll;
+            }
+            if keys::is_back(&key) {
+                self.organize_plan = None;
+            }
+            return CollectionsAction::None;
+        }
+
         match &mut self.mode {
             InputMode::Creating(input) => {
                 if keys::is_back(&key) {
@@ -183,6 +199,9 @@ impl CollectionsView {
                 };
             }
             return CollectionsAction::None;
+        }
+        if key.code == KeyCode::Char('O') {
+            return CollectionsAction::OrganizeAll;
         }
         if key.code == KeyCode::Char('d') && !self.collections.is_empty() {
             if let Some(coll) = self.collections.get(self.selected) {
@@ -311,6 +330,53 @@ impl CollectionsView {
         if let InputMode::ConfirmDelete { widget, .. } = &self.mode {
             widget.render(frame, area, theme);
         }
+
+        // Organize popup
+        if let Some(plan) = &self.organize_plan {
+            use crate::tui::widgets::popup;
+
+            let mut lines = vec![Line::from("")];
+            if plan.moves.is_empty() && plan.copies.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "Nothing to organize — {} file(s) already in place.",
+                        plan.skipped
+                    ),
+                    Style::default().fg(theme.fg_muted),
+                )));
+            } else {
+                if !plan.moves.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!(" {} file(s) to move", plan.moves.len()),
+                        Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+                    )));
+                }
+                if !plan.copies.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!(" {} collection copy/copies", plan.copies.len()),
+                        Style::default().fg(theme.fg),
+                    )));
+                }
+            }
+            if plan.skipped > 0 && !(plan.moves.is_empty() && plan.copies.is_empty()) {
+                lines.push(Line::from(Span::styled(
+                    format!(" {} already in place", plan.skipped),
+                    Style::default().fg(theme.fg_muted),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                if plan.moves.is_empty() && plan.copies.is_empty() {
+                    "Esc = close"
+                } else {
+                    "Enter = apply · Esc = cancel"
+                },
+                Style::default().fg(theme.fg_muted),
+            )));
+
+            let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
+            popup::render_popup(frame, area, theme, "Organize Library", &lines, 70, height);
+        }
     }
 
     pub fn render_detail_bar(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -335,6 +401,8 @@ pub struct CollectionDetailView {
     /// Cached music_dir for detecting whether a track's file_path is
     /// inside the organized library or still in the inbox.
     pub music_dir: PathBuf,
+    pub organize_plan: Option<crate::core::organizer::OrganizePlan>,
+    pub notice: Option<String>,
     pub filter: String,
     pub selected: usize,
     pub scroll_offset: usize,
@@ -356,6 +424,8 @@ impl Default for CollectionDetailView {
             tracks: Vec::new(),
             collection_paths: std::collections::HashMap::new(),
             music_dir: PathBuf::new(),
+            organize_plan: None,
+            notice: None,
             filter: String::new(),
             selected: 0,
             scroll_offset: 0,
@@ -411,7 +481,9 @@ impl CollectionDetailView {
     }
 
     pub fn has_popup(&self) -> bool {
-        self.confirm_remove.is_some() || self.rename_input.is_some()
+        self.confirm_remove.is_some()
+            || self.rename_input.is_some()
+            || self.organize_plan.is_some()
     }
 
     /// Reload tracks, preserving cursor position (clamped to filtered list).
@@ -442,6 +514,17 @@ impl CollectionDetailView {
         conn: &Connection,
         music_dir: &Path,
     ) -> CollectionDetailAction {
+        // Organize popup captures input
+        if self.organize_plan.is_some() {
+            if keys::is_confirm(&key) {
+                return CollectionDetailAction::Organize;
+            }
+            if keys::is_back(&key) {
+                self.organize_plan = None;
+            }
+            return CollectionDetailAction::None;
+        }
+
         // Rename mode captures input
         if let Some(input) = &mut self.rename_input {
             if keys::is_back(&key) {
@@ -600,6 +683,13 @@ impl CollectionDetailView {
             }
             return CollectionDetailAction::None;
         }
+        if key.code == KeyCode::Char('O') {
+            return CollectionDetailAction::Organize;
+        }
+        #[cfg(not(target_os = "windows"))]
+        if key.code == KeyCode::Char('o') {
+            return CollectionDetailAction::OpenDir;
+        }
 
         let _ = conn;
         CollectionDetailAction::None
@@ -717,41 +807,51 @@ impl CollectionDetailView {
             .get(self.selected)
             .and_then(|&i| self.tracks.get(i))
         {
-            // Line 1: status badge indicating where the file lives
-            let has_collection_copy = self.collection_paths.contains_key(&selected_track.id);
-            let track_path = Path::new(&selected_track.file_path);
-            let track_in_library = !self.music_dir.as_os_str().is_empty()
-                && track_path.starts_with(&self.music_dir);
-            let (badge, badge_color, desc) = if has_collection_copy {
-                (
-                    "[copy]",
-                    theme.green,
-                    "organized collection copy exists on disk",
-                )
-            } else if track_in_library {
-                (
-                    "[linked]",
-                    theme.cyan,
-                    "linked to album/loose file — collection copy will be created on organize",
-                )
+            // Line 1: notice (if set) or status badge
+            if let Some(notice) = &self.notice {
+                let p = Paragraph::new(Span::styled(
+                    format!(" {} ", notice),
+                    Style::default().fg(theme.yellow),
+                ))
+                .style(Style::default().bg(theme.bg_alt));
+                frame.render_widget(p, footer_chunks[0]);
             } else {
-                (
-                    "[inbox]",
-                    theme.yellow,
-                    "still in inbox — run `kyoku organize` to move it",
-                )
-            };
-            let status = Line::from(vec![
-                Span::styled(
-                    format!(" {} ", badge),
-                    Style::default()
-                        .fg(badge_color)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(desc, Style::default().fg(theme.fg_dim)),
-            ]);
-            let p = Paragraph::new(status).style(Style::default().bg(theme.bg_alt));
-            frame.render_widget(p, footer_chunks[0]);
+                let has_collection_copy =
+                    self.collection_paths.contains_key(&selected_track.id);
+                let track_path = Path::new(&selected_track.file_path);
+                let track_in_library = !self.music_dir.as_os_str().is_empty()
+                    && track_path.starts_with(&self.music_dir);
+                let (badge, badge_color, desc) = if has_collection_copy {
+                    (
+                        "[copy]",
+                        theme.green,
+                        "organized collection copy exists on disk",
+                    )
+                } else if track_in_library {
+                    (
+                        "[linked]",
+                        theme.cyan,
+                        "linked to album/loose file — collection copy will be created on organize",
+                    )
+                } else {
+                    (
+                        "[inbox]",
+                        theme.yellow,
+                        "still in inbox — run `kyoku organize` to move it",
+                    )
+                };
+                let status = Line::from(vec![
+                    Span::styled(
+                        format!(" {} ", badge),
+                        Style::default()
+                            .fg(badge_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(desc, Style::default().fg(theme.fg_dim)),
+                ]);
+                let p = Paragraph::new(status).style(Style::default().bg(theme.bg_alt));
+                frame.render_widget(p, footer_chunks[0]);
+            }
 
             // Line 2: the actual path
             let path_display = self
@@ -779,6 +879,75 @@ impl CollectionDetailView {
         // Confirmation popup for removing a track
         if let Some(state) = &self.confirm_remove {
             state.widget.render(frame, area, theme);
+        }
+
+        // Organize preview popup
+        if let Some(plan) = &self.organize_plan {
+            use crate::tui::widgets::popup;
+
+            let coll_name = self
+                .collection
+                .as_ref()
+                .map(|c| c.name.as_str())
+                .unwrap_or("?");
+
+            let mut lines = vec![Line::from("")];
+
+            if plan.moves.is_empty() && plan.copies.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "Nothing to organize — {} file(s) already in place.",
+                        plan.skipped
+                    ),
+                    Style::default().fg(theme.fg_muted),
+                )));
+            } else {
+                if !plan.moves.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!(" {} file(s) to move:", plan.moves.len()),
+                        Style::default()
+                            .fg(theme.fg)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                    for m in plan.moves.iter().take(8) {
+                        let name =
+                            m.to.file_name().and_then(|f| f.to_str()).unwrap_or("?");
+                        lines.push(Line::from(Span::styled(
+                            format!("   {}", name),
+                            Style::default().fg(theme.fg_dim),
+                        )));
+                    }
+                    if plan.moves.len() > 8 {
+                        lines.push(Line::from(Span::styled(
+                            format!("   … and {} more", plan.moves.len() - 8),
+                            Style::default().fg(theme.fg_muted),
+                        )));
+                    }
+                }
+                if !plan.copies.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!(" {} collection copy/copies", plan.copies.len()),
+                        Style::default().fg(theme.fg),
+                    )));
+                }
+            }
+
+            if plan.skipped > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!(" {} already in place", plan.skipped),
+                    Style::default().fg(theme.fg_muted),
+                )));
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Enter = apply · Esc = cancel",
+                Style::default().fg(theme.fg_muted),
+            )));
+
+            let title = format!("Organize — {}", coll_name);
+            let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
+            popup::render_popup(frame, area, theme, &title, &lines, 80, height);
         }
     }
 }
