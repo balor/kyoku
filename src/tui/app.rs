@@ -91,7 +91,7 @@ impl App {
             global_search: GlobalSearchView::default(),
             global_search_open: false,
 
-            search: TextInput::new("Search..."),
+            search: TextInput::new("press / to filter, g for global search"),
             search_debounce: None,
 
             editor_return_to: None,
@@ -879,16 +879,12 @@ impl App {
             chunks[4],
             self.theme,
             &[
-                ("j/k", "nav"),
-                ("Enter", "detail"),
                 ("i", "import"),
                 ("O", "organize"),
-                ("/", "filter"),
-                ("g", "search"),
                 ("a", "add to coll"),
                 ("s", "sort"),
-                ("F5", "refresh"),
                 ("Tab", "colls"),
+                ("?", "keybinds"),
                 ("q", "quit"),
             ],
         );
@@ -916,13 +912,12 @@ impl App {
             chunks[4],
             self.theme,
             &[
-                ("j/k", "nav"),
-                ("Enter", "browse"),
                 ("n", "new"),
                 ("R", "rename"),
                 ("O", "organize all"),
                 ("d", "delete"),
                 ("Tab", "albums"),
+                ("?", "keybinds"),
                 ("q", "quit"),
             ],
         );
@@ -946,23 +941,21 @@ impl App {
             self.theme,
             #[cfg(not(target_os = "windows"))]
             &[
-                ("j/k", "nav"),
-                ("/", "filter"),
                 ("e", "edit"),
                 ("R", "rename"),
                 ("O", "organize"),
                 ("a", "add to coll"),
                 ("o", "open dir"),
+                ("?", "keybinds"),
                 ("Esc", "back"),
             ],
             #[cfg(target_os = "windows")]
             &[
-                ("j/k", "nav"),
-                ("/", "filter"),
                 ("e", "edit"),
                 ("R", "rename"),
                 ("O", "organize"),
                 ("a", "add to coll"),
+                ("?", "keybinds"),
                 ("Esc", "back"),
             ],
         );
@@ -987,23 +980,21 @@ impl App {
             self.theme,
             #[cfg(not(target_os = "windows"))]
             &[
-                ("j/k", "nav"),
-                ("/", "filter"),
                 ("e", "edit"),
                 ("R", "rename"),
                 ("O", "organize"),
                 ("o", "open dir"),
                 ("x", "remove"),
+                ("?", "keybinds"),
                 ("Esc", "back"),
             ],
             #[cfg(target_os = "windows")]
             &[
-                ("j/k", "nav"),
-                ("/", "filter"),
                 ("e", "edit"),
                 ("R", "rename"),
                 ("O", "organize"),
                 ("x", "remove"),
+                ("?", "keybinds"),
                 ("Esc", "back"),
             ],
         );

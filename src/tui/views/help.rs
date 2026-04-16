@@ -1,8 +1,9 @@
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 
 use crate::tui::app::AppAction;
 use crate::tui::keybindings as keys;
@@ -19,13 +20,27 @@ impl HelpOverlay {
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
         if keys::is_back(&key) || keys::is_help(&key) || keys::is_quit(&key) {
             self.visible = false;
+            self.scroll = 0;
             return AppAction::None;
         }
         if keys::is_down(&key) {
             self.scroll = self.scroll.saturating_add(1);
-        }
-        if keys::is_up(&key) {
+        } else if keys::is_up(&key) {
             self.scroll = self.scroll.saturating_sub(1);
+        } else if matches!(key.code, KeyCode::PageDown)
+            || (key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL))
+            || (key.code == KeyCode::Char('f') && key.modifiers.contains(KeyModifiers::CONTROL))
+        {
+            self.scroll = self.scroll.saturating_add(10);
+        } else if matches!(key.code, KeyCode::PageUp)
+            || (key.code == KeyCode::Char('u') && key.modifiers.contains(KeyModifiers::CONTROL))
+            || (key.code == KeyCode::Char('b') && key.modifiers.contains(KeyModifiers::CONTROL))
+        {
+            self.scroll = self.scroll.saturating_sub(10);
+        } else if matches!(key.code, KeyCode::Home | KeyCode::Char('g')) {
+            self.scroll = 0;
+        } else if matches!(key.code, KeyCode::End | KeyCode::Char('G')) {
+            self.scroll = usize::MAX; // clamped on render
         }
         AppAction::None
     }
@@ -33,19 +48,68 @@ impl HelpOverlay {
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let bindings = help_content(theme);
 
+        // Popup geometry
+        let popup_height = area.height.saturating_sub(4).min(40);
+        let footer_height: u16 = 2; // separator + hint
+        let content_height = (popup_height as usize)
+            .saturating_sub(2) // borders
+            .saturating_sub(footer_height as usize);
+
+        let max_scroll = bindings.len().saturating_sub(content_height);
+        let scroll = self.scroll.min(max_scroll);
+
+        let title = format!("Key Bindings  [{}/{}]", scroll + 1, max_scroll + 1);
+
+        let inner = popup::render_popup(
+            frame,
+            area,
+            theme,
+            &title,
+            &[],
+            70,
+            popup_height,
+        );
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(footer_height),
+            ])
+            .split(inner);
+
         let visible: Vec<Line<'_>> = bindings
             .into_iter()
-            .skip(self.scroll)
+            .skip(scroll)
+            .take(chunks[0].height as usize)
             .collect();
 
-        popup::render_popup(frame, area, theme, "Key Bindings", &visible, 70, area.height.saturating_sub(4).min(30));
+        let content_p = Paragraph::new(visible).style(Style::default().fg(theme.fg));
+        frame.render_widget(content_p, chunks[0]);
+
+        // Pinned footer
+        let separator = Line::from(Span::styled(
+            "─".repeat(chunks[1].width as usize),
+            Style::default().fg(theme.border),
+        ));
+        let hint = Line::from(vec![
+            Span::styled(" j/k", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(" scroll · ", Style::default().fg(theme.fg_dim)),
+            Span::styled("Ctrl+D/U", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(" page · ", Style::default().fg(theme.fg_dim)),
+            Span::styled("g/G", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(" top/bottom · ", Style::default().fg(theme.fg_dim)),
+            Span::styled("Esc/?", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(" close", Style::default().fg(theme.fg_dim)),
+        ]);
+        let footer_p = Paragraph::new(vec![separator, hint]).style(Style::default().fg(theme.fg));
+        frame.render_widget(footer_p, chunks[1]);
     }
 }
 
 fn help_content(theme: &Theme) -> Vec<Line<'static>> {
     let accent = theme.accent;
     let dim = theme.fg_dim;
-    let _muted = theme.fg_muted;
 
     let section = |title: &'static str| -> Line<'static> {
         Line::from(Span::styled(
@@ -69,69 +133,52 @@ fn help_content(theme: &Theme) -> Vec<Line<'static>> {
     };
 
     vec![
-        section("Global"),
+        section("Global (any view)"),
         binding("q / Ctrl+C", "Quit"),
-        binding("? / F1", "Help overlay"),
+        binding("? / F1", "Toggle this help overlay"),
         binding("F5 / Ctrl+R", "Refresh (rescan inbox, reload view)"),
         binding("/", "Focus local filter (filters current list)"),
         binding("g", "Open global search (albums, tracks, collections)"),
-        binding("Esc", "Back / cancel / clear search"),
+        binding("Esc", "Back / cancel / clear focus"),
         binding("Tab", "Switch Albums ↔ Collections"),
+        binding("i", "Start import wizard"),
         Line::from(""),
-        section("Library Browser"),
+        section("Navigation (lists)"),
         binding("j / ↓", "Move down"),
         binding("k / ↑", "Move up"),
         binding("Ctrl+D", "Half page down"),
         binding("Ctrl+U", "Half page up"),
         binding("Ctrl+F / PgDn", "Page down"),
         binding("Ctrl+B / PgUp", "Page up"),
-        binding("G", "Jump to bottom"),
+        binding("g / Home", "Jump to top"),
+        binding("G / End", "Jump to bottom"),
+        binding("Enter", "Open / confirm selection"),
+        Line::from(""),
+        section("Library Browser"),
         binding("Enter", "Open album detail"),
-        binding("i", "Start import wizard"),
         binding("O", "Organize entire library (preview + apply)"),
         binding("a", "Add whole album to a collection"),
         binding("s", "Sort (cycle: artist, album, year, tracks)"),
-        binding("c", "Switch to collections"),
         Line::from(""),
-        section("Album Detail"),
-        binding("e", "Edit track tags"),
+        section("Album Detail (tracks)"),
+        binding("e", "Edit selected track tags"),
         binding("R", "Rename album"),
         binding("O", "Organize this album (preview + apply)"),
         binding("a", "Add selected track to a collection"),
-        binding("o", "Open file location"),
-        binding("Esc", "Back to library"),
+        binding("o", "Open file location in system file manager"),
         Line::from(""),
         section("Collections"),
         binding("n", "Create new collection"),
         binding("R", "Rename collection"),
-        binding("d", "Delete collection (confirms)"),
+        binding("O", "Organize all collections (preview + apply)"),
+        binding("d", "Delete collection (with file-removal opt-in)"),
         binding("Enter", "Browse collection"),
-        binding("Tab", "Switch to albums"),
         Line::from(""),
-        section("Collection Detail"),
-        binding("e", "Edit track tags"),
+        section("Collection Detail (tracks)"),
+        binding("e", "Edit selected track tags"),
         binding("R", "Rename collection"),
         binding("O", "Organize this collection (preview + apply)"),
-        binding("x", "Remove track from collection (confirms)"),
-        binding("Esc", "Back to collections"),
-        Line::from(""),
-        section("Import Wizard"),
-        binding("Tab", "Toggle inbox dirs ↔ custom path input"),
-        binding("Enter", "Scan (source step) / advance (review)"),
-        binding("1-5", "Pick a MusicBrainz match"),
-        binding("↑/↓", "Cycle MusicBrainz matches"),
-        binding("m", "Enter a MusicBrainz release ID manually"),
-        binding("c", "Assign this group to a collection"),
-        binding("A", "Accept group as-is (skip MB)"),
-        binding("S", "Skip group and advance"),
-        binding("L", "Import group loose"),
-        binding("n / p", "Next / previous group"),
-        binding("Esc", "Cancel"),
-        Line::from(""),
-        section("Tag Editor"),
-        binding("Enter", "Edit selected field"),
-        binding("Tab", "Next field"),
-        binding("Ctrl+S", "Save changes"),
-        binding("Esc", "Cancel"),
+        binding("o", "Open file location in system file manager"),
+        binding("x", "Remove track from collection (with file-removal opt-in)"),
     ]
 }
