@@ -178,19 +178,23 @@ pub fn plan_organize(
             };
             let raw_target = music_dir.join(template::render_path(tmpl, &vars));
 
-            if from == raw_target {
+            // Copies must read from the post-move location because apply_organize
+            // runs moves before copies — by then `from` has been renamed.
+            let copy_source: PathBuf = if from == raw_target {
                 // Already in place — reserve the slot so nothing else takes it
-                used_paths.insert(raw_target);
+                used_paths.insert(raw_target.clone());
                 plan.skipped += 1;
+                raw_target
             } else {
                 let target = disambiguate(raw_target, &mut used_paths);
                 plan.moves.push(FileMove {
                     track_id: t.id,
                     from: from.clone(),
-                    to: target,
+                    to: target.clone(),
                     also_collection: None,
                 });
-            }
+                target
+            };
 
             // One copy per collection — skip if the target already exists on disk
             // (collection was already organized).
@@ -205,7 +209,7 @@ pub fn plan_organize(
                         track_id: t.id,
                         collection_id: *coll_id,
                         collection_name: coll_name.clone(),
-                        from: from.clone(),
+                        from: copy_source.clone(),
                         to: target,
                     });
                 }
@@ -215,18 +219,21 @@ pub fn plan_organize(
             let (first_id, first_name, first_template) = &collections[0];
             let raw_primary = collection_target(first_name, first_template);
 
-            if from == raw_primary {
-                used_paths.insert(raw_primary);
+            // Same post-move-location rule as above.
+            let copy_source: PathBuf = if from == raw_primary {
+                used_paths.insert(raw_primary.clone());
                 plan.skipped += 1;
+                raw_primary
             } else {
                 let primary_target = disambiguate(raw_primary, &mut used_paths);
                 plan.moves.push(FileMove {
                     track_id: t.id,
                     from: from.clone(),
-                    to: primary_target,
+                    to: primary_target.clone(),
                     also_collection: Some((*first_id, first_name.clone())),
                 });
-            }
+                primary_target
+            };
 
             // COPY to each additional collection's folder — skip if already exists
             for (coll_id, coll_name, coll_template) in &collections[1..] {
@@ -240,7 +247,7 @@ pub fn plan_organize(
                         track_id: t.id,
                         collection_id: *coll_id,
                         collection_name: coll_name.clone(),
-                        from: from.clone(),
+                        from: copy_source.clone(),
                         to: target,
                     });
                 }
@@ -551,3 +558,7 @@ pub(crate) fn remove_empty_parents(dir: &Path) -> u32 {
     }
     cleaned
 }
+
+#[cfg(test)]
+#[path = "organizer_tests.rs"]
+mod tests;

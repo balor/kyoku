@@ -55,3 +55,6 @@ path = "src/main.rs"
 [[bin]]
 name = "create_fixtures"
 path = "tests/fixtures/create_fixtures.rs"
+
+[dev-dependencies]
+tempfile = "3"
