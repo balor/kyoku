@@ -132,9 +132,19 @@ impl MbClient {
             .client
             .get(&url)
             .send()
-            .map_err(|e| crate::error::KyokuError::Config(format!("MB search failed: {}", e)))?
+            .map_err(|e| {
+                crate::error::KyokuError::Config(format!(
+                    "MB search failed: {}",
+                    error_chain(&e)
+                ))
+            })?
             .json()
-            .map_err(|e| crate::error::KyokuError::Config(format!("MB parse failed: {}", e)))?;
+            .map_err(|e| {
+                crate::error::KyokuError::Config(format!(
+                    "MB parse failed: {}",
+                    error_chain(&e)
+                ))
+            })?;
 
         Ok(resp
             .releases
@@ -156,9 +166,19 @@ impl MbClient {
             .client
             .get(&url)
             .send()
-            .map_err(|e| crate::error::KyokuError::Config(format!("MB fetch failed: {}", e)))?
+            .map_err(|e| {
+                crate::error::KyokuError::Config(format!(
+                    "MB fetch failed: {}",
+                    error_chain(&e)
+                ))
+            })?
             .json()
-            .map_err(|e| crate::error::KyokuError::Config(format!("MB parse failed: {}", e)))?;
+            .map_err(|e| {
+                crate::error::KyokuError::Config(format!(
+                    "MB parse failed: {}",
+                    error_chain(&e)
+                ))
+            })?;
 
         Ok(parse_full_release(raw))
     }
@@ -383,6 +403,20 @@ fn strip_parenthesized_suffix(s: &str) -> String {
 }
 
 /// Escape special Lucene characters in a search query value.
+/// Flatten an error and its `.source()` chain into a single colon-separated
+/// string. reqwest's top-level Display is often just "error sending request",
+/// with the actual cause (DNS, TLS, timeout) hiding one or two levels down.
+fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut src = e.source();
+    while let Some(s) = src {
+        out.push_str(": ");
+        out.push_str(&s.to_string());
+        src = s.source();
+    }
+    out
+}
+
 fn escape_lucene(s: &str) -> String {
     let special = [
         '+', '-', '&', '|', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':',

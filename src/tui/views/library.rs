@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
@@ -242,6 +242,23 @@ impl LibraryView {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        if self.item_count() == 0 {
+            let text = "No albums yet. Press 'i' to import.";
+            let line_w = text.chars().count() as u16;
+            let y = area.y + area.height / 2;
+            let x = area.x + area.width.saturating_sub(line_w) / 2;
+            let w = line_w.min(area.width);
+            let centered = Rect::new(x, y, w, 1);
+            let msg = Paragraph::new(Span::styled(
+                text,
+                Style::default().fg(theme.fg_muted),
+            ))
+            .alignment(Alignment::Center)
+            .style(Style::default().bg(theme.bg));
+            frame.render_widget(msg, centered);
+            return;
+        }
+
         let visible_height = area.height.saturating_sub(1) as usize; // -1 for header
 
         // Adjust scroll offset — keep 1 extra row visible below cursor for lookahead

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
@@ -271,12 +271,19 @@ impl CollectionsView {
         }
 
         if self.collections.is_empty() {
+            let text = "No collections yet. Press 'n' to create one.";
+            let line_w = text.chars().count() as u16;
+            let y = area.y + area.height / 2;
+            let x = area.x + area.width.saturating_sub(line_w) / 2;
+            let w = line_w.min(area.width);
+            let centered = Rect::new(x, y, w, 1);
             let msg = Paragraph::new(Span::styled(
-                " No collections yet. Press 'n' to create one.",
+                text,
                 Style::default().fg(theme.fg_muted),
             ))
+            .alignment(Alignment::Center)
             .style(Style::default().bg(theme.bg));
-            frame.render_widget(msg, area);
+            frame.render_widget(msg, centered);
             return;
         }
 

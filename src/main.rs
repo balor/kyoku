@@ -14,19 +14,49 @@ use crate::cli::{Cli, Command};
 use crate::config::Settings;
 
 fn main() -> anyhow::Result<()> {
-    // Default to info-level for our own crate so CLI commands print their
-    // progress messages out of the box; RUST_LOG overrides when set.
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .without_time()
-        .with_target(false)
-        .init();
-
     let cli = Cli::parse();
     let config_path = config::paths::config_file();
     let config_exists = config_path.exists();
+
+    // Default to info-level for our own crate so CLI commands print their
+    // progress messages out of the box; RUST_LOG overrides when set.
+    // Lofty's "MPEG: Using bitrate to estimate duration" fires for every VBR
+    // mp3 we scan — clamp its crate (and its mpeg submodule specifically) to
+    // error so the TUI and CLI output stay clean.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,lofty=error"));
+
+    // In TUI mode any write to stderr scribbles over the rendered frame, so
+    // route logs to a file. CLI subcommands keep writing to stderr.
+    let tui_mode = cli.command.is_none() && config_exists;
+    if tui_mode {
+        let log_path = config::paths::cache_dir().join("kyoku.log");
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            Ok(file) => {
+                tracing_subscriber::fmt()
+                    .with_env_filter(env_filter)
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_ansi(false)
+                    .with_target(false)
+                    .init();
+            }
+            // If we can't open the log file, stay silent rather than corrupt the TUI.
+            Err(_) => {}
+        }
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .without_time()
+            .with_target(false)
+            .init();
+    }
 
     // setup and paths work without a config file; everything else requires one
     let needs_config = !matches!(
