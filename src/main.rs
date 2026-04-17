@@ -14,8 +14,14 @@ use crate::cli::{Cli, Command};
 use crate::config::Settings;
 
 fn main() -> anyhow::Result<()> {
+    // Default to info-level for our own crate so CLI commands print their
+    // progress messages out of the box; RUST_LOG overrides when set.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(env_filter)
+        .without_time()
+        .with_target(false)
         .init();
 
     let cli = Cli::parse();

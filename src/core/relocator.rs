@@ -3,16 +3,25 @@ use rusqlite::Connection;
 use crate::error::Result;
 
 /// Plan a path relocation: returns (track_id, old_path, new_path) for all
-/// tracks whose file_path starts with `old_prefix`.
+/// tracks whose file_path is exactly `old_prefix` or lives under it as a
+/// directory child. Trailing slashes on either prefix are trimmed so that
+/// `/old/music` and `/old/music/` behave identically, and paths like
+/// `/old/music_backup/...` are NOT matched (strict path-component boundary).
 pub fn plan_relocate(
     conn: &Connection,
     old_prefix: &str,
     new_prefix: &str,
 ) -> Result<Vec<(i64, String, String)>> {
+    let old_trimmed = old_prefix.trim_end_matches('/');
+    let new_trimmed = new_prefix.trim_end_matches('/');
+
+    // SQL LIKE pre-filter (fast, uses the index). Escape wildcards in the
+    // user-provided prefix so a literal `%` or `_` doesn't silently match.
+    let like_pattern = format!("{}%", escape_like(old_trimmed));
     let mut stmt = conn.prepare(
-        "SELECT id, file_path FROM tracks WHERE file_path LIKE ?1 || '%'",
+        "SELECT id, file_path FROM tracks WHERE file_path LIKE ?1 ESCAPE '\\'",
     )?;
-    let rows = stmt.query_map([old_prefix], |row| {
+    let rows = stmt.query_map([&like_pattern], |row| {
         let id: i64 = row.get(0)?;
         let path: String = row.get(1)?;
         Ok((id, path))
@@ -21,10 +30,32 @@ pub fn plan_relocate(
     let mut plan = Vec::new();
     for row in rows {
         let (id, old_path) = row?;
-        let new_path = format!("{}{}", new_prefix, &old_path[old_prefix.len()..]);
+        // Strict boundary check in Rust — guards against overlapping prefixes
+        // like `/old/music` matching `/old/music_backup/...`.
+        let suffix = match old_path.strip_prefix(old_trimmed) {
+            Some(s) if s.is_empty() || s.starts_with('/') => s,
+            _ => continue,
+        };
+        let new_path = format!("{new_trimmed}{suffix}");
         plan.push((id, old_path, new_path));
     }
     Ok(plan)
+}
+
+/// Escape SQL LIKE metacharacters (`%`, `_`, `\`) so a user-provided string
+/// is treated as a literal. Pair with `ESCAPE '\'` on the LIKE clause.
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' | '%' | '_' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Apply a relocation plan: update all file_path values in the DB.
@@ -123,6 +154,46 @@ mod tests {
         assert_eq!(fetch_path(&conn, b), "/new/library/x/b.mp3");
         // Paths outside the prefix are untouched.
         assert_eq!(fetch_path(&conn, c), "/elsewhere/c.mp3");
+    }
+
+    #[test]
+    fn plan_relocate_rejects_overlapping_prefix() {
+        // `/old/music` must NOT match `/old/music_backup/...` — the boundary
+        // check ensures only exact matches or directory children are included.
+        let conn = db::open_memory().unwrap();
+        let a = insert_path(&conn, "/old/music/a.mp3");
+        let _b = insert_path(&conn, "/old/music_backup/b.mp3");
+        let _c = insert_path(&conn, "/old/musicalbum.mp3");
+
+        let plan = plan_relocate(&conn, "/old/music", "/new/library").unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].0, a);
+    }
+
+    #[test]
+    fn plan_relocate_trims_trailing_slashes() {
+        let conn = db::open_memory().unwrap();
+        let a = insert_path(&conn, "/old/music/a.mp3");
+
+        let with_slash = plan_relocate(&conn, "/old/music/", "/new/library/").unwrap();
+        assert_eq!(with_slash.len(), 1);
+        assert_eq!(with_slash[0].0, a);
+        assert_eq!(with_slash[0].2, "/new/library/a.mp3");
+    }
+
+    #[test]
+    fn plan_relocate_escapes_like_wildcards() {
+        // A literal `_` in the old prefix must not act as a SQL wildcard
+        // (otherwise `/old/_usic/x` would also match `/old/music/x`).
+        let conn = db::open_memory().unwrap();
+        let a = insert_path(&conn, "/old/_usic/a.mp3");
+        let _b = insert_path(&conn, "/old/music/b.mp3");
+
+        let plan = plan_relocate(&conn, "/old/_usic", "/new/library").unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].0, a);
     }
 
     #[test]

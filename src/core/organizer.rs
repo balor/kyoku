@@ -276,6 +276,14 @@ pub fn plan_organize(
 }
 
 /// Execute an organize plan: move/copy files, update DB paths, clean up.
+///
+/// Per-track atomicity: each track's filesystem op is paired with its DB path
+/// update(s) as a best-effort unit. We rely on SQLite's auto-commit (no outer
+/// transaction) so that each successful `update_*_path` is durable immediately.
+/// Errors on any single track (fs failure OR DB failure after a successful
+/// move) are recorded in `result.errors` and the loop continues with the next
+/// track. Worst-case on abrupt termination: exactly one file moved on disk
+/// whose row was not yet updated in the DB.
 pub fn apply_organize(
     conn: &Connection,
     plan: &OrganizePlan,
@@ -301,19 +309,40 @@ pub fn apply_organize(
 
         match outcome {
             Ok(()) => {
-                queries::update_track_path(conn, m.track_id, &m.to.display().to_string())?;
-                result.moved += 1;
+                let new_path = m.to.display().to_string();
+
+                // Update tracks.file_path. On failure, record a detailed error
+                // (file is already on disk at `new_path`) and skip this track's
+                // remaining updates — but keep processing the rest of the plan.
+                if let Err(e) = queries::update_track_path(conn, m.track_id, &new_path) {
+                    result.errors.push((
+                        m.from.display().to_string(),
+                        format!("file moved to {new_path} but DB update failed: {e}"),
+                    ));
+                    continue;
+                }
 
                 // If this move also represents a collection's primary file location,
                 // update collection_tracks.collection_file_path so the DB knows.
                 if let Some((coll_id, _)) = &m.also_collection {
-                    queries::update_collection_track_path(
+                    if let Err(e) = queries::update_collection_track_path(
                         conn,
                         *coll_id,
                         m.track_id,
-                        &m.to.display().to_string(),
-                    )?;
+                        &new_path,
+                    ) {
+                        result.errors.push((
+                            m.from.display().to_string(),
+                            format!(
+                                "file moved and tracks row updated, but collection_tracks update failed: {e}"
+                            ),
+                        ));
+                        continue;
+                    }
                 }
+
+                // Only count moves that are fully consistent (fs + every DB update).
+                result.moved += 1;
 
                 // Track the source directory for cleanup
                 if operation != "copy" {
@@ -335,12 +364,19 @@ pub fn apply_organize(
 
         match std::fs::copy(&c.from, &c.to) {
             Ok(_) => {
-                queries::update_collection_track_path(
+                let new_path = c.to.display().to_string();
+                if let Err(e) = queries::update_collection_track_path(
                     conn,
                     c.collection_id,
                     c.track_id,
-                    &c.to.display().to_string(),
-                )?;
+                    &new_path,
+                ) {
+                    result.errors.push((
+                        c.from.display().to_string(),
+                        format!("file copied to {new_path} but DB update failed: {e}"),
+                    ));
+                    continue;
+                }
                 result.copied += 1;
             }
             Err(e) => {

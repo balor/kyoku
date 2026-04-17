@@ -105,11 +105,11 @@ pub fn import(
     };
 
     if files.is_empty() {
-        println!("No audio files found in {}", path.display());
+        tracing::info!("No audio files found in {}", path.display());
         return Ok(result);
     }
 
-    println!("Found {} audio file(s)", files.len());
+    tracing::info!("Found {} audio file(s)", files.len());
 
     // Read tags for all files
     let mut tracks: Vec<Track> = Vec::new();
@@ -127,7 +127,7 @@ pub fn import(
                     duplicate_track_ids.push((track_id, file_path.display().to_string()));
                 }
             } else {
-                eprintln!("  skip (already imported): {}", file_path.display());
+                tracing::info!("skip (already imported): {}", file_path.display());
             }
             result.skipped_duplicate += 1;
             continue;
@@ -141,7 +141,7 @@ pub fn import(
                 tracks.push(track);
             }
             Err(e) => {
-                eprintln!("  error reading {}: {}", file_path.display(), e);
+                tracing::warn!("error reading {}: {}", file_path.display(), e);
                 result
                     .errors
                     .push((file_path.display().to_string(), e.to_string()));
@@ -167,17 +167,17 @@ pub fn import(
     if let Some(coll_id) = collection_id {
         for (track_id, path) in &duplicate_track_ids {
             if queries::add_track_to_collection(conn, coll_id, *track_id)? {
-                eprintln!("  added to collection: {}", path);
+                tracing::info!("added to collection: {}", path);
                 result.added_to_collection += 1;
             } else {
-                eprintln!("  skip (already in collection): {}", path);
+                tracing::info!("skip (already in collection): {}", path);
             }
         }
     }
 
     if tracks.is_empty() {
         if result.added_to_collection == 0 {
-            println!("No new tracks to import.");
+            tracing::info!("No new tracks to import.");
         }
         return Ok(result);
     }
@@ -186,11 +186,11 @@ pub fn import(
     let groups = group_into_albums(&tracks, loose);
 
     if pretend {
-        println!("\nDry run — would import {} track(s):", tracks.len());
+        tracing::info!("Dry run — would import {} track(s):", tracks.len());
         for (key, indices) in &groups {
             if loose {
                 for &i in indices {
-                    println!("  [loose] {}", tracks[i].title);
+                    tracing::info!("  [loose] {}", tracks[i].title);
                 }
             } else {
                 let album_name = tag_data_map
@@ -198,9 +198,9 @@ pub fn import(
                     .and_then(|td| td.as_ref())
                     .and_then(|td| td.album.as_deref())
                     .unwrap_or(key);
-                println!("  Album: {} ({} tracks)", album_name, indices.len());
+                tracing::info!("  Album: {} ({} tracks)", album_name, indices.len());
                 for &i in indices {
-                    println!("    - {}", tracks[i].title);
+                    tracing::info!("    - {}", tracks[i].title);
                 }
             }
         }
@@ -255,7 +255,7 @@ pub fn import(
                 queries::add_track_to_collection(&tx, coll_id, track_id)?;
             }
 
-            println!("  imported: {}", track.title);
+            tracing::info!("imported: {}", track.title);
         }
     }
 
@@ -274,7 +274,7 @@ pub fn scan_inbox(
 
     for dir in inbox_dirs {
         if !dir.exists() {
-            eprintln!("  inbox dir not found: {}", dir.display());
+            tracing::warn!("inbox dir not found: {}", dir.display());
             continue;
         }
 
