@@ -210,7 +210,7 @@ pub fn import(
     // Insert into database
     let tx = conn.unchecked_transaction()?;
 
-    for (_key, indices) in &groups {
+    for indices in groups.values() {
         // Create album if not loose and we have album info
         let album_id = if !loose {
             let first_tag = tag_data_map.get(indices[0]).and_then(|td| td.as_ref());

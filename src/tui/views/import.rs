@@ -355,12 +355,11 @@ impl ImportView {
             // Number keys 1-9 select an MB candidate
             KeyCode::Char(c @ '1'..='9') => {
                 let idx = (c as u8 - b'1') as usize;
-                if let Some(group) = self.groups.get_mut(self.current_group) {
-                    if idx < group.mb_candidates.len() {
+                if let Some(group) = self.groups.get_mut(self.current_group)
+                    && idx < group.mb_candidates.len() {
                         group.selected_candidate = Some(idx);
                         group.action = GroupAction::AcceptMb;
                     }
-                }
             }
             // 0 deselects MB candidate (back to as-is)
             KeyCode::Char('0') => {
@@ -371,19 +370,18 @@ impl ImportView {
             }
             // Up/down arrows cycle through MB candidates
             KeyCode::Up => {
-                if let Some(group) = self.groups.get_mut(self.current_group) {
-                    if !group.mb_candidates.is_empty() {
+                if let Some(group) = self.groups.get_mut(self.current_group)
+                    && !group.mb_candidates.is_empty() {
                         let current = group.selected_candidate.unwrap_or(0);
                         if current > 0 {
                             group.selected_candidate = Some(current - 1);
                             group.action = GroupAction::AcceptMb;
                         }
                     }
-                }
             }
             KeyCode::Down => {
-                if let Some(group) = self.groups.get_mut(self.current_group) {
-                    if !group.mb_candidates.is_empty() {
+                if let Some(group) = self.groups.get_mut(self.current_group)
+                    && !group.mb_candidates.is_empty() {
                         let current = group.selected_candidate.unwrap_or(0);
                         let max = group.mb_candidates.len() - 1;
                         if current < max {
@@ -391,7 +389,6 @@ impl ImportView {
                             group.action = GroupAction::AcceptMb;
                         }
                     }
-                }
             }
             KeyCode::Char('c') => {
                 // Open per-group collection picker
@@ -932,11 +929,7 @@ fn run_import_worker(
                     None
                 } else if let Some(id) = mb_album_id {
                     Some(id)
-                } else if let Some(id) = asis_album_id {
-                    Some(id)
-                } else {
-                    None
-                };
+                } else { asis_album_id.map(|id| id) };
 
                 let file_size = std::fs::metadata(&track.file_path)
                     .map(|m| m.len() as i64)
@@ -968,13 +961,12 @@ fn run_import_worker(
                         }
 
                         // Add to target collection if user requested one
-                        if let Some(coll_id) = target_collection_id {
-                            if queries::add_track_to_collection(conn, coll_id, track_id)
+                        if let Some(coll_id) = target_collection_id
+                            && queries::add_track_to_collection(conn, coll_id, track_id)
                                 .unwrap_or(false)
                             {
                                 added_to_collection += 1;
                             }
-                        }
                     }
                     Err(_) => errors += 1,
                 }
@@ -1027,44 +1019,40 @@ impl ImportView {
 
         // Process MB result for the currently-searched group
         let mut mb_done = false;
-        if let Some(rx) = &self.mb_rx {
-            if let Ok(result) = rx.try_recv() {
+        if let Some(rx) = &self.mb_rx
+            && let Ok(result) = rx.try_recv() {
                 if let Some(group) = self.groups.get_mut(result.group_idx) {
                     // Auto-select top candidate if score is high enough
-                    if let Some(best) = result.candidates.first() {
-                        if best.score.total >= 0.85 {
+                    if let Some(best) = result.candidates.first()
+                        && best.score.total >= 0.85 {
                             group.selected_candidate = Some(0);
                             group.action = GroupAction::AcceptMb;
                         }
-                    }
                     group.mb_candidates = result.candidates;
                     group.mb_state = MbMatchState::Done;
                 }
                 mb_done = true;
             }
-        }
         if mb_done {
             self.mb_rx = None;
         }
 
         // Process manual MBID fetch result
         let mut fetch_done = false;
-        if let Some(rx) = &self.mbid_fetch_rx {
-            if let Ok(result) = rx.try_recv() {
-                if let Some(group) = self.groups.get_mut(result.group_idx) {
-                    if !result.candidates.is_empty() {
+        if let Some(rx) = &self.mbid_fetch_rx
+            && let Ok(result) = rx.try_recv() {
+                if let Some(group) = self.groups.get_mut(result.group_idx)
+                    && !result.candidates.is_empty() {
                         // Insert the fetched release at the top of candidates
                         let mut new_candidates = result.candidates;
-                        new_candidates.extend(group.mb_candidates.drain(..));
+                        new_candidates.append(&mut group.mb_candidates);
                         group.mb_candidates = new_candidates;
                         group.selected_candidate = Some(0);
                         group.action = GroupAction::AcceptMb;
                         group.mb_state = MbMatchState::Done;
                     }
-                }
                 fetch_done = true;
             }
-        }
         if fetch_done {
             self.mbid_fetch_rx = None;
         }

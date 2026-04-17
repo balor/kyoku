@@ -194,12 +194,11 @@ impl App {
 
     pub fn tick(&mut self) {
         // Check debounced search
-        if let Some(deadline) = self.search_debounce {
-            if Instant::now() >= deadline {
+        if let Some(deadline) = self.search_debounce
+            && Instant::now() >= deadline {
                 self.on_search_changed();
                 self.search_debounce = None;
             }
-        }
 
         // Tick import view for background operations
         if self.view == AppView::Import {
@@ -391,28 +390,22 @@ impl App {
                 if self.collections.organize_plan.is_some() {
                     // Plan showing — Enter applies
                     if let Some(plan) = self.collections.organize_plan.take() {
-                        match crate::core::organizer::apply_organize(
+                        if let Ok(_result) = crate::core::organizer::apply_organize(
                             &self.conn,
                             &plan,
                             &self.settings.import.organize_operation,
-                        ) {
-                            Ok(_result) => {}
-                            Err(_) => {}
-                        }
+                        ) {}
                         self.collections.load(&self.conn, None).ok();
                         self.refresh_counts();
                     }
                 } else {
                     // Compute and show
-                    match crate::core::organizer::plan_organize(
+                    if let Ok(plan) = crate::core::organizer::plan_organize(
                         &self.conn,
                         &self.settings,
                         crate::core::organizer::OrganizeFilter::All,
                     ) {
-                        Ok(plan) => {
-                            self.collections.organize_plan = Some(plan);
-                        }
-                        Err(_) => {}
+                        self.collections.organize_plan = Some(plan);
                     }
                 }
                 AppAction::None
@@ -509,37 +502,34 @@ impl App {
                     if self.collection_detail.organize_plan.is_some() {
                         // Plan already showing — Enter was pressed, apply it
                         if let Some(plan) = self.collection_detail.organize_plan.take() {
-                            match crate::core::organizer::apply_organize(
+                            if let Ok(result) = crate::core::organizer::apply_organize(
                                 &self.conn,
                                 &plan,
                                 &self.settings.import.organize_operation,
                             ) {
-                                Ok(result) => {
-                                    let mut parts = Vec::new();
-                                    if result.moved > 0 {
-                                        parts.push(format!("{} moved", result.moved));
-                                    }
-                                    if result.copied > 0 {
-                                        parts.push(format!("{} copied", result.copied));
-                                    }
-                                    if result.dirs_cleaned > 0 {
-                                        parts.push(format!(
-                                            "{} dirs cleaned",
-                                            result.dirs_cleaned
-                                        ));
-                                    }
-                                    if !result.errors.is_empty() {
-                                        parts.push(format!(
-                                            "{} errors",
-                                            result.errors.len()
-                                        ));
-                                    }
-                                    // Stash notice — we can't set it on the view
-                                    // directly since we'll reload below
-                                    let _notice =
-                                        format!("Organized: {}", parts.join(", "));
+                                let mut parts = Vec::new();
+                                if result.moved > 0 {
+                                    parts.push(format!("{} moved", result.moved));
                                 }
-                                Err(_) => {}
+                                if result.copied > 0 {
+                                    parts.push(format!("{} copied", result.copied));
+                                }
+                                if result.dirs_cleaned > 0 {
+                                    parts.push(format!(
+                                        "{} dirs cleaned",
+                                        result.dirs_cleaned
+                                    ));
+                                }
+                                if !result.errors.is_empty() {
+                                    parts.push(format!(
+                                        "{} errors",
+                                        result.errors.len()
+                                    ));
+                                }
+                                // Stash notice — we can't set it on the view
+                                // directly since we'll reload below
+                                let _notice =
+                                    format!("Organized: {}", parts.join(", "));
                             }
                             // Reload to reflect new paths
                             if let AppView::CollectionDetail { collection_id } = self.view {
@@ -555,15 +545,12 @@ impl App {
                         }
                     } else {
                         // Compute and show the plan
-                        match crate::core::organizer::plan_organize(
+                        if let Ok(plan) = crate::core::organizer::plan_organize(
                             &self.conn,
                             &self.settings,
                             crate::core::organizer::OrganizeFilter::Collection(coll_name),
                         ) {
-                            Ok(plan) => {
-                                self.collection_detail.organize_plan = Some(plan);
-                            }
-                            Err(_) => {}
+                            self.collection_detail.organize_plan = Some(plan);
                         }
                     }
                 }

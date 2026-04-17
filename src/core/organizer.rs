@@ -324,8 +324,8 @@ pub fn apply_organize(
 
                 // If this move also represents a collection's primary file location,
                 // update collection_tracks.collection_file_path so the DB knows.
-                if let Some((coll_id, _)) = &m.also_collection {
-                    if let Err(e) = queries::update_collection_track_path(
+                if let Some((coll_id, _)) = &m.also_collection
+                    && let Err(e) = queries::update_collection_track_path(
                         conn,
                         *coll_id,
                         m.track_id,
@@ -339,17 +339,15 @@ pub fn apply_organize(
                         ));
                         continue;
                     }
-                }
 
                 // Only count moves that are fully consistent (fs + every DB update).
                 result.moved += 1;
 
                 // Track the source directory for cleanup
-                if operation != "copy" {
-                    if let Some(parent) = m.from.parent() {
+                if operation != "copy"
+                    && let Some(parent) = m.from.parent() {
                         emptied_dirs.push(parent.to_path_buf());
                     }
-                }
             }
             Err(e) => {
                 result.errors.push((m.from.display().to_string(), e.to_string()));
@@ -467,8 +465,8 @@ pub fn plan_delete_collection(
 
         // Track has another home — if its tracks.file_path matches the
         // about-to-be-deleted collection file, we need to promote another path.
-        if let Some(coll_path) = &h.collection_file_path {
-            if &h.track_file_path == coll_path && !h.has_album {
+        if let Some(coll_path) = &h.collection_file_path
+            && &h.track_file_path == coll_path && !h.has_album {
                 // No album to fall back on, but other collection(s) exist.
                 // Find one of those other collection_file_path values.
                 if let Ok(Some(new_path)) = find_other_collection_path(conn, h.track_id, collection_id) {
@@ -477,7 +475,6 @@ pub fn plan_delete_collection(
             }
             // If has_album, file_path should already point at the album file
             // (set by organize when the album move happens).
-        }
     }
 
     Ok(DeleteCollectionPlan {

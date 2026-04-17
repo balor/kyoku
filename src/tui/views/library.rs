@@ -58,15 +58,14 @@ impl Default for LibraryView {
 
 impl LibraryView {
     pub fn load(&mut self, conn: &Connection, search: Option<&str>) -> Result<()> {
-        if let Some(query) = search {
-            if !query.is_empty() {
+        if let Some(query) = search
+            && !query.is_empty() {
                 self.albums = queries::search_albums(conn, query, 500)?;
                 self.total_albums = self.albums.len();
                 self.loose_count = 0;
                 self.clamp_selection();
                 return Ok(());
             }
-        }
         self.albums = queries::list_albums(conn, self.sort, self.sort_ascending, 0, 500)?;
         self.total_albums = self.albums.len();
         self.loose_count = queries::count_loose_tracks(conn)?;
@@ -147,11 +146,10 @@ impl LibraryView {
                 PopupAction::None => {}
                 PopupAction::Closed(notice) => {
                     self.add_to_collection = None;
-                    if let Some(n) = notice {
-                        if !n.is_empty() {
+                    if let Some(n) = notice
+                        && !n.is_empty() {
                             self.notice = Some(n);
                         }
-                    }
                 }
             }
             return LibraryAction::None;
@@ -228,15 +226,14 @@ impl LibraryView {
             // Add whole album (all tracks of selected album) to a collection
             if self.selected < self.albums.len() {
                 let album = &self.albums[self.selected];
-                if let Ok(tracks) = queries::get_album_tracks(conn, album.id) {
-                    if !tracks.is_empty() {
+                if let Ok(tracks) = queries::get_album_tracks(conn, album.id)
+                    && !tracks.is_empty() {
                         let ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
                         let display =
                             format!("{} ({} tracks)", album.title, tracks.len());
                         self.add_to_collection =
                             Some(AddToCollectionPopup::open(ids, display, conn));
                     }
-                }
             }
             return LibraryAction::None;
         }

@@ -172,15 +172,14 @@ impl AlbumDetailView {
             }
             if keys::is_confirm(&key) {
                 let new_title = input.value.trim().to_string();
-                if let Some(album) = &self.album {
-                    if !new_title.is_empty() && new_title != album.title {
+                if let Some(album) = &self.album
+                    && !new_title.is_empty() && new_title != album.title {
                         let id = album.id;
                         queries::rename_album(conn, id, &new_title).ok();
                         // Reload to reflect the change
                         self.load(conn, id).ok();
                         return DetailAction::None;
                     }
-                }
                 self.rename_input = None;
                 return DetailAction::None;
             }
@@ -217,22 +216,20 @@ impl AlbumDetailView {
             .get(self.selected)
             .and_then(|&i| self.tracks.get(i));
 
-        if key.code == KeyCode::Char('e') {
-            if let Some(track) = current_track {
+        if key.code == KeyCode::Char('e')
+            && let Some(track) = current_track {
                 return DetailAction::EditTrack(track.id);
             }
-        }
-        if key.code == KeyCode::Char('a') {
-            if let Some(track) = current_track {
+        if key.code == KeyCode::Char('a')
+            && let Some(track) = current_track {
                 self.add_to_collection = Some(AddToCollectionPopup::open(
                     vec![track.id],
                     track.title.clone(),
                     conn,
                 ));
             }
-        }
-        if key.code == KeyCode::Char('o') {
-            if let Some(track) = current_track {
+        if key.code == KeyCode::Char('o')
+            && let Some(track) = current_track {
                 let path = std::path::Path::new(&track.file_path);
                 if let Some(parent) = path.parent() {
                     if !parent.exists() {
@@ -245,7 +242,6 @@ impl AlbumDetailView {
                     }
                 }
             }
-        }
         if key.code == KeyCode::Char('R') && !self.is_loose() {
             // Rename album
             if let Some(album) = &self.album {
@@ -278,11 +274,10 @@ impl AlbumDetailView {
             PopupAction::None => {}
             PopupAction::Closed(notice) => {
                 self.add_to_collection = None;
-                if let Some(n) = notice {
-                    if !n.is_empty() {
+                if let Some(n) = notice
+                    && !n.is_empty() {
                         self.notice = Some(n);
                     }
-                }
             }
         }
         DetailAction::None
@@ -447,21 +442,18 @@ impl AlbumDetailView {
             let fmt = album.formats.to_uppercase();
             let duration = format_duration_ms(album.total_duration_ms);
             let mut parts = vec![format!(" {} · {} tracks · {}", fmt, album.track_count, duration)];
-            if let Some(label) = &album.label {
-                if !label.is_empty() {
+            if let Some(label) = &album.label
+                && !label.is_empty() {
                     parts.push(format!("Label: {}", label));
                 }
-            }
-            if let Some(genre) = &album.genre {
-                if !genre.is_empty() {
+            if let Some(genre) = &album.genre
+                && !genre.is_empty() {
                     parts.push(genre.clone());
                 }
-            }
-            if let Some(mbid) = &album.mbid {
-                if !mbid.is_empty() {
+            if let Some(mbid) = &album.mbid
+                && !mbid.is_empty() {
                     parts.push(format!("MB: {}", &mbid[..mbid.len().min(8)]));
                 }
-            }
             let meta = parts.join(" · ");
             let p = Paragraph::new(Span::styled(meta, Style::default().fg(theme.fg_dim)))
                 .style(Style::default().bg(theme.bg_alt));

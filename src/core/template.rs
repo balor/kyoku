@@ -27,14 +27,14 @@ pub fn render_path(template: &str, vars: &TemplateVars) -> PathBuf {
     let mut result = template.to_string();
 
     // Process each {var} or {var:format} placeholder
-    result = replace_var(&result, "album_artist", &fallback(&vars.album_artist, &vars.artist));
-    result = replace_var(&result, "artist", &fallback(&vars.artist, "Unknown"));
-    result = replace_var(&result, "album", &fallback(&vars.album, "Unknown Album"));
-    result = replace_var(&result, "year", &fallback(&vars.year, "0000"));
-    result = replace_var(&result, "title", &fallback(&vars.title, "Unknown"));
-    result = replace_var(&result, "genre", &fallback(&vars.genre, "Unknown"));
-    result = replace_var(&result, "label", &fallback(&vars.label, "Unknown"));
-    result = replace_var(&result, "collection", &fallback(&vars.collection, ""));
+    result = replace_var(&result, "album_artist", fallback(&vars.album_artist, &vars.artist));
+    result = replace_var(&result, "artist", fallback(&vars.artist, "Unknown"));
+    result = replace_var(&result, "album", fallback(&vars.album, "Unknown Album"));
+    result = replace_var(&result, "year", fallback(&vars.year, "0000"));
+    result = replace_var(&result, "title", fallback(&vars.title, "Unknown"));
+    result = replace_var(&result, "genre", fallback(&vars.genre, "Unknown"));
+    result = replace_var(&result, "label", fallback(&vars.label, "Unknown"));
+    result = replace_var(&result, "collection", fallback(&vars.collection, ""));
     result = replace_var(&result, "ext", &vars.ext.to_lowercase());
 
     // Numeric variables with format specifiers
@@ -85,11 +85,10 @@ fn format_number(value: u32, spec: &str) -> String {
     if spec == "0" {
         return value.to_string();
     }
-    if let Some(stripped) = spec.strip_prefix('0') {
-        if let Ok(width) = stripped.parse::<usize>() {
+    if let Some(stripped) = spec.strip_prefix('0')
+        && let Ok(width) = stripped.parse::<usize>() {
             return format!("{:0>width$}", value, width = width);
         }
-    }
     if let Ok(width) = spec.parse::<usize>() {
         return format!("{:>width$}", value, width = width);
     }

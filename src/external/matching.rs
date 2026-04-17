@@ -164,10 +164,7 @@ pub fn score_release(
 /// "Rehab (bonus tracks version)" → "Rehab bonus tracks version"
 fn normalize_title(s: &str) -> String {
     let normalized = s
-        .replace('(', " ")
-        .replace(')', " ")
-        .replace('[', " ")
-        .replace(']', " ")
+        .replace(['(', ')', '[', ']'], " ")
         .replace(" - ", " ")
         .replace(" — ", " ")
         .replace(": ", " ");

@@ -173,11 +173,10 @@ impl CollectionsView {
         if key.code == KeyCode::Char('G') && count > 0 {
             self.selected = count - 1;
         }
-        if keys::is_confirm(&key) {
-            if let Some(coll) = self.collections.get(self.selected) {
+        if keys::is_confirm(&key)
+            && let Some(coll) = self.collections.get(self.selected) {
                 return CollectionsAction::OpenCollection(coll.id);
             }
-        }
         if key.code == KeyCode::Char('n') {
             let mut input = TextInput::new("Collection name...").with_label(" Name: ");
             input.focused = true;
@@ -202,8 +201,8 @@ impl CollectionsView {
             return CollectionsAction::OrganizeAll;
         }
         if key.code == KeyCode::Char('d') && !self.collections.is_empty() {
-            if let Some(coll) = self.collections.get(self.selected) {
-                if let Ok(plan) = organizer::plan_delete_collection(conn, coll.id, music_dir) {
+            if let Some(coll) = self.collections.get(self.selected)
+                && let Ok(plan) = organizer::plan_delete_collection(conn, coll.id, music_dir) {
                     let mut widget = ConfirmDelete::new(
                         "Confirm Delete",
                         format!("Delete collection '{}'?", plan.collection_name),
@@ -237,7 +236,6 @@ impl CollectionsView {
 
                     self.mode = InputMode::ConfirmDelete { plan, widget };
                 }
-            }
             return CollectionsAction::None;
         }
 
@@ -531,8 +529,8 @@ impl CollectionDetailView {
             }
             if keys::is_confirm(&key) {
                 let new_name = input.value.trim().to_string();
-                if let Some(coll) = &self.collection {
-                    if !new_name.is_empty() && new_name != coll.name {
+                if let Some(coll) = &self.collection
+                    && !new_name.is_empty() && new_name != coll.name {
                         let id = coll.id;
                         queries::rename_collection(conn, id, &new_name).ok();
                         // Reload collection info while preserving cursor
@@ -543,7 +541,6 @@ impl CollectionDetailView {
                             self.selected = prev;
                         }
                     }
-                }
                 self.rename_input = None;
                 return CollectionDetailAction::None;
             }
@@ -573,14 +570,13 @@ impl CollectionDetailView {
                         queries::remove_track_from_collection(conn, coll_id, track_id).ok();
 
                         if delete_files {
-                            if let Some(p) = &file_path {
-                                if p.exists() && p.starts_with(music_dir) {
+                            if let Some(p) = &file_path
+                                && p.exists() && p.starts_with(music_dir) {
                                     let _ = std::fs::remove_file(p);
                                     if let Some(parent) = p.parent() {
                                         let _ = remove_empty_parents(parent);
                                     }
                                 }
-                            }
                             // If removing this would leave the track with no
                             // file home, delete the track entirely.
                             if will_orphan {
@@ -623,14 +619,13 @@ impl CollectionDetailView {
             .get(self.selected)
             .and_then(|&i| self.tracks.get(i));
 
-        if key.code == KeyCode::Char('e') {
-            if let Some(track) = current_track {
+        if key.code == KeyCode::Char('e')
+            && let Some(track) = current_track {
                 return CollectionDetailAction::EditTrack(track.id);
             }
-        }
         if key.code == KeyCode::Char('x') {
-            if let Some(track) = current_track {
-                if let Some(coll) = &self.collection {
+            if let Some(track) = current_track
+                && let Some(coll) = &self.collection {
                     // Look up the collection_file_path and other-homes info
                     let homes = queries::get_collection_tracks_with_other_homes(conn, coll.id)
                         .unwrap_or_default();
@@ -667,7 +662,6 @@ impl CollectionDetailView {
                         widget,
                     });
                 }
-            }
             return CollectionDetailAction::None;
         }
         if key.code == KeyCode::Char('R') {
