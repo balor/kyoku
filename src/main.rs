@@ -370,6 +370,7 @@ fn main() -> anyhow::Result<()> {
                         &conn,
                         &plan,
                         &settings.import.organize_operation,
+                        &core::organizer::cleanup_roots(&settings),
                     )?;
                     println!();
                     println!(

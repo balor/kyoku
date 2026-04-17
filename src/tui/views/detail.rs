@@ -119,6 +119,7 @@ impl AlbumDetailView {
                         conn,
                         &plan,
                         &settings.import.organize_operation,
+                        &organizer::cleanup_roots(settings),
                     ) {
                         Ok(result) => {
                             let mut parts = Vec::new();

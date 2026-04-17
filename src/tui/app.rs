@@ -313,6 +313,7 @@ impl App {
                             &self.conn,
                             &plan,
                             &self.settings.import.organize_operation,
+                            &crate::core::organizer::cleanup_roots(&self.settings),
                         ) {
                             Ok(result) => {
                                 let mut parts = Vec::new();
@@ -394,6 +395,7 @@ impl App {
                             &self.conn,
                             &plan,
                             &self.settings.import.organize_operation,
+                            &crate::core::organizer::cleanup_roots(&self.settings),
                         ) {}
                         self.collections.load(&self.conn, None).ok();
                         self.refresh_counts();
@@ -506,6 +508,7 @@ impl App {
                                 &self.conn,
                                 &plan,
                                 &self.settings.import.organize_operation,
+                                &crate::core::organizer::cleanup_roots(&self.settings),
                             ) {
                                 let mut parts = Vec::new();
                                 if result.moved > 0 {

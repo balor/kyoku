@@ -302,7 +302,7 @@ fn apply_move_relocates_file_and_updates_db_path() {
     );
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &plan, "move").unwrap();
+    let result = apply_organize(&conn, &plan, "move", &[music.clone(), src.clone()]).unwrap();
 
     assert_eq!(result.moved, 1);
     assert!(result.errors.is_empty());
@@ -331,7 +331,7 @@ fn apply_copy_creates_collection_file_and_updates_collection_tracks_path() {
     let coll_id = ensure_collection(&conn, "Mix", tid);
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &plan, "move").unwrap();
+    let result = apply_organize(&conn, &plan, "move", &[music.clone(), src.clone()]).unwrap();
 
     assert_eq!(result.copied, 1);
     let coll_path: Option<String> = conn
@@ -355,7 +355,7 @@ fn apply_move_with_also_collection_updates_both_tracks_and_collection_tracks() {
     let coll_id = ensure_collection(&conn, "Mix", tid);
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &plan, "move").unwrap();
+    let result = apply_organize(&conn, &plan, "move", &[music.clone(), src.clone()]).unwrap();
     assert_eq!(result.moved, 1);
     assert_eq!(result.copied, 0, "no separate copy expected — the move is the copy");
 
@@ -389,7 +389,7 @@ fn apply_move_cleans_empty_source_directories_walking_up() {
     );
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &plan, "move").unwrap();
+    let result = apply_organize(&conn, &plan, "move", &[music.clone(), src.clone()]).unwrap();
     assert_eq!(result.moved, 1);
     assert!(result.dirs_cleaned >= 2, "deep + nested should both be cleaned, got {}", result.dirs_cleaned);
     assert!(!src.join("nested/deep").exists(), "deepest dir should be gone");
@@ -412,7 +412,7 @@ fn apply_deletes_orphan_track_rows() {
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
     assert_eq!(plan.missing_sources.len(), 1);
 
-    let result = apply_organize(&conn, &plan, "move").unwrap();
+    let result = apply_organize(&conn, &plan, "move", &[music.clone(), src.clone()]).unwrap();
 
     assert_eq!(result.orphans_cleaned, 1);
     let exists: i64 = conn
@@ -509,7 +509,7 @@ fn apply_delete_with_files_true_removes_files_and_orphan_track_rows() {
         seed_collection_file(&conn, &music, "Mix", "Collections/Mix/song.mp3", "Artist", "Song");
     let plan = plan_delete_collection(&conn, coll_id, &music).unwrap();
 
-    let result = apply_delete_collection(&conn, &plan, true).unwrap();
+    let result = apply_delete_collection(&conn, &plan, true, &music).unwrap();
 
     assert_eq!(result.files_deleted, 1);
     assert_eq!(result.tracks_orphaned_removed, 1);
@@ -531,7 +531,7 @@ fn apply_delete_with_files_false_keeps_files_but_cleans_db() {
         seed_collection_file(&conn, &music, "Mix", "Collections/Mix/song.mp3", "Artist", "Song");
     let plan = plan_delete_collection(&conn, coll_id, &music).unwrap();
 
-    let result = apply_delete_collection(&conn, &plan, false).unwrap();
+    let result = apply_delete_collection(&conn, &plan, false, &music).unwrap();
 
     assert_eq!(result.files_deleted, 0, "files=false should leave files alone");
     assert_eq!(result.tracks_orphaned_removed, 0, "files=false should not delete orphan tracks");
@@ -546,4 +546,55 @@ fn apply_delete_with_files_false_keeps_files_but_cleans_db() {
         .query_row("SELECT COUNT(*) FROM tracks WHERE id = ?1", [tid], |r| r.get(0))
         .unwrap();
     assert_eq!(track_count, 1);
+}
+
+// ── remove_empty_parents safety floor ────────────────────────────
+
+#[test]
+fn remove_empty_parents_refuses_to_touch_path_outside_roots() {
+    let tmp = TempDir::new().unwrap();
+    let unmanaged = tmp.path().join("unmanaged/deep");
+    std::fs::create_dir_all(&unmanaged).unwrap();
+
+    // The unmanaged dir is NOT under any declared root — function must do nothing.
+    let fake_root = tmp.path().join("some_other_root");
+    let cleaned = remove_empty_parents(&unmanaged, &[fake_root]);
+
+    assert_eq!(cleaned, 0);
+    assert!(unmanaged.exists(), "dir outside any root must not be deleted");
+}
+
+#[test]
+fn remove_empty_parents_never_deletes_root_itself() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("music");
+    let child = root.join("Artist/Album");
+    std::fs::create_dir_all(&child).unwrap();
+
+    let cleaned = remove_empty_parents(&child, &[root.clone()]);
+
+    // Both Album and Artist are inside the root and empty → cleaned.
+    // But the root itself must survive even though it is empty.
+    assert_eq!(cleaned, 2);
+    assert!(root.exists(), "root must never be deleted");
+    assert!(!root.join("Artist").exists());
+}
+
+#[test]
+fn remove_empty_parents_stops_at_root_boundary() {
+    // Climbing must not cross a root boundary even if ancestors happen to
+    // be empty on disk.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("music");
+    let sibling = tmp.path().join("sibling");
+    let child = root.join("Artist");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::create_dir_all(&sibling).unwrap();
+
+    let _ = remove_empty_parents(&child, &[root.clone()]);
+
+    assert!(!child.exists(), "empty child inside root should be cleaned");
+    assert!(root.exists(), "root preserved");
+    assert!(sibling.exists(), "sibling outside root must be untouched");
+    assert!(tmp.path().exists(), "walk must not climb above root");
 }

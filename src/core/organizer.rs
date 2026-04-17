@@ -288,6 +288,7 @@ pub fn apply_organize(
     conn: &Connection,
     plan: &OrganizePlan,
     operation: &str,
+    cleanup_roots: &[PathBuf],
 ) -> Result<OrganizeResult> {
     let mut result = OrganizeResult::default();
     let mut emptied_dirs: Vec<PathBuf> = Vec::new();
@@ -395,7 +396,7 @@ pub fn apply_organize(
     emptied_dirs.dedup();
     emptied_dirs.reverse();
     for dir in &emptied_dirs {
-        result.dirs_cleaned += remove_empty_parents(dir);
+        result.dirs_cleaned += remove_empty_parents(dir, cleanup_roots);
     }
 
     Ok(result)
@@ -511,6 +512,7 @@ pub fn apply_delete_collection(
     conn: &Connection,
     plan: &DeleteCollectionPlan,
     delete_files: bool,
+    music_dir: &Path,
 ) -> Result<DeleteCollectionResult> {
     let mut result = DeleteCollectionResult::default();
     let mut emptied_dirs: Vec<PathBuf> = Vec::new();
@@ -557,19 +559,49 @@ pub fn apply_delete_collection(
         emptied_dirs.sort();
         emptied_dirs.dedup();
         emptied_dirs.reverse();
+        let roots = [music_dir.to_path_buf()];
         for dir in &emptied_dirs {
-            result.dirs_cleaned += remove_empty_parents(dir);
+            result.dirs_cleaned += remove_empty_parents(dir, &roots);
         }
     }
 
     Ok(result)
 }
 
-/// Remove a directory and its empty parents, stopping at the first non-empty one.
-pub(crate) fn remove_empty_parents(dir: &Path) -> u32 {
+/// Managed directory roots for directory-cleanup safety: music_dir plus any
+/// configured inbox dirs. `apply_organize` / `apply_delete_collection` use
+/// these as a whitelist when sweeping empty parents — nothing outside this
+/// set is ever touched.
+pub fn cleanup_roots(settings: &Settings) -> Vec<PathBuf> {
+    let mut roots = Vec::with_capacity(1 + settings.library.inbox_dirs.len());
+    roots.push(settings.library.music_dir.clone());
+    roots.extend(settings.library.inbox_dirs.iter().cloned());
+    roots
+}
+
+/// Remove a directory and its empty parents, stopping at the first non-empty
+/// one. `roots` is a whitelist of managed directory roots (e.g. music_dir,
+/// inbox dirs): the function never deletes a path equal to any root, never
+/// climbs above any root, and refuses to touch `dir` at all unless it lives
+/// strictly inside at least one of the roots. This is a safety floor against
+/// accidentally sweeping up the user's home directory or filesystem root.
+pub(crate) fn remove_empty_parents(dir: &Path, roots: &[PathBuf]) -> u32 {
+    // Must live strictly inside at least one root. Being equal to a root
+    // is not enough — roots themselves are sacrosanct.
+    let is_inside_a_root = |p: &Path| -> bool {
+        roots.iter().any(|r| p.starts_with(r) && p != r.as_path())
+    };
+    if !is_inside_a_root(dir) {
+        return 0;
+    }
+
     let mut cleaned = 0u32;
     let mut current = dir.to_path_buf();
     loop {
+        // Never touch a path that is not strictly inside a managed root.
+        if !is_inside_a_root(&current) {
+            break;
+        }
         match std::fs::read_dir(&current) {
             Ok(mut entries) => {
                 if entries.next().is_none() {

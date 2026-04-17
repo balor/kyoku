@@ -60,8 +60,13 @@ fn e2e_import_album_then_organize_lands_files_under_music_dir() {
         music
     );
 
-    let result = organizer::apply_organize(&conn, &plan, "move")
-        .expect("apply_organize should succeed");
+    let result = organizer::apply_organize(
+        &conn,
+        &plan,
+        "move",
+        &[music.clone(), inbox.clone()],
+    )
+    .expect("apply_organize should succeed");
     assert_eq!(result.moved, 1);
     assert_eq!(result.copied, 0);
     assert!(

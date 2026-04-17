@@ -141,7 +141,8 @@ impl CollectionsView {
                         return CollectionsAction::None;
                     }
                     ConfirmAction::Confirm { delete_files } => {
-                        organizer::apply_delete_collection(conn, plan, delete_files).ok();
+                        organizer::apply_delete_collection(conn, plan, delete_files, music_dir)
+                            .ok();
                         self.mode = InputMode::Normal;
                         return CollectionsAction::Refresh;
                     }
@@ -574,7 +575,8 @@ impl CollectionDetailView {
                                 && p.exists() && p.starts_with(music_dir) {
                                     let _ = std::fs::remove_file(p);
                                     if let Some(parent) = p.parent() {
-                                        let _ = remove_empty_parents(parent);
+                                        let roots = [music_dir.to_path_buf()];
+                                        let _ = remove_empty_parents(parent, &roots);
                                     }
                                 }
                             // If removing this would leave the track with no
