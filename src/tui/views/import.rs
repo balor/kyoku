@@ -7,14 +7,14 @@ mod wizard;
 mod worker;
 
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 
 use rusqlite::Connection;
 
 use crate::core::tagger;
 use crate::db::models::Track;
 use crate::external::matching::MatchScore;
-use crate::external::musicbrainz::MbRelease;
+use crate::external::musicbrainz::{MbClient, MbRelease};
 use crate::tui::widgets::input::TextInput;
 use crate::tui::widgets::pick_collection::PickCollectionPopup;
 
@@ -80,8 +80,15 @@ pub struct ImportView {
     // MB rate limit from config
     pub rate_limit_ms: u64,
     scan_rx: Option<mpsc::Receiver<ScanMessage>>,
-    /// Receives results for the currently-searched group.
+    /// Persistent MB search channel. Lives across all searches so a prefetch
+    /// of the *next* group can complete even after the user navigates and we
+    /// kick off a fresh search for the new current group.
     mb_rx: Option<mpsc::Receiver<MbResult>>,
+    mb_tx: Option<mpsc::Sender<MbResult>>,
+    /// Shared MB client — `Arc<Mutex<_>>` so concurrent search threads
+    /// serialize through the client's internal throttler instead of
+    /// racing against MB's rate limit with separate clients.
+    mb_client: Option<Arc<Mutex<MbClient>>>,
     /// Manual MBID input mode during Review.
     mbid_input: Option<TextInput>,
     /// Receives a fetched release from a manual MBID lookup.
@@ -128,6 +135,8 @@ impl Default for ImportView {
             rate_limit_ms: 1100,
             scan_rx: None,
             mb_rx: None,
+            mb_tx: None,
+            mb_client: None,
             mbid_input: None,
             mbid_fetch_rx: None,
             collection_picker: None,
@@ -144,6 +153,8 @@ impl ImportView {
         self.result_summary = None;
         self.scan_rx = None;
         self.mb_rx = None;
+        self.mb_tx = None;
+        self.mb_client = None;
         self.mbid_input = None;
         self.mbid_fetch_rx = None;
         self.collection_picker = None;

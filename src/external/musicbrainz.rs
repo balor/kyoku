@@ -109,8 +109,6 @@ impl MbClient {
         album: Option<&str>,
         limit: u32,
     ) -> Result<Vec<MbRelease>> {
-        self.throttle();
-
         let query = if let Some(album) = album {
             format!(
                 "artist:({}) AND release:({})",
@@ -128,23 +126,14 @@ impl MbClient {
             limit,
         );
 
-        let resp: MbSearchResponse = self
-            .client
-            .get(&url)
-            .send()
-            .map_err(|e| {
-                crate::error::KyokuError::Config(format!(
-                    "MB search failed: {}",
-                    error_chain(&e)
-                ))
-            })?
-            .json()
-            .map_err(|e| {
-                crate::error::KyokuError::Config(format!(
-                    "MB parse failed: {}",
-                    error_chain(&e)
-                ))
-            })?;
+        let body = self.get_json_body(&url, "search")?;
+        let resp: MbSearchResponse = serde_json::from_str(&body).map_err(|e| {
+            crate::error::KyokuError::External(format!(
+                "MB parse failed: {}: body={}",
+                e,
+                truncate_for_log(&body, 200),
+            ))
+        })?;
 
         Ok(resp
             .releases
@@ -155,32 +144,104 @@ impl MbClient {
 
     /// Fetch a specific release with full track listing.
     pub fn fetch_release(&mut self, mbid: &str) -> Result<MbRelease> {
-        self.throttle();
-
         let url = format!(
             "{}/release/{}?inc=recordings+artists+labels&fmt=json",
             MB_BASE, mbid,
         );
 
-        let raw: serde_json::Value = self
-            .client
-            .get(&url)
-            .send()
-            .map_err(|e| {
-                crate::error::KyokuError::Config(format!(
-                    "MB fetch failed: {}",
-                    error_chain(&e)
-                ))
-            })?
-            .json()
-            .map_err(|e| {
-                crate::error::KyokuError::Config(format!(
-                    "MB parse failed: {}",
-                    error_chain(&e)
-                ))
-            })?;
+        let body = self.get_json_body(&url, "fetch")?;
+        let raw: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+            crate::error::KyokuError::External(format!(
+                "MB parse failed: {}: body={}",
+                e,
+                truncate_for_log(&body, 200),
+            ))
+        })?;
 
         Ok(parse_full_release(raw))
+    }
+
+    /// GET `url` and return the response body as text. Auto-retries once on
+    /// transient failures (5xx server errors, network errors). Permanent
+    /// failures (4xx, parse errors) are returned immediately so the caller
+    /// can surface the real reason instead of a downstream parse failure.
+    fn get_json_body(&mut self, url: &str, op: &str) -> Result<String> {
+        match self.attempt_get(url, op) {
+            Ok(body) => Ok(body),
+            Err(AttemptError::Retryable(msg)) => {
+                tracing::warn!("MB {} transient failure, retrying once: {}", op, msg);
+                // Small backoff on top of the normal throttle spacing.
+                std::thread::sleep(Duration::from_millis(750));
+                match self.attempt_get(url, op) {
+                    Ok(body) => Ok(body),
+                    Err(AttemptError::Retryable(msg)) | Err(AttemptError::Permanent(msg)) => {
+                        Err(crate::error::KyokuError::External(format!(
+                            "MB {} failed after retry: {}",
+                            op, msg
+                        )))
+                    }
+                }
+            }
+            Err(AttemptError::Permanent(msg)) => Err(crate::error::KyokuError::External(
+                format!("MB {} failed: {}", op, msg),
+            )),
+        }
+    }
+
+    /// One request attempt. Throttles first so the caller doesn't have to,
+    /// and so the throttle applies both to the first attempt and the retry.
+    fn attempt_get(&mut self, url: &str, op: &str) -> std::result::Result<String, AttemptError> {
+        self.throttle();
+
+        let resp = match self.client.get(url).send() {
+            Ok(r) => r,
+            Err(e) => {
+                // Network-level errors (timeout, DNS, TLS, connection refused)
+                // are generally transient — worth one retry.
+                let _ = op;
+                return Err(AttemptError::Retryable(error_chain(&e)));
+            }
+        };
+
+        let status = resp.status();
+        let body = match resp.text() {
+            Ok(b) => b,
+            Err(e) => return Err(AttemptError::Retryable(error_chain(&e))),
+        };
+
+        if !status.is_success() {
+            // MB error responses are JSON like {"error": "...", "help": "..."}.
+            // Extract the message if we can, otherwise include the raw body.
+            let detail = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v["error"].as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| truncate_for_log(&body, 200));
+            let msg = format!("HTTP {}: {}", status, detail);
+            // 5xx server errors (incl. 503 "busy") are transient; 4xx are not.
+            if status.is_server_error() {
+                return Err(AttemptError::Retryable(msg));
+            } else {
+                return Err(AttemptError::Permanent(msg));
+            }
+        }
+
+        Ok(body)
+    }
+}
+
+enum AttemptError {
+    Retryable(String),
+    Permanent(String),
+}
+
+fn truncate_for_log(s: &str, max: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.chars().count() <= max {
+        trimmed.to_string()
+    } else {
+        let mut out: String = trimmed.chars().take(max).collect();
+        out.push('…');
+        out
     }
 }
 

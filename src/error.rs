@@ -24,6 +24,11 @@ pub enum KyokuError {
 
     #[error("Configuration error: {0}")]
     Config(String),
+
+    /// A call to an external service (MusicBrainz, etc.) failed. Distinct
+    /// from `Config` so UI/log prefixes don't imply the user's config is broken.
+    #[error("External service error: {0}")]
+    External(String),
 }
 
 pub type Result<T> = std::result::Result<T, KyokuError>;

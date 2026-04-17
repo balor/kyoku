@@ -5,7 +5,7 @@
 //! searching, MBID fetching, and importing. The receivers live in
 //! `ImportView`; results are drained in `render::tick`.
 
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use rusqlite::Connection;
@@ -264,14 +264,33 @@ impl ImportView {
             }
             KeyCode::Char('n') => self.next_group(),
             KeyCode::Char('p') => self.prev_group(),
+            KeyCode::Char('r') => self.retry_mb_for_current_group(),
             _ => {}
         }
+    }
+
+    /// User-initiated retry of the MB search for the current group. Only
+    /// does anything when the group is currently in the `Failed` state —
+    /// resets it to `NotStarted` and re-kicks the search.
+    fn retry_mb_for_current_group(&mut self) {
+        let idx = self.current_group;
+        let should_retry = matches!(
+            self.groups.get(idx).map(|g| &g.mb_state),
+            Some(MbMatchState::Failed(_))
+        );
+        if !should_retry {
+            return;
+        }
+        if let Some(group) = self.groups.get_mut(idx) {
+            group.mb_state = MbMatchState::NotStarted;
+            group.mb_candidates.clear();
+        }
+        self.search_mb_for_group(idx);
     }
 
     /// Fetch a release by MBID on a background thread.
     fn fetch_mbid(&mut self, mbid: String) {
         let idx = self.current_group;
-        let rate_limit_ms = self.rate_limit_ms;
 
         // Get local data for scoring
         let (artist, album, year, track_count, titles, total_ms) =
@@ -302,8 +321,11 @@ impl ImportView {
         let (tx, rx) = mpsc::channel();
         self.mbid_fetch_rx = Some(rx);
 
+        self.ensure_mb_infra();
+        let client = self.mb_client.as_ref().unwrap().clone();
+
         std::thread::spawn(move || {
-            let mut client = MbClient::new(rate_limit_ms);
+            let mut client = client.lock().unwrap();
             match client.fetch_release(&mbid) {
                 Ok(release) => {
                     let score = matching::score_release(
@@ -338,15 +360,25 @@ impl ImportView {
     fn next_group(&mut self) {
         if self.current_group < self.groups.len() {
             self.current_group += 1;
-            self.search_mb_for_current_group();
+            self.ensure_mb_searches_around_cursor();
         }
     }
 
     fn prev_group(&mut self) {
         if self.current_group > 0 {
             self.current_group -= 1;
-            self.search_mb_for_current_group();
+            self.ensure_mb_searches_around_cursor();
         }
+    }
+
+    /// Kick off MB searches for the current group and the next one. Each
+    /// call is idempotent — `search_mb_for_group` short-circuits groups
+    /// that are already `Searching`/`Done`/`Failed`, so navigating back
+    /// and forth doesn't duplicate work.
+    fn ensure_mb_searches_around_cursor(&mut self) {
+        let cur = self.current_group;
+        self.search_mb_for_group(cur);
+        self.search_mb_for_group(cur + 1);
     }
 
     pub(super) fn is_in_summary(&self) -> bool {
@@ -424,9 +456,9 @@ impl ImportView {
     }
 
     /// Kick off an MB search for the given group index on a background thread.
-    /// Does nothing if the group is already searched or searching.
-    pub(super) fn search_mb_for_current_group(&mut self) {
-        let idx = self.current_group;
+    /// Does nothing if the group is already searched, searching, or failed —
+    /// state stays the same on repeated calls, which makes prefetching safe.
+    pub(super) fn search_mb_for_group(&mut self, idx: usize) {
         let group = match self.groups.get_mut(idx) {
             Some(g) if g.mb_state == MbMatchState::NotStarted => g,
             _ => return,
@@ -450,10 +482,11 @@ impl ImportView {
             .iter()
             .map(|(t, _)| t.duration_ms.unwrap_or(0))
             .sum();
-        let rate_limit_ms = self.rate_limit_ms;
 
-        let (tx, rx) = mpsc::channel();
-        self.mb_rx = Some(rx);
+        self.ensure_mb_infra();
+        // Clones for the worker thread.
+        let tx = self.mb_tx.as_ref().unwrap().clone();
+        let client = self.mb_client.as_ref().unwrap().clone();
 
         std::thread::spawn(move || {
             if artist.is_empty() && album.is_empty() {
@@ -465,7 +498,9 @@ impl ImportView {
                 return;
             }
 
-            let mut client = MbClient::new(rate_limit_ms);
+            // All MB I/O for this thread happens under the shared lock so
+            // the client's throttler serializes requests across prefetches.
+            let mut client = client.lock().unwrap();
             let mut search_error: Option<String> = None;
             let mut candidates: Vec<MbCandidate> = match client
                 .search_releases(&artist, &album, 5)
@@ -556,6 +591,18 @@ impl ImportView {
                 error: search_error,
             });
         });
+    }
+
+    /// Lazily create the MB channel and shared client on first use.
+    fn ensure_mb_infra(&mut self) {
+        if self.mb_rx.is_none() {
+            let (tx, rx) = mpsc::channel();
+            self.mb_tx = Some(tx);
+            self.mb_rx = Some(rx);
+        }
+        if self.mb_client.is_none() {
+            self.mb_client = Some(Arc::new(Mutex::new(MbClient::new(self.rate_limit_ms))));
+        }
     }
 
     fn start_import(&mut self) {

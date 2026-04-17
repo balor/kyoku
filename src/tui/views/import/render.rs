@@ -34,14 +34,18 @@ impl ImportView {
         if scan_done {
             self.scan_rx = None;
             self.step = ImportStep::Review;
-            // Trigger lazy MB search for the first group
-            self.search_mb_for_current_group();
+            // Trigger lazy MB search for the first group, and prefetch
+            // the next one so navigation feels instant.
+            self.search_mb_for_group(0);
+            self.search_mb_for_group(1);
         }
 
-        // Process MB result for the currently-searched group
-        let mut mb_done = false;
-        if let Some(rx) = &self.mb_rx
-            && let Ok(result) = rx.try_recv() {
+        // Drain any MB results that completed since the last tick. With
+        // prefetch enabled, more than one group can deliver per tick, so
+        // we loop until the channel is empty. The channel itself stays
+        // open for the whole review session.
+        if let Some(rx) = &self.mb_rx {
+            while let Ok(result) = rx.try_recv() {
                 if let Some(group) = self.groups.get_mut(result.group_idx) {
                     if let Some(err) = result.error {
                         // Preserve any candidates we might have collected; set
@@ -59,10 +63,7 @@ impl ImportView {
                         group.mb_state = MbMatchState::Done;
                     }
                 }
-                mb_done = true;
             }
-        if mb_done {
-            self.mb_rx = None;
         }
 
         // Process manual MBID fetch result
@@ -137,7 +138,12 @@ impl ImportView {
                         vec![("Enter", "import"), ("p", "back"), ("Esc", "cancel")]
                     }
                 } else {
-                    vec![
+                    let cur_failed = self
+                        .groups
+                        .get(self.current_group)
+                        .map(|g| matches!(g.mb_state, MbMatchState::Failed(_)))
+                        .unwrap_or(false);
+                    let mut hints = vec![
                         ("↑↓/1-5", "pick MB"),
                         ("m", "MBID"),
                         ("c", "+coll"),
@@ -146,7 +152,11 @@ impl ImportView {
                         ("L", "loose"),
                         ("Enter/n/p", "nav"),
                         ("Esc", "cancel"),
-                    ]
+                    ];
+                    if cur_failed {
+                        hints.insert(0, ("r", "retry MB"));
+                    }
+                    hints
                 }
             }
             ImportStep::Importing => vec![],
@@ -501,7 +511,7 @@ impl ImportView {
             frame.render_widget(p, chunks[2]);
         } else if let MbMatchState::Failed(reason) = &group.mb_state {
             let p = Paragraph::new(Span::styled(
-                format!(" MB search failed: {} (full detail in log)", reason),
+                format!(" MB search failed: {} — press r to retry (log has detail)", reason),
                 Style::default().fg(theme.red),
             ));
             frame.render_widget(p, chunks[2]);
