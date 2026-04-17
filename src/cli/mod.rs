@@ -21,18 +21,6 @@ pub enum Command {
         #[arg(long, short = 'p')]
         pretend: bool,
 
-        /// Auto-accept matches above threshold, skip below
-        #[arg(long, short = 'a')]
-        auto: bool,
-
-        /// Skip AcoustID fingerprinting
-        #[arg(long)]
-        no_fingerprint: bool,
-
-        /// Skip MusicBrainz matching entirely (import as-is)
-        #[arg(long)]
-        no_match: bool,
-
         /// Treat all files as individual tracks, don't group into albums
         #[arg(long)]
         loose: bool,

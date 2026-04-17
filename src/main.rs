@@ -59,7 +59,6 @@ fn main() -> anyhow::Result<()> {
             pretend,
             loose,
             collection,
-            ..
         }) => {
             let conn = db::open_database(config::paths::database_file())?;
 
