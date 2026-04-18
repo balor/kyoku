@@ -147,13 +147,17 @@ impl AlbumDetailView {
                             if had_errors {
                                 parts.push(format!("{} errors", result.errors.len()));
                             }
-                            let kind = if had_errors {
-                                NoticeKind::Warning
-                            } else {
-                                NoticeKind::Success
-                            };
-                            self.notice =
-                                Some((kind, format!("Organized: {}", parts.join(", "))));
+                            if !parts.is_empty() {
+                                let kind = if had_errors {
+                                    NoticeKind::Warning
+                                } else {
+                                    NoticeKind::Success
+                                };
+                                self.notice = Some((
+                                    kind,
+                                    format!("Organized: {}", parts.join(", ")),
+                                ));
+                            }
                         }
                         Err(e) => {
                             self.notice = Some((

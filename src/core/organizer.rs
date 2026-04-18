@@ -187,13 +187,20 @@ pub fn plan_organize(
                 raw_target
             } else {
                 let target = disambiguate(raw_target, &mut used_paths);
-                plan.moves.push(FileMove {
-                    track_id: t.id,
-                    from: from.clone(),
-                    to: target.clone(),
-                    also_collection: None,
-                });
-                target
+                if from == target {
+                    // Disambiguation handed us back our own path (e.g. another
+                    // track now owns the un-suffixed slot). Already in place.
+                    plan.skipped += 1;
+                    target
+                } else {
+                    plan.moves.push(FileMove {
+                        track_id: t.id,
+                        from: from.clone(),
+                        to: target.clone(),
+                        also_collection: None,
+                    });
+                    target
+                }
             };
 
             // One copy per collection — skip if the target already exists on disk
@@ -226,13 +233,18 @@ pub fn plan_organize(
                 raw_primary
             } else {
                 let primary_target = disambiguate(raw_primary, &mut used_paths);
-                plan.moves.push(FileMove {
-                    track_id: t.id,
-                    from: from.clone(),
-                    to: primary_target.clone(),
-                    also_collection: Some((*first_id, first_name.clone())),
-                });
-                primary_target
+                if from == primary_target {
+                    plan.skipped += 1;
+                    primary_target
+                } else {
+                    plan.moves.push(FileMove {
+                        track_id: t.id,
+                        from: from.clone(),
+                        to: primary_target.clone(),
+                        also_collection: Some((*first_id, first_name.clone())),
+                    });
+                    primary_target
+                }
             };
 
             // COPY to each additional collection's folder — skip if already exists
@@ -262,12 +274,16 @@ pub fn plan_organize(
                 plan.skipped += 1;
             } else {
                 let target = disambiguate(raw_target, &mut used_paths);
-                plan.moves.push(FileMove {
-                    track_id: t.id,
-                    from,
-                    to: target,
-                    also_collection: None,
-                });
+                if from == target {
+                    plan.skipped += 1;
+                } else {
+                    plan.moves.push(FileMove {
+                        track_id: t.id,
+                        from,
+                        to: target,
+                        also_collection: None,
+                    });
+                }
             }
         }
     }

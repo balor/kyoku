@@ -140,8 +140,10 @@ impl App {
                                 if !result.errors.is_empty() {
                                     parts.push(format!("{} errors", result.errors.len()));
                                 }
-                                self.library.notice =
-                                    Some(format!("Organized: {}", parts.join(", ")));
+                                if !parts.is_empty() {
+                                    self.library.notice =
+                                        Some(format!("Organized: {}", parts.join(", ")));
+                                }
                             }
                             Err(e) => {
                                 self.library.notice =
@@ -350,8 +352,10 @@ impl App {
                                 }
                                 // Stash notice — we can't set it on the view
                                 // directly since we'll reload below
-                                let _notice =
-                                    format!("Organized: {}", parts.join(", "));
+                                if !parts.is_empty() {
+                                    let _notice =
+                                        format!("Organized: {}", parts.join(", "));
+                                }
                             }
                             // Reload to reflect new paths
                             if let AppView::CollectionDetail { collection_id } = self.view {
