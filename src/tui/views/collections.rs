@@ -45,6 +45,9 @@ pub struct CollectionsView {
     pub collections: Vec<CollectionRow>,
     pub selected: usize,
     pub organize_plan: Option<crate::core::organizer::OrganizePlan>,
+    pub organize_scroll: usize,
+    pub organize_max_scroll: usize,
+    pub organize_details: bool,
     mode: InputMode,
 }
 
@@ -54,6 +57,9 @@ impl Default for CollectionsView {
             collections: Vec::new(),
             selected: 0,
             organize_plan: None,
+            organize_scroll: 0,
+            organize_max_scroll: 0,
+            organize_details: false,
             mode: InputMode::Normal,
         }
     }
@@ -94,7 +100,38 @@ impl CollectionsView {
                 return CollectionsAction::OrganizeAll;
             }
             if keys::is_back(&key) {
-                self.organize_plan = None;
+                if self.organize_details {
+                    self.organize_details = false;
+                    self.organize_scroll = 0;
+                } else {
+                    self.organize_plan = None;
+                    self.organize_scroll = 0;
+                }
+                return CollectionsAction::None;
+            }
+            if key.code == KeyCode::Char('d') {
+                self.organize_details = !self.organize_details;
+                self.organize_scroll = 0;
+                return CollectionsAction::None;
+            }
+            let max = self.organize_max_scroll;
+            if keys::is_down(&key) {
+                self.organize_scroll = (self.organize_scroll + 1).min(max);
+            }
+            if keys::is_up(&key) {
+                self.organize_scroll = self.organize_scroll.saturating_sub(1);
+            }
+            if keys::is_page_down(&key) {
+                self.organize_scroll = (self.organize_scroll + 20).min(max);
+            }
+            if keys::is_page_up(&key) {
+                self.organize_scroll = self.organize_scroll.saturating_sub(20);
+            }
+            if keys::is_half_page_down(&key) {
+                self.organize_scroll = (self.organize_scroll + 10).min(max);
+            }
+            if keys::is_half_page_up(&key) {
+                self.organize_scroll = self.organize_scroll.saturating_sub(10);
             }
             return CollectionsAction::None;
         }
@@ -244,7 +281,7 @@ impl CollectionsView {
         CollectionsAction::None
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let mut rows = Vec::new();
         for (i, coll) in self.collections.iter().enumerate() {
             let is_selected = i == self.selected;
@@ -337,49 +374,41 @@ impl CollectionsView {
 
         // Organize popup
         if let Some(plan) = &self.organize_plan {
-            use crate::tui::widgets::popup;
-
-            let mut lines = vec![Line::from("")];
-            if plan.moves.is_empty() && plan.copies.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "Nothing to organize — {} file(s) already in place.",
-                        plan.skipped
-                    ),
-                    Style::default().fg(theme.fg_muted),
-                )));
+            use crate::tui::widgets::organize_popup::{self, OrganizeView};
+            let nothing = plan.moves.is_empty() && plan.copies.is_empty();
+            let (view, title, hint, width) = if self.organize_details {
+                (
+                    OrganizeView::Details,
+                    "Organize Library — Details",
+                    "Enter = apply · d = summary · j/k = scroll · Esc = back",
+                    90,
+                )
+            } else if nothing {
+                (
+                    OrganizeView::Summary,
+                    "Organize Library",
+                    "Esc = close",
+                    85,
+                )
             } else {
-                if !plan.moves.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        format!(" {} file(s) to move", plan.moves.len()),
-                        Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
-                    )));
-                }
-                if !plan.copies.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        format!(" {} collection copy/copies", plan.copies.len()),
-                        Style::default().fg(theme.fg),
-                    )));
-                }
-            }
-            if plan.skipped > 0 && !(plan.moves.is_empty() && plan.copies.is_empty()) {
-                lines.push(Line::from(Span::styled(
-                    format!(" {} already in place", plan.skipped),
-                    Style::default().fg(theme.fg_muted),
-                )));
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                if plan.moves.is_empty() && plan.copies.is_empty() {
-                    "Esc = close"
-                } else {
-                    "Enter = apply · Esc = cancel"
-                },
-                Style::default().fg(theme.fg_muted),
-            )));
-
-            let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
-            popup::render_popup(frame, area, theme, "Organize Library", &lines, 70, height);
+                (
+                    OrganizeView::Summary,
+                    "Organize Library",
+                    "Enter = apply · d = details · j/k = scroll · Esc = cancel",
+                    85,
+                )
+            };
+            self.organize_max_scroll = organize_popup::render(
+                frame,
+                area,
+                theme,
+                plan,
+                &mut self.organize_scroll,
+                view,
+                title,
+                hint,
+                width,
+            );
         }
     }
 
@@ -406,6 +435,9 @@ pub struct CollectionDetailView {
     /// inside the organized library or still in the inbox.
     pub music_dir: PathBuf,
     pub organize_plan: Option<crate::core::organizer::OrganizePlan>,
+    pub organize_scroll: usize,
+    pub organize_max_scroll: usize,
+    pub organize_details: bool,
     pub notice: Option<String>,
     pub filter: String,
     pub selected: usize,
@@ -429,6 +461,9 @@ impl Default for CollectionDetailView {
             collection_paths: std::collections::HashMap::new(),
             music_dir: PathBuf::new(),
             organize_plan: None,
+            organize_scroll: 0,
+            organize_max_scroll: 0,
+            organize_details: false,
             notice: None,
             filter: String::new(),
             selected: 0,
@@ -524,7 +559,38 @@ impl CollectionDetailView {
                 return CollectionDetailAction::Organize;
             }
             if keys::is_back(&key) {
-                self.organize_plan = None;
+                if self.organize_details {
+                    self.organize_details = false;
+                    self.organize_scroll = 0;
+                } else {
+                    self.organize_plan = None;
+                    self.organize_scroll = 0;
+                }
+                return CollectionDetailAction::None;
+            }
+            if key.code == KeyCode::Char('d') {
+                self.organize_details = !self.organize_details;
+                self.organize_scroll = 0;
+                return CollectionDetailAction::None;
+            }
+            let max = self.organize_max_scroll;
+            if keys::is_down(&key) {
+                self.organize_scroll = (self.organize_scroll + 1).min(max);
+            }
+            if keys::is_up(&key) {
+                self.organize_scroll = self.organize_scroll.saturating_sub(1);
+            }
+            if keys::is_page_down(&key) {
+                self.organize_scroll = (self.organize_scroll + 20).min(max);
+            }
+            if keys::is_page_up(&key) {
+                self.organize_scroll = self.organize_scroll.saturating_sub(20);
+            }
+            if keys::is_half_page_down(&key) {
+                self.organize_scroll = (self.organize_scroll + 10).min(max);
+            }
+            if keys::is_half_page_up(&key) {
+                self.organize_scroll = self.organize_scroll.saturating_sub(10);
             }
             return CollectionDetailAction::None;
         }
@@ -696,7 +762,7 @@ impl CollectionDetailView {
         CollectionDetailAction::None
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
             .constraints([
@@ -884,71 +950,46 @@ impl CollectionDetailView {
 
         // Organize preview popup
         if let Some(plan) = &self.organize_plan {
-            use crate::tui::widgets::popup;
-
+            use crate::tui::widgets::organize_popup::{self, OrganizeView};
             let coll_name = self
                 .collection
                 .as_ref()
                 .map(|c| c.name.as_str())
                 .unwrap_or("?");
-
-            let mut lines = vec![Line::from("")];
-
-            if plan.moves.is_empty() && plan.copies.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "Nothing to organize — {} file(s) already in place.",
-                        plan.skipped
-                    ),
-                    Style::default().fg(theme.fg_muted),
-                )));
+            let nothing = plan.moves.is_empty() && plan.copies.is_empty();
+            let (view, title, hint, width) = if self.organize_details {
+                (
+                    OrganizeView::Details,
+                    format!("Organize — {} — Details", coll_name),
+                    "Enter = apply · d = summary · j/k = scroll · Esc = back",
+                    90,
+                )
+            } else if nothing {
+                (
+                    OrganizeView::Summary,
+                    format!("Organize — {}", coll_name),
+                    "Esc = close",
+                    85,
+                )
             } else {
-                if !plan.moves.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        format!(" {} file(s) to move:", plan.moves.len()),
-                        Style::default()
-                            .fg(theme.fg)
-                            .add_modifier(Modifier::BOLD),
-                    )));
-                    for m in plan.moves.iter().take(8) {
-                        let name =
-                            m.to.file_name().and_then(|f| f.to_str()).unwrap_or("?");
-                        lines.push(Line::from(Span::styled(
-                            format!("   {}", name),
-                            Style::default().fg(theme.fg_dim),
-                        )));
-                    }
-                    if plan.moves.len() > 8 {
-                        lines.push(Line::from(Span::styled(
-                            format!("   … and {} more", plan.moves.len() - 8),
-                            Style::default().fg(theme.fg_muted),
-                        )));
-                    }
-                }
-                if !plan.copies.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        format!(" {} collection copy/copies", plan.copies.len()),
-                        Style::default().fg(theme.fg),
-                    )));
-                }
-            }
-
-            if plan.skipped > 0 {
-                lines.push(Line::from(Span::styled(
-                    format!(" {} already in place", plan.skipped),
-                    Style::default().fg(theme.fg_muted),
-                )));
-            }
-
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "Enter = apply · Esc = cancel",
-                Style::default().fg(theme.fg_muted),
-            )));
-
-            let title = format!("Organize — {}", coll_name);
-            let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
-            popup::render_popup(frame, area, theme, &title, &lines, 80, height);
+                (
+                    OrganizeView::Summary,
+                    format!("Organize — {}", coll_name),
+                    "Enter = apply · d = details · j/k = scroll · Esc = cancel",
+                    85,
+                )
+            };
+            self.organize_max_scroll = organize_popup::render(
+                frame,
+                area,
+                theme,
+                plan,
+                &mut self.organize_scroll,
+                view,
+                &title,
+                hint,
+                width,
+            );
         }
     }
 }

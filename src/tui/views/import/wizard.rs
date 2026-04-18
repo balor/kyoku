@@ -371,14 +371,17 @@ impl ImportView {
         }
     }
 
-    /// Kick off MB searches for the current group and the next one. Each
+    /// Kick off MB searches for the current group and the next three. Each
     /// call is idempotent — `search_mb_for_group` short-circuits groups
     /// that are already `Searching`/`Done`/`Failed`, so navigating back
-    /// and forth doesn't duplicate work.
+    /// and forth doesn't duplicate work. Throttle still serializes requests,
+    /// so wall-clock is unchanged; this just queues enough work that the user
+    /// can navigate several groups forward before hitting a throbber.
     fn ensure_mb_searches_around_cursor(&mut self) {
         let cur = self.current_group;
-        self.search_mb_for_group(cur);
-        self.search_mb_for_group(cur + 1);
+        for offset in 0..=3 {
+            self.search_mb_for_group(cur + offset);
+        }
     }
 
     pub(super) fn is_in_summary(&self) -> bool {
@@ -545,44 +548,54 @@ impl ImportView {
             // track titles and durations. The search API doesn't return tracks,
             // so this is the only way to differentiate releases by translated
             // titles, alternate editions, etc.
+            //
+            // Skip this expensive refine when the leader is an obvious winner:
+            // either high absolute score (>= 0.85 matches the auto-accept
+            // threshold) or a large gap to #2. Saves ~1.1s per refetch.
             let leader_score = candidates.first().map(|c| c.score.total).unwrap_or(0.0);
-            let tied_count = candidates
-                .iter()
-                .take_while(|c| (leader_score - c.score.total).abs() < 0.10)
-                .count()
-                .min(3); // never refetch more than top 3
+            let runner_up = candidates.get(1).map(|c| c.score.total).unwrap_or(0.0);
+            let leader_is_obvious =
+                leader_score >= 0.85 || (leader_score - runner_up) >= 0.15;
 
-            if tied_count > 1 {
-                for i in 0..tied_count {
-                    let mbid = candidates[i].release.id.clone();
-                    if let Ok(full) = client.fetch_release(&mbid) {
-                        let new_score = matching::score_release(
-                            &artist,
-                            &album,
-                            year,
-                            track_count,
-                            &titles,
-                            total_ms,
-                            &full,
-                        );
-                        // Preserve the search-result API score (full release fetch
-                        // returns api_score = 100 because it's not a search hit)
-                        let preserved_api = candidates[i].release.api_score;
-                        let mut full = full;
-                        full.api_score = preserved_api;
-                        candidates[i] = MbCandidate {
-                            release: full,
-                            score: new_score,
-                        };
+            if !leader_is_obvious {
+                let tied_count = candidates
+                    .iter()
+                    .take_while(|c| (leader_score - c.score.total).abs() < 0.10)
+                    .count()
+                    .min(3); // never refetch more than top 3
+
+                if tied_count > 1 {
+                    for i in 0..tied_count {
+                        let mbid = candidates[i].release.id.clone();
+                        if let Ok(full) = client.fetch_release(&mbid) {
+                            let new_score = matching::score_release(
+                                &artist,
+                                &album,
+                                year,
+                                track_count,
+                                &titles,
+                                total_ms,
+                                &full,
+                            );
+                            // Preserve the search-result API score (full release fetch
+                            // returns api_score = 100 because it's not a search hit)
+                            let preserved_api = candidates[i].release.api_score;
+                            let mut full = full;
+                            full.api_score = preserved_api;
+                            candidates[i] = MbCandidate {
+                                release: full,
+                                score: new_score,
+                            };
+                        }
                     }
+                    // Re-sort after refetching
+                    candidates.sort_by(|a, b| {
+                        b.score
+                            .total
+                            .partial_cmp(&a.score.total)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
                 }
-                // Re-sort after refetching
-                candidates.sort_by(|a, b| {
-                    b.score
-                        .total
-                        .partial_cmp(&a.score.total)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
             }
 
             let _ = tx.send(MbResult {

@@ -34,10 +34,12 @@ impl ImportView {
         if scan_done {
             self.scan_rx = None;
             self.step = ImportStep::Review;
-            // Trigger lazy MB search for the first group, and prefetch
-            // the next one so navigation feels instant.
-            self.search_mb_for_group(0);
-            self.search_mb_for_group(1);
+            // Trigger lazy MB search for the first group, plus prefetch
+            // the next three so the user can navigate several groups
+            // forward before hitting a throbber.
+            for i in 0..=3 {
+                self.search_mb_for_group(i);
+            }
         }
 
         // Drain any MB results that completed since the last tick. With

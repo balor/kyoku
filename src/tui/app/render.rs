@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use super::{App, AppView};
 
 impl App {
-    pub fn render(&self, frame: &mut Frame) {
+    pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
         // Clear background
@@ -106,7 +106,7 @@ impl App {
         frame.render_widget(tab, chunks[1]);
     }
 
-    fn render_library(&self, frame: &mut Frame, area: Rect) {
+    fn render_library(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -138,7 +138,7 @@ impl App {
         );
     }
 
-    fn render_collections(&self, frame: &mut Frame, area: Rect) {
+    fn render_collections(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -171,7 +171,7 @@ impl App {
         );
     }
 
-    fn render_detail(&self, frame: &mut Frame, area: Rect) {
+    fn render_detail(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -209,7 +209,7 @@ impl App {
         );
     }
 
-    fn render_collection_detail(&self, frame: &mut Frame, area: Rect) {
+    fn render_collection_detail(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([

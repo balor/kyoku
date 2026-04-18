@@ -225,6 +225,12 @@ impl App {
             self.switch_view(AppView::Library);
             return AppAction::None;
         }
+        // Tab jumps to Collections, matching library-view behaviour. Skip when
+        // a popup owns input so Tab stays available inside those widgets.
+        if !self.album_detail.has_popup() && keys::is_tab_switch(&key) {
+            self.switch_view(AppView::Collections);
+            return AppAction::None;
+        }
         let action = self.album_detail.handle_key(key, &self.conn, &self.settings);
         match action {
             crate::tui::views::detail::DetailAction::None => AppAction::None,
@@ -249,8 +255,10 @@ impl App {
                         self.album_detail.set_organize_plan(plan);
                     }
                     Err(e) => {
-                        self.album_detail
-                            .set_notice(format!("Organize plan failed: {}", e));
+                        self.album_detail.set_notice(
+                            crate::tui::views::detail::NoticeKind::Warning,
+                            format!("Organize plan failed: {}", e),
+                        );
                     }
                 }
                 AppAction::None
@@ -261,6 +269,12 @@ impl App {
     pub(super) fn handle_collection_detail_key(&mut self, key: KeyEvent) -> AppAction {
         if keys::is_back(&key) && !self.collection_detail.has_popup() {
             self.switch_view(AppView::Collections);
+            return AppAction::None;
+        }
+        // Tab jumps to Library, matching collections-view behaviour. Skip when
+        // a popup owns input so Tab stays available inside those widgets.
+        if !self.collection_detail.has_popup() && keys::is_tab_switch(&key) {
+            self.switch_view(AppView::Library);
             return AppAction::None;
         }
         let action = self.collection_detail.handle_key(

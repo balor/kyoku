@@ -22,6 +22,12 @@ pub enum DetailAction {
     Organize,
 }
 
+#[derive(Clone, Copy)]
+pub enum NoticeKind {
+    Success,
+    Warning,
+}
+
 #[derive(Default)]
 pub struct AlbumDetailView {
     pub album: Option<AlbumRow>,
@@ -32,7 +38,10 @@ pub struct AlbumDetailView {
     rename_input: Option<TextInput>,
     add_to_collection: Option<AddToCollectionPopup>,
     organize_plan: Option<OrganizePlan>,
-    notice: Option<String>,
+    organize_scroll: usize,
+    organize_max_scroll: usize,
+    organize_details: bool,
+    notice: Option<(NoticeKind, String)>,
 }
 
 impl AlbumDetailView {
@@ -99,10 +108,12 @@ impl AlbumDetailView {
 
     pub fn set_organize_plan(&mut self, plan: OrganizePlan) {
         self.organize_plan = Some(plan);
+        self.organize_scroll = 0;
+        self.organize_details = false;
     }
 
-    pub fn set_notice(&mut self, msg: String) {
-        self.notice = Some(msg);
+    pub fn set_notice(&mut self, kind: NoticeKind, msg: String) {
+        self.notice = Some((kind, msg));
     }
 
     pub fn handle_key(
@@ -132,14 +143,23 @@ impl AlbumDetailView {
                             if result.dirs_cleaned > 0 {
                                 parts.push(format!("{} dirs cleaned", result.dirs_cleaned));
                             }
-                            if !result.errors.is_empty() {
+                            let had_errors = !result.errors.is_empty();
+                            if had_errors {
                                 parts.push(format!("{} errors", result.errors.len()));
                             }
+                            let kind = if had_errors {
+                                NoticeKind::Warning
+                            } else {
+                                NoticeKind::Success
+                            };
                             self.notice =
-                                Some(format!("Organized: {}", parts.join(", ")));
+                                Some((kind, format!("Organized: {}", parts.join(", "))));
                         }
                         Err(e) => {
-                            self.notice = Some(format!("Organize failed: {}", e));
+                            self.notice = Some((
+                                NoticeKind::Warning,
+                                format!("Organize failed: {}", e),
+                            ));
                         }
                     }
                     // Reload to reflect new paths
@@ -154,8 +174,39 @@ impl AlbumDetailView {
                 return DetailAction::None;
             }
             if keys::is_back(&key) {
-                self.organize_plan = None;
+                if self.organize_details {
+                    self.organize_details = false;
+                    self.organize_scroll = 0;
+                } else {
+                    self.organize_plan = None;
+                    self.organize_scroll = 0;
+                }
                 return DetailAction::None;
+            }
+            if key.code == KeyCode::Char('d') {
+                self.organize_details = !self.organize_details;
+                self.organize_scroll = 0;
+                return DetailAction::None;
+            }
+            // Scroll the plan list (content is pinned under a footer in the popup)
+            let max = self.organize_max_scroll;
+            if keys::is_down(&key) {
+                self.organize_scroll = (self.organize_scroll + 1).min(max);
+            }
+            if keys::is_up(&key) {
+                self.organize_scroll = self.organize_scroll.saturating_sub(1);
+            }
+            if keys::is_page_down(&key) {
+                self.organize_scroll = (self.organize_scroll + 20).min(max);
+            }
+            if keys::is_page_up(&key) {
+                self.organize_scroll = self.organize_scroll.saturating_sub(20);
+            }
+            if keys::is_half_page_down(&key) {
+                self.organize_scroll = (self.organize_scroll + 10).min(max);
+            }
+            if keys::is_half_page_up(&key) {
+                self.organize_scroll = self.organize_scroll.saturating_sub(10);
             }
             return DetailAction::None;
         }
@@ -234,11 +285,17 @@ impl AlbumDetailView {
                 let path = std::path::Path::new(&track.file_path);
                 if let Some(parent) = path.parent() {
                     if !parent.exists() {
-                        self.notice = Some(format!("Directory not found: {}", parent.display()));
+                        self.notice = Some((
+                            NoticeKind::Warning,
+                            format!("Directory not found: {}", parent.display()),
+                        ));
                     } else if !open_directory(parent) {
-                        self.notice = Some(format!(
-                            "Could not open file manager — path: {}",
-                            parent.display()
+                        self.notice = Some((
+                            NoticeKind::Warning,
+                            format!(
+                                "Could not open file manager — path: {}",
+                                parent.display()
+                            ),
                         ));
                     }
                 }
@@ -277,14 +334,14 @@ impl AlbumDetailView {
                 self.add_to_collection = None;
                 if let Some(n) = notice
                     && !n.is_empty() {
-                        self.notice = Some(n);
+                        self.notice = Some((NoticeKind::Success, n));
                     }
             }
         }
         DetailAction::None
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -432,10 +489,14 @@ impl AlbumDetailView {
             .split(chunks[2]);
 
         // Line 1: album metadata or notice
-        if let Some(notice) = &self.notice {
+        if let Some((kind, msg)) = &self.notice {
+            let color = match kind {
+                NoticeKind::Success => theme.green,
+                NoticeKind::Warning => theme.yellow,
+            };
             let p = Paragraph::new(Span::styled(
-                format!(" {} ", notice),
-                Style::default().fg(theme.green),
+                format!(" {} ", msg),
+                Style::default().fg(color),
             ))
             .style(Style::default().bg(theme.bg_alt));
             frame.render_widget(p, footer_chunks[0]);
@@ -503,91 +564,41 @@ impl AlbumDetailView {
 
         // Organize preview popup
         if let Some(plan) = &self.organize_plan {
-            use crate::tui::widgets::popup;
-
-            let mut lines = vec![Line::from("")];
-
-            if plan.moves.is_empty() && plan.copies.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "Nothing to organize — {} file(s) already in place.",
-                        plan.skipped
-                    ),
-                    Style::default().fg(theme.fg_muted),
-                )));
+            use crate::tui::widgets::organize_popup::{self, OrganizeView};
+            let nothing = plan.moves.is_empty() && plan.copies.is_empty();
+            let (view, title, hint, width) = if self.organize_details {
+                (
+                    OrganizeView::Details,
+                    "Organize Preview — Details",
+                    "Enter = apply · d = summary · j/k = scroll · Esc = back",
+                    90,
+                )
+            } else if nothing {
+                (
+                    OrganizeView::Summary,
+                    "Organize Preview",
+                    "Esc = close",
+                    80,
+                )
             } else {
-                if !plan.moves.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        format!(" {} file(s) to move:", plan.moves.len()),
-                        Style::default()
-                            .fg(theme.fg)
-                            .add_modifier(Modifier::BOLD),
-                    )));
-                    for m in plan.moves.iter().take(8) {
-                        let filename = m
-                            .to
-                            .file_name()
-                            .and_then(|f| f.to_str())
-                            .unwrap_or("?");
-                        let to_dir = m
-                            .to
-                            .parent()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_default();
-                        lines.push(Line::from(Span::styled(
-                            format!("   {} → {}", filename, to_dir),
-                            Style::default().fg(theme.fg_dim),
-                        )));
-                    }
-                    if plan.moves.len() > 8 {
-                        lines.push(Line::from(Span::styled(
-                            format!("   … and {} more", plan.moves.len() - 8),
-                            Style::default().fg(theme.fg_muted),
-                        )));
-                    }
-                }
-
-                if !plan.copies.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        format!(" {} collection copy/copies:", plan.copies.len()),
-                        Style::default()
-                            .fg(theme.fg)
-                            .add_modifier(Modifier::BOLD),
-                    )));
-                    for c in plan.copies.iter().take(5) {
-                        lines.push(Line::from(Span::styled(
-                            format!("   → {} ({})", c.to.display(), c.collection_name),
-                            Style::default().fg(theme.fg_dim),
-                        )));
-                    }
-                    if plan.copies.len() > 5 {
-                        lines.push(Line::from(Span::styled(
-                            format!("   … and {} more", plan.copies.len() - 5),
-                            Style::default().fg(theme.fg_muted),
-                        )));
-                    }
-                }
-            }
-
-            if plan.skipped > 0 && !(plan.moves.is_empty() && plan.copies.is_empty()) {
-                lines.push(Line::from(Span::styled(
-                    format!(" {} already in place", plan.skipped),
-                    Style::default().fg(theme.fg_muted),
-                )));
-            }
-
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                if plan.moves.is_empty() && plan.copies.is_empty() {
-                    "Esc = close"
-                } else {
-                    "Enter = apply · Esc = cancel"
-                },
-                Style::default().fg(theme.fg_muted),
-            )));
-
-            let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
-            popup::render_popup(frame, area, theme, "Organize Preview", &lines, 80, height);
+                (
+                    OrganizeView::Summary,
+                    "Organize Preview",
+                    "Enter = apply · d = details · j/k = scroll · Esc = cancel",
+                    80,
+                )
+            };
+            self.organize_max_scroll = organize_popup::render(
+                frame,
+                area,
+                theme,
+                plan,
+                &mut self.organize_scroll,
+                view,
+                title,
+                hint,
+                width,
+            );
         }
     }
 }
