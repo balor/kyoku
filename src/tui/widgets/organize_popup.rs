@@ -33,8 +33,9 @@ pub enum OrganizeView {
 /// Render the organize-plan preview in the requested mode.
 ///
 /// The caller provides its own `scroll` offset (in lines), the title shown
-/// in the popup border (a `[scroll/max]` indicator is appended when the
-/// content overflows), and the hint text for the pinned footer.
+/// in the popup border (an arrow marker — ↑, ↓, or ↕ — is appended when the
+/// content overflows to hint at off-screen lines), and the hint text for the
+/// pinned footer.
 /// Render the popup and return the viewport-aware `max_scroll` so the caller
 /// can clamp its own scroll state inside `handle_key` (preventing runaway
 /// counters when the user keeps pressing `j` at the bottom of the list).
@@ -104,7 +105,13 @@ pub fn render(
     let scroll = *scroll;
 
     let rendered_title = if max_scroll > 0 {
-        format!("{} [{}/{}]", title, scroll + 1, max_scroll + 1)
+        let marker = match (scroll > 0, scroll < max_scroll) {
+            (true, true) => " ↕",
+            (false, true) => " ↓",
+            (true, false) => " ↑",
+            _ => "",
+        };
+        format!("{}{}", title, marker)
     } else {
         title.to_string()
     };

@@ -19,6 +19,9 @@ pub struct MbRelease {
     pub track_count: u32,
     pub tracks: Vec<MbTrack>,
     pub api_score: u8,
+    /// Release-group MBID, used to look up `first-release-date` when the
+    /// release itself has no date exposed in the search response.
+    pub release_group_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -218,11 +221,63 @@ impl MbClient {
             ))
         })?;
 
-        Ok(resp
+        let mut releases: Vec<MbRelease> = resp
             .releases
             .into_iter()
             .map(parse_search_release)
-            .collect())
+            .collect();
+
+        // Year-fallback #4: when the search response carries no date info
+        // for a release (e.g. MB's Maenarawanai — neither `date`,
+        // `release-events`, nor `release-group.first-release-date` appear
+        // in search output, though the release page on MB shows them), fill
+        // the gap by fetching `first-release-date` from the release group.
+        // Only fires per candidate that's actually missing a year, so the
+        // extra API traffic is bounded and only the slower import-review
+        // path pays the cost.
+        self.enrich_missing_years(&mut releases);
+
+        Ok(releases)
+    }
+
+    fn enrich_missing_years(&mut self, releases: &mut [MbRelease]) {
+        for r in releases.iter_mut() {
+            if r.year.is_some() {
+                continue;
+            }
+            let Some(rg_id) = r.release_group_id.clone() else {
+                continue;
+            };
+            match self.fetch_release_group_first_year(&rg_id) {
+                Ok(Some(y)) => r.year = Some(y),
+                Ok(None) => {}
+                Err(e) => tracing::debug!(
+                    "MB release-group {} year lookup failed: {}",
+                    rg_id,
+                    e
+                ),
+            }
+        }
+    }
+
+    /// Fetch a release-group's `first-release-date` and return its year.
+    /// Used to fill in year when the release search response omits date
+    /// fields. Cheap compared to a full release fetch — the JSON payload
+    /// is tiny.
+    fn fetch_release_group_first_year(&mut self, rg_id: &str) -> Result<Option<i32>> {
+        let url = format!("{}/release-group/{}?fmt=json", MB_BASE, rg_id);
+        let body = self.get_json_body(&url, "release-group")?;
+        let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+            crate::error::KyokuError::External(format!(
+                "MB release-group parse failed: {}: body={}",
+                e,
+                truncate_for_log(&body, 200),
+            ))
+        })?;
+        Ok(v["first-release-date"]
+            .as_str()
+            .and_then(|d| d.get(..4))
+            .and_then(|y| y.parse::<i32>().ok()))
     }
 
     /// Fetch a specific release with full track listing.
@@ -361,12 +416,20 @@ struct MbSearchRelease {
     label_info: Option<Vec<MbLabelInfo>>,
     #[serde(rename = "release-group")]
     release_group: Option<MbSearchReleaseGroup>,
+    #[serde(rename = "release-events")]
+    release_events: Option<Vec<MbReleaseEvent>>,
 }
 
 #[derive(Deserialize)]
 struct MbSearchReleaseGroup {
+    id: Option<String>,
     #[serde(rename = "first-release-date")]
     first_release_date: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MbReleaseEvent {
+    date: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -405,17 +468,29 @@ fn parse_search_release(r: MbSearchRelease) -> MbRelease {
         .and_then(|l| l.label.as_ref())
         .and_then(|l| l.name.clone());
 
+    // Year fallback chain (search responses have inconsistent date coverage):
+    //   1. `date` on the release itself
+    //   2. `release-group.first-release-date` (rarely in search responses)
+    //   3. earliest `release-events[].date` (sometimes missing here too)
+    // If all three are absent, year is filled in later by a release-group
+    // lookup (see `enrich_missing_years`).
+    let rg_first = r
+        .release_group
+        .as_ref()
+        .and_then(|rg| rg.first_release_date.as_deref());
+    let earliest_event = r
+        .release_events
+        .as_ref()
+        .and_then(|events| events.iter().filter_map(|e| e.date.as_deref()).min());
     let year = r
         .date
         .as_deref()
-        .or_else(|| {
-            r.release_group
-                .as_ref()?
-                .first_release_date
-                .as_deref()
-        })
+        .or(rg_first)
+        .or(earliest_event)
         .and_then(|d| d.get(..4))
         .and_then(|y| y.parse::<i32>().ok());
+
+    let release_group_id = r.release_group.as_ref().and_then(|rg| rg.id.clone());
 
     MbRelease {
         id: r.id,
@@ -427,6 +502,7 @@ fn parse_search_release(r: MbSearchRelease) -> MbRelease {
         track_count: r.track_count.unwrap_or(0),
         tracks: Vec::new(), // Search results don't include tracks
         api_score: r.score.unwrap_or(0),
+        release_group_id,
     }
 }
 
@@ -445,11 +521,23 @@ fn parse_full_release(v: serde_json::Value) -> MbRelease {
         .unwrap_or("")
         .to_string();
 
+    // Same year fallback chain as parse_search_release — direct release
+    // lookups populate more fields than search but can still be missing
+    // the top-level date (e.g. digital-only releases), so check
+    // release-group and release-events as well.
+    let earliest_event_date = v["release-events"]
+        .as_array()
+        .and_then(|events| events.iter().filter_map(|e| e["date"].as_str()).min());
     let year = v["date"]
         .as_str()
         .or_else(|| v["release-group"]["first-release-date"].as_str())
+        .or(earliest_event_date)
         .and_then(|d| d.get(..4))
         .and_then(|y| y.parse::<i32>().ok());
+
+    let release_group_id = v["release-group"]["id"]
+        .as_str()
+        .map(|s| s.to_string());
 
     let country = v["country"].as_str().map(|s| s.to_string());
 
@@ -502,6 +590,7 @@ fn parse_full_release(v: serde_json::Value) -> MbRelease {
         track_count,
         tracks,
         api_score: 100,
+        release_group_id,
     }
 }
 

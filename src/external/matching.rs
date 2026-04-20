@@ -291,6 +291,7 @@ mod tests {
             country: Some("GB".to_string()),
             label: None,
             track_count: tracks.len() as u32,
+            release_group_id: None,
             tracks: tracks
                 .iter()
                 .enumerate()

@@ -97,7 +97,7 @@ fn default_path_template_single_disc() -> String {
 }
 
 fn default_collection_path_template() -> String {
-    "Collections/{collection}/{album_artist} - {album} - {track:02} {title}.{ext}".to_string()
+    "Collections/{collection}/{track:02} {album_artist} - {title}.{ext}".to_string()
 }
 
 fn default_loose_path_template() -> String {
