@@ -135,8 +135,13 @@ impl MbClient {
 
     /// Resolve an artist name (or alias) to its MusicBrainz artist MBID.
     /// Returns None if no plausible match is found.
+    ///
+    /// Note: uses an unprefixed query (no `artist:` field qualifier). With
+    /// `artist:(X)` MB only matches the canonical `name`; an unprefixed
+    /// query fans out across `name`, `sortname`, and `alias`, which is what
+    /// lets e.g. "HANABIE" resolve to 花冷え。's MBID via its Latin alias.
     fn resolve_artist_mbid(&mut self, name: &str) -> Result<Option<String>> {
-        let query = format!("artist:({})", escape_lucene(name));
+        let query = escape_lucene(name);
         let url = format!(
             "{}/artist/?query={}&fmt=json&limit=1",
             MB_BASE,
