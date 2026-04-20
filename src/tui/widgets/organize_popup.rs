@@ -331,12 +331,10 @@ fn build_detail_lines<'a>(plan: &'a OrganizePlan, theme: &Theme) -> Vec<Line<'a>
                     Style::default().fg(theme.yellow),
                 ),
             ]));
-            if let Some((_, coll_name)) = &m.also_collection {
-                lines.push(Line::from(Span::styled(
-                    format!("    (also collection: {})", coll_name),
-                    Style::default().fg(theme.accent_alt),
-                )));
-            }
+            // Note: `m.also_collection` is only set when the move destination
+            // is already inside that collection's folder, so surfacing it here
+            // reads as redundant — it's used downstream by apply_organize to
+            // update collection_tracks.collection_file_path.
             lines.push(Line::from(""));
         }
     }

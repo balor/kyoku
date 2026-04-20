@@ -155,6 +155,22 @@ pub fn plan_organize(
         let has_album = t.album_title.is_some();
         let from = PathBuf::from(&t.file_path);
 
+        // Metadata-starved tracks (no track number, no artist, no album_artist)
+        // would render as garbage like "00 Unknown - <stem>.ext" — keep the
+        // original filename instead while still honouring the template's directory.
+        let metadata_starved = t.track_number.unwrap_or(0) == 0
+            && t.artist.as_deref().unwrap_or("").trim().is_empty()
+            && t.album_artist.as_deref().unwrap_or("").trim().is_empty();
+        let preserve_filename = |target: PathBuf| -> PathBuf {
+            if !metadata_starved {
+                return target;
+            }
+            match (target.parent(), from.file_name()) {
+                (Some(dir), Some(name)) => dir.join(name),
+                _ => target,
+            }
+        };
+
         // Sort collections deterministically by ID (oldest first)
         let mut collections = t.collections.clone();
         collections.sort_by_key(|(id, _, _)| *id);
@@ -166,7 +182,7 @@ pub fn plan_organize(
                 .unwrap_or(&settings.library.collection_path_template);
             let mut coll_vars = vars.clone();
             coll_vars.collection = coll_name.to_string();
-            music_dir.join(template::render_path(tmpl, &coll_vars))
+            preserve_filename(music_dir.join(template::render_path(tmpl, &coll_vars)))
         };
 
         if has_album {
@@ -176,7 +192,7 @@ pub fn plan_organize(
             } else {
                 &settings.library.path_template
             };
-            let raw_target = music_dir.join(template::render_path(tmpl, &vars));
+            let raw_target = preserve_filename(music_dir.join(template::render_path(tmpl, &vars)));
 
             // Copies must read from the post-move location because apply_organize
             // runs moves before copies — by then `from` has been renamed.
@@ -267,7 +283,7 @@ pub fn plan_organize(
         } else {
             // Loose track, no collections: move to _loose/ folder
             let tmpl = &settings.library.loose_path_template;
-            let raw_target = music_dir.join(template::render_path(tmpl, &vars));
+            let raw_target = preserve_filename(music_dir.join(template::render_path(tmpl, &vars)));
 
             if from == raw_target {
                 used_paths.insert(raw_target);
