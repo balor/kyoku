@@ -262,54 +262,32 @@ pub fn list_loose_tracks(conn: &Connection, offset: usize, limit: usize) -> Resu
     Ok(result)
 }
 
-/// Search albums using FTS5. Falls back to LIKE if FTS is empty.
+/// Search albums matching the query against album-level fields only
+/// (album title + album artist). Track-level fields are deliberately
+/// excluded: a search for "花" should not surface an album just because
+/// one of its tracks happens to be titled "靴の花火" — tracks are
+/// returned separately via `search_tracks`, so folding them into album
+/// results duplicates the hit.
+///
+/// Multi-word queries are split on whitespace; each term must appear in
+/// at least one of the two fields (terms AND-combined, fields OR'd).
 pub fn search_albums(conn: &Connection, query: &str, limit: usize) -> Result<Vec<AlbumRow>> {
-    // Try FTS5 first
-    let fts_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM tracks_fts", [], |row| row.get(0))
-        .unwrap_or(0);
-
-    if fts_count > 0 {
-        search_albums_fts(conn, query, limit)
-    } else {
-        search_albums_like(conn, query, limit)
-    }
-}
-
-fn search_albums_fts(conn: &Connection, query: &str, limit: usize) -> Result<Vec<AlbumRow>> {
-    // FTS5 query: match across title, artist, album_title
-    let fts_query = query
+    let terms: Vec<String> = query
         .split_whitespace()
-        .map(|w| format!("\"{}\"*", w.replace('"', "")))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT a.id, a.title, a.album_artist, a.year,
-                COUNT(t.id) as track_count,
-                GROUP_CONCAT(DISTINCT t.file_format) as formats,
-                COALESCE(SUM(t.duration_ms), 0) as total_duration_ms,
-                a.mbid, a.label, a.genre
-         FROM tracks_fts fts
-         JOIN tracks t ON t.id = fts.rowid
-         LEFT JOIN albums a ON t.album_id = a.id
-         WHERE tracks_fts MATCH ?1
-         GROUP BY a.id
-         HAVING a.id IS NOT NULL
-         ORDER BY a.title COLLATE NOCASE
-         LIMIT ?2",
-    )?;
-    let rows = stmt.query_map(rusqlite::params![fts_query, limit as i64], map_album_row)?;
-    let mut result = Vec::new();
-    for row in rows {
-        result.push(row?);
+        .map(|w| format!("%{}%", w))
+        .collect();
+    if terms.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(result)
-}
 
-fn search_albums_like(conn: &Connection, query: &str, limit: usize) -> Result<Vec<AlbumRow>> {
-    let pattern = format!("%{}%", query);
-    let mut stmt = conn.prepare(
+    // Build one "(a.title LIKE ?n OR a.album_artist LIKE ?n)" clause per term.
+    let clauses: Vec<String> = (1..=terms.len())
+        .map(|i| format!("(a.title LIKE ?{i} OR a.album_artist LIKE ?{i})"))
+        .collect();
+    let where_clause = clauses.join(" AND ");
+    let limit_param = terms.len() + 1;
+
+    let sql = format!(
         "SELECT a.id, a.title, a.album_artist, a.year,
                 COUNT(t.id) as track_count,
                 GROUP_CONCAT(DISTINCT t.file_format) as formats,
@@ -317,13 +295,22 @@ fn search_albums_like(conn: &Connection, query: &str, limit: usize) -> Result<Ve
                 a.mbid, a.label, a.genre
          FROM albums a
          LEFT JOIN tracks t ON t.album_id = a.id
-         WHERE a.title LIKE ?1 OR a.album_artist LIKE ?1
-               OR t.title LIKE ?1 OR t.artist LIKE ?1
+         WHERE {where_clause}
          GROUP BY a.id
          ORDER BY a.title COLLATE NOCASE
-         LIMIT ?2",
-    )?;
-    let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], map_album_row)?;
+         LIMIT ?{limit_param}"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params: Vec<Box<dyn rusqlite::ToSql>> = terms
+        .iter()
+        .map(|t| Box::new(t.clone()) as Box<dyn rusqlite::ToSql>)
+        .chain(std::iter::once(
+            Box::new(limit as i64) as Box<dyn rusqlite::ToSql>
+        ))
+        .collect();
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt.query_map(param_refs.as_slice(), map_album_row)?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);
