@@ -64,8 +64,12 @@ impl MbClient {
     /// Search for releases matching artist + album name.
     /// Returns up to `limit` results ordered by MB relevance score.
     ///
-    /// If the initial cleaned-up search returns no results, falls back to a
-    /// looser search using only the artist (without the trailing punctuation).
+    /// Falls back through progressively looser searches if the first attempt
+    /// yields nothing, including resolving the artist to an MBID (via the
+    /// artist-search endpoint, which matches aliases) and searching releases
+    /// by `arid:` — this catches releases credited in a different script than
+    /// what the file tags say (e.g. file says "HANABIE.", MB release credits
+    /// "花冷え。", both aliases of the same artist).
     pub fn search_releases(
         &mut self,
         artist: &str,
@@ -78,23 +82,49 @@ impl MbClient {
         let clean_artist = strip_trailing_punct(artist);
         let clean_album = strip_parenthesized_suffix(album);
 
-        // First attempt: artist + album
-        let releases = self.run_search(&clean_artist, Some(&clean_album), limit)?;
+        // First attempt: artist + album (string match on credit name)
+        let releases = self.run_search_artist(&clean_artist, Some(&clean_album), limit)?;
         if !releases.is_empty() {
             return Ok(releases);
         }
 
-        // Fallback 1: artist only (no album), in case album spelling differs
-        if !clean_artist.trim().is_empty() {
-            let releases = self.run_search(&clean_artist, None, limit)?;
+        // Resolve the artist to an MBID via the artist endpoint, which indexes
+        // aliases (sort-name, romanizations, etc). Cache the None case too so
+        // we don't re-resolve on every fallback step.
+        let arid = if !clean_artist.trim().is_empty() {
+            self.resolve_artist_mbid(&clean_artist)?
+        } else {
+            None
+        };
+
+        // Fallback 1: arid + album — catches releases whose credit uses a
+        // different script/name than the file tags.
+        if let Some(ref mbid) = arid {
+            let releases = self.run_search_arid(mbid, Some(&clean_album), limit)?;
             if !releases.is_empty() {
                 return Ok(releases);
             }
         }
 
-        // Fallback 2: original artist (with punctuation) + album
+        // Fallback 2: artist only (string match), in case album spelling differs
+        if !clean_artist.trim().is_empty() {
+            let releases = self.run_search_artist(&clean_artist, None, limit)?;
+            if !releases.is_empty() {
+                return Ok(releases);
+            }
+        }
+
+        // Fallback 3: arid only (all releases by that artist, any credit)
+        if let Some(ref mbid) = arid {
+            let releases = self.run_search_arid(mbid, None, limit)?;
+            if !releases.is_empty() {
+                return Ok(releases);
+            }
+        }
+
+        // Fallback 4: original artist (with punctuation) + album
         if clean_artist != artist {
-            let releases = self.run_search(artist, Some(&clean_album), limit)?;
+            let releases = self.run_search_artist(artist, Some(&clean_album), limit)?;
             if !releases.is_empty() {
                 return Ok(releases);
             }
@@ -103,7 +133,34 @@ impl MbClient {
         Ok(Vec::new())
     }
 
-    fn run_search(
+    /// Resolve an artist name (or alias) to its MusicBrainz artist MBID.
+    /// Returns None if no plausible match is found.
+    fn resolve_artist_mbid(&mut self, name: &str) -> Result<Option<String>> {
+        let query = format!("artist:({})", escape_lucene(name));
+        let url = format!(
+            "{}/artist/?query={}&fmt=json&limit=1",
+            MB_BASE,
+            urlencoding(&query),
+        );
+        let body = self.get_json_body(&url, "artist-search")?;
+        let resp: MbArtistSearchResponse = serde_json::from_str(&body).map_err(|e| {
+            crate::error::KyokuError::External(format!(
+                "MB artist parse failed: {}: body={}",
+                e,
+                truncate_for_log(&body, 200),
+            ))
+        })?;
+
+        // Require a reasonable MB score so we don't misroute to an unrelated
+        // artist when the name is absent.
+        Ok(resp
+            .artists
+            .into_iter()
+            .find(|a| a.score.unwrap_or(0) >= 90)
+            .map(|a| a.id))
+    }
+
+    fn run_search_artist(
         &mut self,
         artist: &str,
         album: Option<&str>,
@@ -118,11 +175,32 @@ impl MbClient {
         } else {
             format!("artist:({})", escape_lucene(artist))
         };
+        self.run_release_query(&query, limit)
+    }
 
+    fn run_search_arid(
+        &mut self,
+        arid: &str,
+        album: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<MbRelease>> {
+        let query = if let Some(album) = album {
+            format!(
+                "arid:{} AND release:({})",
+                arid,
+                escape_lucene(album),
+            )
+        } else {
+            format!("arid:{}", arid)
+        };
+        self.run_release_query(&query, limit)
+    }
+
+    fn run_release_query(&mut self, query: &str, limit: u32) -> Result<Vec<MbRelease>> {
         let url = format!(
             "{}/release/?query={}&fmt=json&limit={}",
             MB_BASE,
-            urlencoding(&query),
+            urlencoding(query),
             limit,
         );
 
@@ -253,6 +331,17 @@ struct MbSearchResponse {
 }
 
 #[derive(Deserialize)]
+struct MbArtistSearchResponse {
+    artists: Vec<MbArtistSearchHit>,
+}
+
+#[derive(Deserialize)]
+struct MbArtistSearchHit {
+    id: String,
+    score: Option<u8>,
+}
+
+#[derive(Deserialize)]
 struct MbSearchRelease {
     id: String,
     title: String,
@@ -265,6 +354,14 @@ struct MbSearchRelease {
     artist_credit: Option<Vec<MbArtistCredit>>,
     #[serde(rename = "label-info")]
     label_info: Option<Vec<MbLabelInfo>>,
+    #[serde(rename = "release-group")]
+    release_group: Option<MbSearchReleaseGroup>,
+}
+
+#[derive(Deserialize)]
+struct MbSearchReleaseGroup {
+    #[serde(rename = "first-release-date")]
+    first_release_date: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -306,6 +403,12 @@ fn parse_search_release(r: MbSearchRelease) -> MbRelease {
     let year = r
         .date
         .as_deref()
+        .or_else(|| {
+            r.release_group
+                .as_ref()?
+                .first_release_date
+                .as_deref()
+        })
         .and_then(|d| d.get(..4))
         .and_then(|y| y.parse::<i32>().ok());
 
@@ -339,6 +442,7 @@ fn parse_full_release(v: serde_json::Value) -> MbRelease {
 
     let year = v["date"]
         .as_str()
+        .or_else(|| v["release-group"]["first-release-date"].as_str())
         .and_then(|d| d.get(..4))
         .and_then(|y| y.parse::<i32>().ok());
 
