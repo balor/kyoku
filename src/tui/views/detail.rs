@@ -190,8 +190,9 @@ impl AlbumDetailView {
                     ) {
                         Ok(result) => {
                             let mut parts = Vec::new();
-                            if result.moved > 0 {
-                                parts.push(format!("{} moved", result.moved));
+                            let moved_total = result.moved + result.covers_moved;
+                            if moved_total > 0 {
+                                parts.push(format!("{} moved", moved_total));
                             }
                             if result.copied > 0 {
                                 parts.push(format!("{} copied", result.copied));

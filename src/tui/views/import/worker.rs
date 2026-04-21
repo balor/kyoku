@@ -4,6 +4,7 @@
 use std::sync::mpsc;
 
 use crate::config::settings::NameScriptPreference;
+use crate::core::importer::detect_sibling_cover;
 use crate::core::tagger;
 use crate::db::queries;
 use crate::external::musicbrainz::MbClient;
@@ -80,6 +81,13 @@ pub(super) fn run_import_worker(
             } else {
                 None
             };
+
+            // Record sibling cover art next to the audio, if present. Runs
+            // once per group and only when we actually created/found an
+            // album row — loose tracks don't have albums to attach to.
+            if let Some(aid) = mb_album_id {
+                stamp_sibling_cover(conn, aid, group);
+            }
 
             // Update MB album with MB metadata
             if let (Some(aid), Some(mb)) = (mb_album_id, &mb_full) {
@@ -188,6 +196,10 @@ pub(super) fn run_import_worker(
                 None
             };
 
+            if let Some(aid) = asis_album_id {
+                stamp_sibling_cover(conn, aid, group);
+            }
+
             for (i, (track, _tag_data)) in group.tracks.iter().enumerate() {
                 let path_str = track.file_path.display().to_string();
 
@@ -269,4 +281,20 @@ pub(super) fn run_import_worker(
         parts.push(format!("Errors: {}", errors));
     }
     let _ = tx.send(ImportMessage::Complete(parts.join(", ")));
+}
+
+/// Scan the group's source directory for a cover-art file and stamp it onto
+/// the given album row. No-op if the group has no resolvable source dir or
+/// no matching cover file sits next to the audio.
+fn stamp_sibling_cover(conn: &rusqlite::Connection, album_id: i64, group: &ImportGroup) {
+    let Some(source_dir) = group
+        .tracks
+        .first()
+        .and_then(|(t, _)| t.source_dir.as_deref())
+    else {
+        return;
+    };
+    if let Some(cover) = detect_sibling_cover(source_dir) {
+        let _ = queries::set_album_cover_path(conn, album_id, &cover.display().to_string());
+    }
 }

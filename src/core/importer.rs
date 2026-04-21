@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 use walkdir::WalkDir;
@@ -8,6 +8,49 @@ use crate::core::tagger;
 use crate::db::models::{SUPPORTED_EXTENSIONS, Track};
 use crate::db::queries;
 use crate::error::Result;
+
+/// Basenames we accept for sibling cover art (matched case-insensitively,
+/// extension-less). First hit wins — order matters.
+const COVER_BASENAMES: &[&str] = &[
+    "cover", "folder", "front", "artwork", "album", "albumart",
+];
+
+/// Allowed cover-image extensions (matched case-insensitively).
+const COVER_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp"];
+
+/// Look for a cover-art file sitting next to the audio files inside `dir`.
+/// Returns the first match found, checking `COVER_BASENAMES` in order and
+/// pairing each with any of `COVER_EXTS`. Basename and extension are matched
+/// case-insensitively.
+///
+/// Non-recursive: only entries directly in `dir` are considered.
+pub fn detect_sibling_cover(dir: &Path) -> Option<PathBuf> {
+    let entries: Vec<_> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .collect();
+
+    for wanted_base in COVER_BASENAMES {
+        for entry in &entries {
+            let path = entry.path();
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !stem.eq_ignore_ascii_case(wanted_base) {
+                continue;
+            }
+            let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let ext_lower = ext.to_ascii_lowercase();
+            if COVER_EXTS.iter().any(|e| *e == ext_lower) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
 
 /// Result of an import operation.
 #[derive(Debug, Default)]
@@ -230,6 +273,18 @@ pub fn import(
                     } else {
                         result.albums_existing += 1;
                     }
+                    // Sibling-cover detection: scan the album source dir for a
+                    // cover file and record its path. Only stamps when a file
+                    // is found; organizer will later move it alongside audio.
+                    if let Some(source_dir) = tracks[indices[0]].source_dir.as_deref() {
+                        if let Some(cover) = detect_sibling_cover(source_dir) {
+                            queries::set_album_cover_path(
+                                &tx,
+                                id,
+                                &cover.display().to_string(),
+                            )?;
+                        }
+                    }
                     Some(id)
                 } else {
                     None
@@ -390,6 +445,65 @@ mod tests {
             )
             .unwrap();
         assert!(count >= 3);
+    }
+
+    #[test]
+    fn detect_sibling_cover_picks_first_basename_hit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Multiple candidates live side by side. `cover` beats `folder` in
+        // our preference order, and the extension hit order follows file
+        // discovery (we just assert a `cover.*` file wins).
+        std::fs::write(tmp.path().join("folder.png"), b"").unwrap();
+        std::fs::write(tmp.path().join("cover.jpg"), b"").unwrap();
+        std::fs::write(tmp.path().join("song.mp3"), b"").unwrap();
+
+        let found = detect_sibling_cover(tmp.path()).unwrap();
+        assert_eq!(
+            found.file_name().and_then(|s| s.to_str()),
+            Some("cover.jpg")
+        );
+    }
+
+    #[test]
+    fn detect_sibling_cover_is_case_insensitive() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("Front.JPEG"), b"").unwrap();
+
+        let found = detect_sibling_cover(tmp.path()).unwrap();
+        assert_eq!(
+            found.file_name().and_then(|s| s.to_str()),
+            Some("Front.JPEG")
+        );
+    }
+
+    #[test]
+    fn detect_sibling_cover_accepts_all_extensions() {
+        for ext in ["jpg", "jpeg", "png", "webp"] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let name = format!("albumart.{}", ext);
+            std::fs::write(tmp.path().join(&name), b"").unwrap();
+            let found = detect_sibling_cover(tmp.path()).unwrap();
+            assert_eq!(
+                found.file_name().and_then(|s| s.to_str()),
+                Some(name.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn detect_sibling_cover_returns_none_when_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("song.mp3"), b"").unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), b"").unwrap();
+        assert!(detect_sibling_cover(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn detect_sibling_cover_ignores_unknown_basenames() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // `random.jpg` is not in COVER_BASENAMES so it must be skipped.
+        std::fs::write(tmp.path().join("random.jpg"), b"").unwrap();
+        assert!(detect_sibling_cover(tmp.path()).is_none());
     }
 
     #[test]

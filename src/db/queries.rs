@@ -87,6 +87,30 @@ pub fn get_or_create_album(
     Ok((conn.last_insert_rowid(), true))
 }
 
+/// Set the cover-art path for an album. Always overwrites any existing
+/// value. `path` is the absolute file path. Pass an empty string to clear.
+pub fn set_album_cover_path(conn: &Connection, album_id: i64, path: &str) -> Result<()> {
+    let value: Option<&str> = if path.is_empty() { None } else { Some(path) };
+    conn.execute(
+        "UPDATE albums SET cover_art_path = ?1 WHERE id = ?2",
+        rusqlite::params![value, album_id],
+    )?;
+    Ok(())
+}
+
+/// Get the cover-art path for an album, or `None` if unset / album missing.
+#[allow(dead_code)] // used by TUI cover preview in PR 2
+pub fn get_album_cover_path(conn: &Connection, album_id: i64) -> Result<Option<String>> {
+    let path: Option<Option<String>> = conn
+        .query_row(
+            "SELECT cover_art_path FROM albums WHERE id = ?1",
+            [album_id],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(path.flatten())
+}
+
 /// Get or create a collection by name. Returns (collection_id, created).
 pub fn get_or_create_collection(conn: &Connection, name: &str) -> Result<(i64, bool)> {
     let existing: Option<i64> = conn
@@ -141,6 +165,10 @@ pub struct AlbumRow {
     pub mbid: Option<String>,
     pub label: Option<String>,
     pub genre: Option<String>,
+    /// Absolute path to a cover image file on disk, or `None` if the album
+    /// has no art tracked. Populated during import (sibling-file detection)
+    /// or by the TUI Cover Art Archive fetch.
+    pub cover_art_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -217,7 +245,7 @@ pub fn list_albums(
                 COUNT(t.id) as track_count,
                 GROUP_CONCAT(DISTINCT t.file_format) as formats,
                 COALESCE(SUM(t.duration_ms), 0) as total_duration_ms,
-                a.mbid, a.label, a.genre
+                a.mbid, a.label, a.genre, a.cover_art_path
          FROM albums a
          LEFT JOIN tracks t ON t.album_id = a.id
          GROUP BY a.id
@@ -292,7 +320,7 @@ pub fn search_albums(conn: &Connection, query: &str, limit: usize) -> Result<Vec
                 COUNT(t.id) as track_count,
                 GROUP_CONCAT(DISTINCT t.file_format) as formats,
                 COALESCE(SUM(t.duration_ms), 0) as total_duration_ms,
-                a.mbid, a.label, a.genre
+                a.mbid, a.label, a.genre, a.cover_art_path
          FROM albums a
          LEFT JOIN tracks t ON t.album_id = a.id
          WHERE {where_clause}
@@ -372,7 +400,7 @@ pub fn get_album(conn: &Connection, album_id: i64) -> Result<Option<AlbumRow>> {
                     COUNT(t.id) as track_count,
                     GROUP_CONCAT(DISTINCT t.file_format) as formats,
                     COALESCE(SUM(t.duration_ms), 0) as total_duration_ms,
-                    a.mbid, a.label, a.genre
+                    a.mbid, a.label, a.genre, a.cover_art_path
              FROM albums a
              LEFT JOIN tracks t ON t.album_id = a.id
              WHERE a.id = ?1
@@ -805,6 +833,7 @@ pub struct OrganizeTrackRow {
     pub track_number: Option<u32>,
     pub disc_number: u32,
     pub file_path: String,
+    pub album_id: Option<i64>,
     pub album_title: Option<String>,
     pub album_artist: Option<String>,
     pub year: Option<i32>,
@@ -849,6 +878,7 @@ pub fn get_all_tracks_for_organize(
 
     let sql = format!(
         "SELECT t.id, t.title, t.artist, t.track_number, t.disc_number, t.file_path,
+                t.album_id,
                 a.title, a.album_artist, a.year, a.genre, a.label, a.disc_total
          FROM tracks t
          LEFT JOIN albums a ON t.album_id = a.id
@@ -867,12 +897,13 @@ pub fn get_all_tracks_for_organize(
             track_number: row.get::<_, Option<u32>>(3)?,
             disc_number: row.get::<_, Option<u32>>(4)?.unwrap_or(1),
             file_path: row.get(5)?,
-            album_title: row.get(6)?,
-            album_artist: row.get(7)?,
-            year: row.get(8)?,
-            genre: row.get(9)?,
-            label: row.get(10)?,
-            disc_total: row.get(11)?,
+            album_id: row.get(6)?,
+            album_title: row.get(7)?,
+            album_artist: row.get(8)?,
+            year: row.get(9)?,
+            genre: row.get(10)?,
+            label: row.get(11)?,
+            disc_total: row.get(12)?,
             collections: Vec::new(), // Filled below
         })
     })?;
@@ -966,6 +997,7 @@ fn map_album_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AlbumRow> {
         mbid: row.get(7)?,
         label: row.get(8)?,
         genre: row.get(9)?,
+        cover_art_path: row.get(10)?,
     })
 }
 

@@ -128,8 +128,10 @@ impl App {
                         ) {
                             Ok(result) => {
                                 let mut parts = Vec::new();
-                                if result.moved > 0 {
-                                    parts.push(format!("{} moved", result.moved));
+                                // Covers are just files — count them with the regular moves.
+                                let moved_total = result.moved + result.covers_moved;
+                                if moved_total > 0 {
+                                    parts.push(format!("{} moved", moved_total));
                                 }
                                 if result.copied > 0 {
                                     parts.push(format!("{} copied", result.copied));
@@ -375,8 +377,9 @@ impl App {
                                 &crate::core::organizer::cleanup_roots(&self.settings),
                             ) {
                                 let mut parts = Vec::new();
-                                if result.moved > 0 {
-                                    parts.push(format!("{} moved", result.moved));
+                                let moved_total = result.moved + result.covers_moved;
+                                if moved_total > 0 {
+                                    parts.push(format!("{} moved", moved_total));
                                 }
                                 if result.copied > 0 {
                                     parts.push(format!("{} copied", result.copied));

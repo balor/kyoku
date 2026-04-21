@@ -27,10 +27,23 @@ pub struct FileCopy {
     pub to: PathBuf,
 }
 
+/// Move/rename of an album's sibling cover-art file so it lands alongside
+/// the tracks in their new album directory. Always moves (not copies) — the
+/// source sits in whichever inbox/album directory the user imported from,
+/// and that directory is typically being emptied anyway. Skipped when
+/// `from == to` (already in place).
+#[derive(Debug, Clone)]
+pub struct CoverMove {
+    pub album_id: i64,
+    pub from: PathBuf,
+    pub to: PathBuf,
+}
+
 #[derive(Debug, Default)]
 pub struct OrganizePlan {
     pub moves: Vec<FileMove>,
     pub copies: Vec<FileCopy>,
+    pub cover_moves: Vec<CoverMove>,
     pub skipped: usize,
     /// Tracks whose source file no longer exists on disk. These rows are
     /// orphaned — they point at paths that have been moved/deleted/renamed
@@ -42,6 +55,7 @@ pub struct OrganizePlan {
 pub struct OrganizeResult {
     pub moved: u32,
     pub copied: u32,
+    pub covers_moved: u32,
     pub errors: Vec<(String, String)>,
     pub dirs_cleaned: u32,
     pub orphans_cleaned: u32,
@@ -74,11 +88,16 @@ pub fn plan_organize(
     // We start with every existing track path, remove the ones being moved
     // (those slots will be freed), and disambiguate proposed targets
     // against this set before committing them to the plan.
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, HashSet};
     let mut used_paths: HashSet<PathBuf> = queries::list_all_track_paths(conn)?
         .into_iter()
         .map(|(_, p)| PathBuf::from(p))
         .collect();
+
+    // Record each album's target directory (parent of any of its tracks'
+    // destinations). Used after the main loop to emit cover-art moves so the
+    // sibling cover file follows its album into its new directory.
+    let mut album_dest_dir: BTreeMap<i64, PathBuf> = BTreeMap::new();
     for t in &tracks {
         used_paths.remove(&PathBuf::from(&t.file_path));
     }
@@ -219,6 +238,14 @@ pub fn plan_organize(
                 }
             };
 
+            // Record the album dir for later cover-move planning. Entered once
+            // per album — first track wins (all tracks share the same dir).
+            if let Some(aid) = t.album_id
+                && let Some(parent) = copy_source.parent()
+            {
+                album_dest_dir.entry(aid).or_insert_with(|| parent.to_path_buf());
+            }
+
             // One copy per collection — skip if the target already exists on disk
             // (collection was already organized).
             for (coll_id, coll_name, coll_template) in &collections {
@@ -302,6 +329,34 @@ pub fn plan_organize(
                 }
             }
         }
+    }
+
+    // Cover-art moves: for every album with a recorded destination dir and a
+    // sibling cover file stamped on the row, schedule a move to
+    // `<album_dir>/cover.<ext>`. Skipped when source == dest or the source
+    // file no longer exists on disk.
+    for (album_id, album_dir) in &album_dest_dir {
+        let Some(src_str) = queries::get_album_cover_path(conn, *album_id)? else {
+            continue;
+        };
+        let src = PathBuf::from(&src_str);
+        if !src.exists() {
+            continue;
+        }
+        let ext = src
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("jpg")
+            .to_ascii_lowercase();
+        let dest = album_dir.join(format!("cover.{}", ext));
+        if src == dest {
+            continue;
+        }
+        plan.cover_moves.push(CoverMove {
+            album_id: *album_id,
+            from: src,
+            to: dest,
+        });
     }
 
     Ok(plan)
@@ -412,6 +467,46 @@ pub fn apply_organize(
             }
             Err(e) => {
                 result.errors.push((c.from.display().to_string(), e.to_string()));
+            }
+        }
+    }
+
+    // Cover-art moves: run after audio so album destination dirs already
+    // exist. Each cover failure is recorded per-album; the rest continue.
+    for cm in &plan.cover_moves {
+        if let Some(parent) = cm.to.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let outcome = if operation == "copy" {
+            std::fs::copy(&cm.from, &cm.to).map(|_| ())
+        } else {
+            std::fs::rename(&cm.from, &cm.to).or_else(|_| {
+                // Cross-filesystem rename — fallback to copy + delete.
+                std::fs::copy(&cm.from, &cm.to).map(|_| ())?;
+                std::fs::remove_file(&cm.from)
+            })
+        };
+        match outcome {
+            Ok(()) => {
+                let new_path = cm.to.display().to_string();
+                if let Err(e) = queries::set_album_cover_path(conn, cm.album_id, &new_path) {
+                    result.errors.push((
+                        cm.from.display().to_string(),
+                        format!("cover moved to {new_path} but DB update failed: {e}"),
+                    ));
+                    continue;
+                }
+                result.covers_moved += 1;
+                if operation != "copy"
+                    && let Some(parent) = cm.from.parent()
+                {
+                    emptied_dirs.push(parent.to_path_buf());
+                }
+            }
+            Err(e) => {
+                result
+                    .errors
+                    .push((cm.from.display().to_string(), e.to_string()));
             }
         }
     }

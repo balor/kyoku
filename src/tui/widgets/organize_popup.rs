@@ -62,7 +62,8 @@ pub fn render(
     // hidden so the line reads cleanly ("267 moves" instead of
     // "267 move(s) · 0 copy/copies · 0 in place").
     let stats_text = format_stats_line(PlanStats {
-        moves_total: plan.moves.len(),
+        // Covers are moves too — fold them into the count the footer shows.
+        moves_total: plan.moves.len() + plan.cover_moves.len(),
         copies_total: plan.copies.len(),
         skipped: plan.skipped,
         orphans: plan.missing_sources.len(),
@@ -175,7 +176,8 @@ fn build_summary_lines<'a>(preview: &SummaryPreview, theme: &Theme) -> Vec<Line<
     let mut lines: Vec<Line<'a>> = Vec::new();
     lines.push(Line::from(""));
 
-    let nothing_to_do = preview.stats.moves_total == 0 && preview.stats.copies_total == 0;
+    let nothing_to_do =
+        preview.stats.moves_total == 0 && preview.stats.copies_total == 0;
     if nothing_to_do {
         lines.push(Line::from(Span::styled(
             format!(

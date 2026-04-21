@@ -40,6 +40,8 @@ pub struct CollectionCopyGroup {
 }
 
 /// Aggregated counts shared between summary and detail views.
+/// `moves_total` includes cover-art moves — covers are just files like the
+/// audio, and the UI treats them uniformly.
 #[derive(Debug, Clone, Copy)]
 pub struct PlanStats {
     pub moves_total: usize,
@@ -96,7 +98,9 @@ pub struct DetailPreview {
 
 fn stats_from(plan: &OrganizePlan) -> PlanStats {
     PlanStats {
-        moves_total: plan.moves.len(),
+        // Covers count as moves — they're just files the organizer relocates
+        // alongside the audio.
+        moves_total: plan.moves.len() + plan.cover_moves.len(),
         copies_total: plan.copies.len(),
         skipped: plan.skipped,
         orphans: plan.missing_sources.len(),
@@ -120,9 +124,18 @@ fn name_of(p: &Path) -> String {
 pub fn build_summary(plan: &OrganizePlan) -> SummaryPreview {
     let mut dir_groups: BTreeMap<(String, String), usize> = BTreeMap::new();
     let mut rename_groups: BTreeMap<String, usize> = BTreeMap::new();
-    for m in &plan.moves {
-        let from_dir = dir_of(&m.from);
-        let to_dir = dir_of(&m.to);
+    // Treat audio moves and cover moves uniformly — both are file relocations
+    // keyed by their (from_dir → to_dir) pair. This is what lets a per-album
+    // move of "track1.flac + track2.flac + cover.jpg" collapse into a single
+    // "3× /src → /dst" group in the summary.
+    let move_pairs = plan
+        .moves
+        .iter()
+        .map(|m| (&m.from, &m.to))
+        .chain(plan.cover_moves.iter().map(|c| (&c.from, &c.to)));
+    for (from, to) in move_pairs {
+        let from_dir = dir_of(from);
+        let to_dir = dir_of(to);
         if from_dir == to_dir {
             *rename_groups.entry(from_dir).or_insert(0) += 1;
         } else {
@@ -161,17 +174,20 @@ pub fn build_summary(plan: &OrganizePlan) -> SummaryPreview {
 
 /// Build a per-file listing in the plan's own order.
 pub fn build_details(plan: &OrganizePlan) -> DetailPreview {
-    let moves = plan
+    // Covers are listed inline with the audio moves — they're files too.
+    let moves: Vec<MoveDetail> = plan
         .moves
         .iter()
-        .map(|m| {
-            let from_name = name_of(&m.from);
-            let to_name = name_of(&m.to);
+        .map(|m| (&m.from, &m.to))
+        .chain(plan.cover_moves.iter().map(|c| (&c.from, &c.to)))
+        .map(|(from, to)| {
+            let from_name = name_of(from);
+            let to_name = name_of(to);
             let renamed = from_name != to_name;
             MoveDetail {
                 from_name,
-                from_dir: dir_of(&m.from),
-                to_dir: dir_of(&m.to),
+                from_dir: dir_of(from),
+                to_dir: dir_of(to),
                 to_name,
                 renamed,
             }

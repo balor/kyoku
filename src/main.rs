@@ -296,6 +296,7 @@ fn main() -> anyhow::Result<()> {
 
             if plan.moves.is_empty()
                 && plan.copies.is_empty()
+                && plan.cover_moves.is_empty()
                 && plan.missing_sources.is_empty()
             {
                 println!(
@@ -383,7 +384,7 @@ fn main() -> anyhow::Result<()> {
 
                 println!(
                     "{} file(s) to move, {} to copy, {} already in place, {} orphaned",
-                    plan.moves.len(),
+                    plan.moves.len() + plan.cover_moves.len(),
                     plan.copies.len(),
                     plan.skipped,
                     plan.missing_sources.len(),
@@ -416,7 +417,7 @@ fn main() -> anyhow::Result<()> {
                     println!();
                     println!(
                         "Done: {} moved, {} copied, {} dirs cleaned, {} orphans pruned",
-                        result.moved,
+                        result.moved + result.covers_moved,
                         result.copied,
                         result.dirs_cleaned,
                         result.orphans_cleaned,
