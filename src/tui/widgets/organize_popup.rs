@@ -17,6 +17,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::core::organize_preview::{
+    self, DetailPreview, PlanStats, SummaryPreview,
+};
 use crate::core::organizer::OrganizePlan;
 use crate::tui::themes::Theme;
 use crate::tui::widgets::popup;
@@ -51,35 +54,21 @@ pub fn render(
     width_pct: u16,
 ) -> usize {
     let all_lines = match view {
-        OrganizeView::Summary => build_summary_lines(plan, theme),
-        OrganizeView::Details => build_detail_lines(plan, theme),
+        OrganizeView::Summary => build_summary_lines(&organize_preview::build_summary(plan), theme),
+        OrganizeView::Details => build_detail_lines(&organize_preview::build_details(plan), theme),
     };
 
     // Pinned footer: stats line + hint line, always visible. Zero counts are
     // hidden so the line reads cleanly ("267 moves" instead of
     // "267 move(s) · 0 copy/copies · 0 in place").
-    let mut stats: Vec<String> = Vec::new();
-    if !plan.moves.is_empty() {
-        stats.push(pluralize(plan.moves.len(), "move", "moves"));
-    }
-    if !plan.copies.is_empty() {
-        stats.push(pluralize(plan.copies.len(), "copy", "copies"));
-    }
-    if plan.skipped > 0 {
-        stats.push(format!("{} already in place", plan.skipped));
-    }
-    if !plan.missing_sources.is_empty() {
-        stats.push(pluralize(
-            plan.missing_sources.len(),
-            "orphan",
-            "orphans",
-        ));
-    }
-    if stats.is_empty() {
-        stats.push("nothing to do".to_string());
-    }
+    let stats_text = format_stats_line(PlanStats {
+        moves_total: plan.moves.len(),
+        copies_total: plan.copies.len(),
+        skipped: plan.skipped,
+        orphans: plan.missing_sources.len(),
+    });
     let stats_line = Line::from(Span::styled(
-        format!(" {}", stats.join(" · ")),
+        format!(" {}", stats_text),
         Style::default().fg(theme.fg_muted),
     ));
     let hint_line = Line::from(Span::styled(
@@ -159,107 +148,106 @@ fn pluralize(count: usize, singular: &str, plural: &str) -> String {
     }
 }
 
-fn build_summary_lines<'a>(plan: &'a OrganizePlan, theme: &Theme) -> Vec<Line<'a>> {
+/// Plain-text stats line shared with the CLI renderer. Zero counts are
+/// omitted so the line reads cleanly ("267 moves" instead of
+/// "267 moves · 0 copies · 0 in place").
+pub fn format_stats_line(stats: PlanStats) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if stats.moves_total > 0 {
+        parts.push(pluralize(stats.moves_total, "move", "moves"));
+    }
+    if stats.copies_total > 0 {
+        parts.push(pluralize(stats.copies_total, "copy", "copies"));
+    }
+    if stats.skipped > 0 {
+        parts.push(format!("{} already in place", stats.skipped));
+    }
+    if stats.orphans > 0 {
+        parts.push(pluralize(stats.orphans, "orphan", "orphans"));
+    }
+    if parts.is_empty() {
+        return "nothing to do".to_string();
+    }
+    parts.join(" · ")
+}
+
+fn build_summary_lines<'a>(preview: &SummaryPreview, theme: &Theme) -> Vec<Line<'a>> {
     let mut lines: Vec<Line<'a>> = Vec::new();
     lines.push(Line::from(""));
 
-    let nothing_to_do = plan.moves.is_empty() && plan.copies.is_empty();
-
+    let nothing_to_do = preview.stats.moves_total == 0 && preview.stats.copies_total == 0;
     if nothing_to_do {
         lines.push(Line::from(Span::styled(
             format!(
                 "Nothing to organize — {} already in place.",
-                pluralize(plan.skipped, "file", "files")
+                pluralize(preview.stats.skipped, "file", "files")
             ),
             Style::default().fg(theme.fg_muted),
         )));
         return lines;
     }
 
-    if !plan.moves.is_empty() {
-        // Split moves into cross-directory moves and in-place renames so the
-        // latter don't render as confusing "from → to" where both paths are
-        // identical (the move is just a filename change).
-        let mut dir_groups: std::collections::BTreeMap<(String, String), usize> =
-            std::collections::BTreeMap::new();
-        let mut rename_groups: std::collections::BTreeMap<String, usize> =
-            std::collections::BTreeMap::new();
-        for m in &plan.moves {
-            let from_dir = m
-                .from
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            let to_dir = m
-                .to
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            if from_dir == to_dir {
-                *rename_groups.entry(from_dir).or_insert(0) += 1;
-            } else {
-                *dir_groups.entry((from_dir, to_dir)).or_insert(0) += 1;
-            }
-        }
+    if preview.stats.moves_total > 0 {
         lines.push(Line::from(Span::styled(
-            format!(" {} to move:", pluralize(plan.moves.len(), "file", "files")),
+            format!(
+                " {} to move:",
+                pluralize(preview.stats.moves_total, "file", "files")
+            ),
             Style::default()
                 .fg(theme.fg)
                 .add_modifier(Modifier::BOLD),
         )));
         // Count is shown BEFORE the path ("5×  /path") to avoid the trailing
         // "(N)" reading as part of the directory name.
-        for ((from_dir, to_dir), count) in &dir_groups {
+        for g in &preview.dir_moves {
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("   {:>3}× ", count),
+                    format!("   {:>3}× ", g.count),
                     Style::default().fg(theme.fg_muted),
                 ),
-                Span::styled(from_dir.clone(), Style::default().fg(theme.fg_dim)),
+                Span::styled(g.from_dir.clone(), Style::default().fg(theme.fg_dim)),
             ]));
             lines.push(Line::from(Span::styled(
-                format!("        → {}", to_dir),
+                format!("        → {}", g.to_dir),
                 Style::default().fg(theme.accent),
             )));
         }
-        if !rename_groups.is_empty() {
+        if !preview.in_place_renames.is_empty() {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 " renamed in place:",
                 Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
             )));
-            for (dir, count) in &rename_groups {
+            for g in &preview.in_place_renames {
                 lines.push(Line::from(vec![
                     Span::styled(
-                        format!("   {:>3}× ", count),
+                        format!("   {:>3}× ", g.count),
                         Style::default().fg(theme.fg_muted),
                     ),
-                    Span::styled(dir.clone(), Style::default().fg(theme.fg_dim)),
+                    Span::styled(g.dir.clone(), Style::default().fg(theme.fg_dim)),
                 ]));
             }
         }
     }
 
-    if !plan.copies.is_empty() {
-        // Group collection copies by collection name with counts.
-        let mut coll_counts: std::collections::BTreeMap<String, usize> =
-            std::collections::BTreeMap::new();
-        for c in &plan.copies {
-            *coll_counts.entry(c.collection_name.clone()).or_insert(0) += 1;
-        }
+    if preview.stats.copies_total > 0 {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!(
                 " {} to copy into collections:",
-                pluralize(plan.copies.len(), "file", "files")
+                pluralize(preview.stats.copies_total, "file", "files")
             ),
             Style::default()
                 .fg(theme.fg)
                 .add_modifier(Modifier::BOLD),
         )));
-        for (name, count) in &coll_counts {
+        for g in &preview.collection_copies {
             lines.push(Line::from(Span::styled(
-                format!("   {} ({})", name, pluralize(*count, "file", "files")),
+                format!(
+                    "   {} ({})",
+                    g.collection_name,
+                    pluralize(g.count, "file", "files")
+                ),
                 Style::default().fg(theme.accent_alt),
             )));
         }
@@ -268,63 +256,47 @@ fn build_summary_lines<'a>(plan: &'a OrganizePlan, theme: &Theme) -> Vec<Line<'a
     lines
 }
 
-fn build_detail_lines<'a>(plan: &'a OrganizePlan, theme: &Theme) -> Vec<Line<'a>> {
+fn build_detail_lines<'a>(preview: &DetailPreview, theme: &Theme) -> Vec<Line<'a>> {
     let mut lines: Vec<Line<'a>> = Vec::new();
 
-    let nothing_to_do =
-        plan.moves.is_empty() && plan.copies.is_empty() && plan.missing_sources.is_empty();
+    let nothing_to_do = preview.stats.moves_total == 0
+        && preview.stats.copies_total == 0
+        && preview.stats.orphans == 0;
     if nothing_to_do {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!(
                 "Nothing to organize — {} already in place.",
-                pluralize(plan.skipped, "file", "files")
+                pluralize(preview.stats.skipped, "file", "files")
             ),
             Style::default().fg(theme.fg_muted),
         )));
         return lines;
     }
 
-    if !plan.moves.is_empty() {
+    if preview.stats.moves_total > 0 {
         lines.push(Line::from(Span::styled(
-            format!(" Moves ({}):", plan.moves.len()),
+            format!(" Moves ({}):", preview.stats.moves_total),
             Style::default()
                 .fg(theme.fg)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )));
         lines.push(Line::from(""));
-        for m in &plan.moves {
-            let from_name = m
-                .from
-                .file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or("?");
-            let from_dir = m
-                .from
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            let to_dir = m
-                .to
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            let to_name = m.to.file_name().and_then(|f| f.to_str()).unwrap_or("?");
-
+        for m in &preview.moves {
             lines.push(Line::from(vec![
                 Span::styled("  ", Style::default()),
-                Span::styled(from_name, Style::default().fg(theme.fg)),
+                Span::styled(m.from_name.clone(), Style::default().fg(theme.fg)),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("    from: ", Style::default().fg(theme.fg_muted)),
-                Span::styled(from_dir, Style::default().fg(theme.fg_dim)),
+                Span::styled(m.from_dir.clone(), Style::default().fg(theme.fg_dim)),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("    → to: ", Style::default().fg(theme.fg_muted)),
-                Span::styled(to_dir, Style::default().fg(theme.accent)),
+                Span::styled(m.to_dir.clone(), Style::default().fg(theme.accent)),
                 Span::styled(
-                    if from_name != to_name {
-                        format!("/{}", to_name)
+                    if m.renamed {
+                        format!("/{}", m.to_name)
                     } else {
                         String::new()
                     },
@@ -339,25 +311,19 @@ fn build_detail_lines<'a>(plan: &'a OrganizePlan, theme: &Theme) -> Vec<Line<'a>
         }
     }
 
-    if !plan.copies.is_empty() {
+    if preview.stats.copies_total > 0 {
         lines.push(Line::from(Span::styled(
-            format!(" Collection copies ({}):", plan.copies.len()),
+            format!(" Collection copies ({}):", preview.stats.copies_total),
             Style::default()
                 .fg(theme.fg)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )));
         lines.push(Line::from(""));
-        for c in &plan.copies {
-            let name = c.to.file_name().and_then(|f| f.to_str()).unwrap_or("?");
-            let to_dir = c
-                .to
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
+        for c in &preview.copies {
             lines.push(Line::from(vec![
-                Span::styled(format!("  {} ", name), Style::default().fg(theme.fg)),
+                Span::styled(format!("  {} ", c.name), Style::default().fg(theme.fg)),
                 Span::styled(
-                    format!("→ {}", to_dir),
+                    format!("→ {}", c.to_dir),
                     Style::default().fg(theme.accent_alt),
                 ),
                 Span::styled(
@@ -369,19 +335,19 @@ fn build_detail_lines<'a>(plan: &'a OrganizePlan, theme: &Theme) -> Vec<Line<'a>
         lines.push(Line::from(""));
     }
 
-    if !plan.missing_sources.is_empty() {
+    if preview.stats.orphans > 0 {
         lines.push(Line::from(Span::styled(
             format!(
                 " Orphaned tracks ({} — will be pruned):",
-                plan.missing_sources.len()
+                preview.stats.orphans
             ),
             Style::default()
                 .fg(theme.yellow)
                 .add_modifier(Modifier::BOLD),
         )));
-        for (id, path, title) in &plan.missing_sources {
+        for o in &preview.orphans {
             lines.push(Line::from(Span::styled(
-                format!("  [{}] {} — {}", id, title, path.display()),
+                format!("  [{}] {} — {}", o.id, o.title, o.path.display()),
                 Style::default().fg(theme.fg_dim),
             )));
         }

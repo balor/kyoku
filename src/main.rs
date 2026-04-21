@@ -273,6 +273,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Organize {
             apply,
+            details,
             artist,
             album,
             path,
@@ -302,72 +303,82 @@ fn main() -> anyhow::Result<()> {
                     plan.skipped
                 );
             } else {
-                // Group moves by source dir → target dir for a compact display
-                let mut dir_groups: std::collections::BTreeMap<
-                    (String, String),
-                    Vec<String>,
-                > = std::collections::BTreeMap::new();
-                for m in &plan.moves {
-                    let from_dir = m
-                        .from
-                        .parent()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default();
-                    let to_dir = m
-                        .to
-                        .parent()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default();
-                    let filename = m
-                        .to
-                        .file_name()
-                        .and_then(|f| f.to_str())
-                        .unwrap_or("?")
-                        .to_string();
-                    dir_groups
-                        .entry((from_dir, to_dir))
-                        .or_default()
-                        .push(filename);
-                }
-
                 println!("Organize plan:\n");
-                for ((from_dir, to_dir), files) in &dir_groups {
-                    println!("  {} ({} files)", from_dir, files.len());
-                    println!("  → {}\n", to_dir);
-                }
 
-                // Group copies by collection + target dir
-                let mut copy_groups: std::collections::BTreeMap<(String, String), usize> =
-                    std::collections::BTreeMap::new();
-                for c in &plan.copies {
-                    let to_dir = c
-                        .to
-                        .parent()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default();
-                    *copy_groups
-                        .entry((c.collection_name.clone(), to_dir))
-                        .or_insert(0) += 1;
-                }
-                for ((coll, to_dir), count) in &copy_groups {
-                    println!("  copy ({} files) → {} (collection: {})", count, to_dir, coll);
-                }
-                if !copy_groups.is_empty() {
-                    println!();
-                }
+                if details {
+                    let preview = core::organize_preview::build_details(&plan);
+                    if !preview.moves.is_empty() {
+                        println!("Moves ({}):", preview.stats.moves_total);
+                        for m in &preview.moves {
+                            println!("  {}", m.from_name);
+                            println!("    from: {}", m.from_dir);
+                            if m.renamed {
+                                println!("    → to: {}/{}", m.to_dir, m.to_name);
+                            } else {
+                                println!("    → to: {}", m.to_dir);
+                            }
+                        }
+                        println!();
+                    }
+                    if !preview.copies.is_empty() {
+                        println!("Collection copies ({}):", preview.stats.copies_total);
+                        for c in &preview.copies {
+                            println!(
+                                "  {} → {} (collection: {})",
+                                c.name, c.to_dir, c.collection_name
+                            );
+                        }
+                        println!();
+                    }
+                    if !preview.orphans.is_empty() {
+                        println!(
+                            "Orphaned tracks ({} — DB rows will be pruned):",
+                            preview.stats.orphans
+                        );
+                        for o in &preview.orphans {
+                            println!("  [{}] {} — {}", o.id, o.title, o.path.display());
+                        }
+                        println!();
+                    }
+                } else {
+                    let preview = core::organize_preview::build_summary(&plan);
+                    for g in &preview.dir_moves {
+                        println!("  {} ({} files)", g.from_dir, g.count);
+                        println!("  → {}\n", g.to_dir);
+                    }
+                    if !preview.in_place_renames.is_empty() {
+                        println!("renamed in place:");
+                        for g in &preview.in_place_renames {
+                            println!("  {} ({} files)", g.dir, g.count);
+                        }
+                        println!();
+                    }
+                    for g in &preview.collection_copies {
+                        println!(
+                            "  copy ({} files) → collection: {}",
+                            g.count, g.collection_name
+                        );
+                    }
+                    if !preview.collection_copies.is_empty() {
+                        println!();
+                    }
 
-                if !plan.missing_sources.is_empty() {
-                    println!(
-                        "\nMissing source files ({} — DB rows will be pruned):",
-                        plan.missing_sources.len()
-                    );
-                    for (id, path, title) in plan.missing_sources.iter().take(10) {
-                        println!("  [{}] {} — {}", id, title, path.display());
+                    // Summary mode: keep the 10-entry cap so a flood of orphans
+                    // doesn't bury the rest of the plan. Use --details for the
+                    // full list.
+                    if !plan.missing_sources.is_empty() {
+                        println!(
+                            "Missing source files ({} — DB rows will be pruned):",
+                            plan.missing_sources.len()
+                        );
+                        for (id, path, title) in plan.missing_sources.iter().take(10) {
+                            println!("  [{}] {} — {}", id, title, path.display());
+                        }
+                        if plan.missing_sources.len() > 10 {
+                            println!("  … and {} more", plan.missing_sources.len() - 10);
+                        }
+                        println!();
                     }
-                    if plan.missing_sources.len() > 10 {
-                        println!("  … and {} more", plan.missing_sources.len() - 10);
-                    }
-                    println!();
                 }
 
                 println!(

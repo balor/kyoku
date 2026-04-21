@@ -51,6 +51,10 @@ pub enum Command {
         #[arg(long)]
         apply: bool,
 
+        /// Show per-file from/to paths instead of grouped summary
+        #[arg(long, short = 'd')]
+        details: bool,
+
         /// Organize specific artist only
         #[arg(long)]
         artist: Option<String>,
