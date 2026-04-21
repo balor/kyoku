@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::Settings;
-use crate::core::organizer;
+use crate::core::{organizer, pruner};
 use crate::db::queries::{self, AlbumRow, AlbumSort};
 use crate::error::Result;
 use crate::tui::keybindings as keys;
@@ -49,7 +49,7 @@ pub struct LibraryView {
     /// by id so sort/filter don't lose the set.
     pub selection: Selection,
     /// Pending delete — built by `d` and consumed by the confirm popup.
-    pub pending_delete: Option<(organizer::DeletePlan, ConfirmDelete)>,
+    pub pending_delete: Option<(pruner::DeletePlan, ConfirmDelete)>,
 }
 
 impl Default for LibraryView {
@@ -135,7 +135,7 @@ impl LibraryView {
                     let cleanup = organizer::cleanup_roots(settings);
                     let plan = plan.clone();
                     self.pending_delete = None;
-                    match organizer::apply_delete_plan(conn, &plan, delete_files, &cleanup) {
+                    match pruner::apply_delete_plan(conn, &plan, delete_files, &cleanup) {
                         Ok(report) => {
                             let mut parts = Vec::new();
                             if report.albums_deleted > 0 {
@@ -297,7 +297,7 @@ impl LibraryView {
                 return LibraryAction::None;
             }
             let cleanup = organizer::cleanup_roots(settings);
-            match organizer::plan_delete_albums(conn, &ids, &cleanup) {
+            match pruner::plan_delete_albums(conn, &ids, &cleanup) {
                 Ok(plan) => {
                     if plan.is_empty() {
                         self.notice = Some("Nothing to delete".to_string());
@@ -593,7 +593,7 @@ fn abbreviate_formats(formats: &str) -> String {
     }
 }
 
-fn build_album_confirm(plan: &organizer::DeletePlan, album_count: usize) -> ConfirmDelete {
+fn build_album_confirm(plan: &pruner::DeletePlan, album_count: usize) -> ConfirmDelete {
     let primary = if album_count == 1 {
         "Delete 1 album?".to_string()
     } else {

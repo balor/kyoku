@@ -8,6 +8,7 @@ use rusqlite::Connection;
 
 use crate::config::Settings;
 use crate::core::organizer::{self, OrganizePlan};
+use crate::core::pruner;
 use crate::db::queries::{self, AlbumRow, TrackRow};
 use crate::error::Result;
 use crate::tui::keybindings as keys;
@@ -47,7 +48,7 @@ pub struct AlbumDetailView {
     organize_details: bool,
     notice: Option<(NoticeKind, String)>,
     pub selection: Selection,
-    pending_delete: Option<(organizer::DeletePlan, ConfirmDelete)>,
+    pending_delete: Option<(pruner::DeletePlan, ConfirmDelete)>,
 }
 
 impl AlbumDetailView {
@@ -145,7 +146,7 @@ impl AlbumDetailView {
                     let cleanup = organizer::cleanup_roots(settings);
                     let plan = plan.clone();
                     self.pending_delete = None;
-                    match organizer::apply_delete_plan(conn, &plan, delete_files, &cleanup) {
+                    match pruner::apply_delete_plan(conn, &plan, delete_files, &cleanup) {
                         Ok(report) => {
                             let mut parts = Vec::new();
                             if report.tracks_deleted > 0 {
@@ -351,7 +352,7 @@ impl AlbumDetailView {
                 return DetailAction::None;
             }
             let cleanup = organizer::cleanup_roots(settings);
-            match organizer::plan_delete_tracks(conn, &ids, &cleanup) {
+            match pruner::plan_delete_tracks(conn, &ids, &cleanup) {
                 Ok(plan) => {
                     if plan.is_empty() {
                         self.notice =
@@ -717,7 +718,7 @@ impl AlbumDetailView {
     }
 }
 
-fn build_track_confirm(plan: &organizer::DeletePlan) -> ConfirmDelete {
+fn build_track_confirm(plan: &pruner::DeletePlan) -> ConfirmDelete {
     let n = plan.track_ids.len();
     let primary = if n == 1 {
         "Delete 1 track?".to_string()

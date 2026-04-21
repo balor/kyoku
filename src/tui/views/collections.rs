@@ -10,6 +10,7 @@ use rusqlite::Connection;
 
 use crate::config::Settings;
 use crate::core::organizer::{self, remove_empty_parents, DeleteCollectionPlan};
+use crate::core::pruner;
 use crate::db::queries::{self, CollectionRow, TrackRow};
 use crate::error::Result;
 use crate::tui::keybindings as keys;
@@ -576,7 +577,7 @@ pub struct CollectionDetailView {
     confirm_remove: Option<RemoveTrackConfirm>,
     rename_input: Option<TextInput>,
     pub selection: Selection,
-    pending_delete: Option<(organizer::DeletePlan, ConfirmDelete)>,
+    pending_delete: Option<(pruner::DeletePlan, ConfirmDelete)>,
 }
 
 struct RemoveTrackConfirm {
@@ -704,7 +705,7 @@ impl CollectionDetailView {
                     let cleanup = organizer::cleanup_roots(settings);
                     let plan = plan.clone();
                     self.pending_delete = None;
-                    let _ = organizer::apply_delete_plan(conn, &plan, delete_files, &cleanup);
+                    let _ = pruner::apply_delete_plan(conn, &plan, delete_files, &cleanup);
                     self.selection.clear();
                     self.reload_tracks(conn);
                     return CollectionDetailAction::Deleted;
@@ -877,7 +878,7 @@ impl CollectionDetailView {
                 return CollectionDetailAction::None;
             }
             let cleanup = organizer::cleanup_roots(settings);
-            match organizer::plan_delete_tracks(conn, &ids, &cleanup) {
+            match pruner::plan_delete_tracks(conn, &ids, &cleanup) {
                 Ok(plan) => {
                     if plan.is_empty() {
                         return CollectionDetailAction::None;
@@ -1205,7 +1206,7 @@ impl CollectionDetailView {
     }
 }
 
-fn build_collection_track_confirm(plan: &organizer::DeletePlan) -> ConfirmDelete {
+fn build_collection_track_confirm(plan: &pruner::DeletePlan) -> ConfirmDelete {
     let n = plan.track_ids.len();
     let primary = if n == 1 {
         "Delete 1 track from library?".to_string()
