@@ -11,15 +11,19 @@ use crate::core::organizer::{self, OrganizePlan};
 use crate::db::queries::{self, AlbumRow, TrackRow};
 use crate::error::Result;
 use crate::tui::keybindings as keys;
+use crate::tui::selection::Selection;
 use crate::tui::themes::Theme;
 use crate::tui::views::library::format_duration_ms;
 use crate::tui::widgets::add_to_collection::{AddToCollectionPopup, PopupAction};
+use crate::tui::widgets::confirm_delete::{ConfirmAction, ConfirmDelete};
 use crate::tui::widgets::input::TextInput;
 
 pub enum DetailAction {
     None,
     EditTrack(i64),
     Organize,
+    /// User confirmed a delete — caller should reload and possibly go back.
+    Deleted,
 }
 
 #[derive(Clone, Copy)]
@@ -42,6 +46,8 @@ pub struct AlbumDetailView {
     organize_max_scroll: usize,
     organize_details: bool,
     notice: Option<(NoticeKind, String)>,
+    pub selection: Selection,
+    pending_delete: Option<(organizer::DeletePlan, ConfirmDelete)>,
 }
 
 impl AlbumDetailView {
@@ -78,6 +84,8 @@ impl AlbumDetailView {
         self.rename_input = None;
         self.add_to_collection = None;
         self.notice = None;
+        self.selection.clear();
+        self.pending_delete = None;
         Ok(())
     }
 
@@ -93,6 +101,8 @@ impl AlbumDetailView {
         self.rename_input = None;
         self.add_to_collection = None;
         self.notice = None;
+        self.selection.clear();
+        self.pending_delete = None;
         Ok(())
     }
 
@@ -104,6 +114,7 @@ impl AlbumDetailView {
         self.rename_input.is_some()
             || self.add_to_collection.is_some()
             || self.organize_plan.is_some()
+            || self.pending_delete.is_some()
     }
 
     pub fn set_organize_plan(&mut self, plan: OrganizePlan) {
@@ -122,6 +133,50 @@ impl AlbumDetailView {
         conn: &Connection,
         settings: &Settings,
     ) -> DetailAction {
+        // Delete-confirm popup captures input
+        if let Some((plan, popup)) = &mut self.pending_delete {
+            match popup.handle_key(key) {
+                ConfirmAction::None => return DetailAction::None,
+                ConfirmAction::Cancel => {
+                    self.pending_delete = None;
+                    return DetailAction::None;
+                }
+                ConfirmAction::Confirm { delete_files } => {
+                    let cleanup = organizer::cleanup_roots(settings);
+                    let plan = plan.clone();
+                    self.pending_delete = None;
+                    match organizer::apply_delete_plan(conn, &plan, delete_files, &cleanup) {
+                        Ok(report) => {
+                            let mut parts = Vec::new();
+                            if report.tracks_deleted > 0 {
+                                parts.push(format!("{} track(s)", report.tracks_deleted));
+                            }
+                            if report.files_deleted > 0 {
+                                parts.push(format!("{} file(s)", report.files_deleted));
+                            }
+                            if report.dirs_cleaned > 0 {
+                                parts.push(format!("{} dirs cleaned", report.dirs_cleaned));
+                            }
+                            let msg = if parts.is_empty() {
+                                "Nothing to delete".to_string()
+                            } else {
+                                format!("Deleted: {}", parts.join(", "))
+                            };
+                            self.notice = Some((NoticeKind::Success, msg));
+                        }
+                        Err(e) => {
+                            self.notice = Some((
+                                NoticeKind::Warning,
+                                format!("Delete failed: {}", e),
+                            ));
+                        }
+                    }
+                    self.selection.clear();
+                    return DetailAction::Deleted;
+                }
+            }
+        }
+
         // Organize popup captures input
         if self.organize_plan.is_some() {
             if keys::is_confirm(&key) {
@@ -271,6 +326,48 @@ impl AlbumDetailView {
         let current_track = visible
             .get(self.selected)
             .and_then(|&i| self.tracks.get(i));
+
+        if keys::is_back(&key) && !self.selection.is_empty() {
+            self.selection.clear();
+            return DetailAction::None;
+        }
+
+        if keys::is_toggle_select(&key)
+            && let Some(track) = current_track {
+                self.selection.toggle(track.id);
+                if count > 0 && self.selected < count - 1 {
+                    self.selected += 1;
+                }
+                return DetailAction::None;
+            }
+
+        if keys::is_delete(&key) {
+            let ids: Vec<i64> = if self.selection.is_empty() {
+                current_track.map(|t| vec![t.id]).unwrap_or_default()
+            } else {
+                self.selection.ids()
+            };
+            if ids.is_empty() {
+                return DetailAction::None;
+            }
+            let cleanup = organizer::cleanup_roots(settings);
+            match organizer::plan_delete_tracks(conn, &ids, &cleanup) {
+                Ok(plan) => {
+                    if plan.is_empty() {
+                        self.notice =
+                            Some((NoticeKind::Warning, "Nothing to delete".to_string()));
+                        return DetailAction::None;
+                    }
+                    let popup = build_track_confirm(&plan);
+                    self.pending_delete = Some((plan, popup));
+                }
+                Err(e) => {
+                    self.notice =
+                        Some((NoticeKind::Warning, format!("Delete plan failed: {}", e)));
+                }
+            }
+            return DetailAction::None;
+        }
 
         if key.code == KeyCode::Char('e')
             && let Some(track) = current_track {
@@ -440,7 +537,13 @@ impl AlbumDetailView {
                 _ => Style::default().fg(theme.fg_muted),
             };
 
+            let gutter_span = if self.selection.contains(track.id) {
+                Span::styled("▎", Style::default().fg(theme.accent))
+            } else {
+                Span::raw(" ")
+            };
             let row = Row::new(vec![
+                Cell::from(gutter_span),
                 Cell::from(num),
                 Cell::from(track.title.clone()),
                 Cell::from(duration),
@@ -463,6 +566,7 @@ impl AlbumDetailView {
         }
 
         let header = Row::new(vec![
+            Cell::from(" "),
             Cell::from(Span::styled("#", Style::default().fg(theme.accent))),
             Cell::from(Span::styled("Title", Style::default().fg(theme.accent))),
             Cell::from(Span::styled("Duration", Style::default().fg(theme.accent))),
@@ -474,6 +578,7 @@ impl AlbumDetailView {
         let table = Table::new(
             rows,
             [
+                Constraint::Length(1),
                 Constraint::Length(4),
                 Constraint::Percentage(45),
                 Constraint::Length(8),
@@ -566,6 +671,11 @@ impl AlbumDetailView {
             popup.render(frame, area, theme);
         }
 
+        // Delete-confirm popup
+        if let Some((_, popup)) = &self.pending_delete {
+            popup.render(frame, area, theme);
+        }
+
         // Organize preview popup
         if let Some(plan) = &self.organize_plan {
             use crate::tui::widgets::organize_popup::{self, OrganizeView};
@@ -605,6 +715,44 @@ impl AlbumDetailView {
             );
         }
     }
+}
+
+fn build_track_confirm(plan: &organizer::DeletePlan) -> ConfirmDelete {
+    let n = plan.track_ids.len();
+    let primary = if n == 1 {
+        "Delete 1 track?".to_string()
+    } else {
+        format!("Delete {} tracks?", n)
+    };
+    let summary = format!("{} file(s) on disk", plan.deletable_file_count());
+    let mut popup = ConfirmDelete::new("Confirm delete", primary).with_summary(summary);
+    for line in &plan.album_summary_lines {
+        popup = popup.with_detail(line.clone());
+    }
+    if plan.additional_albums > 0 {
+        popup = popup.with_detail(format!("…and {} more album(s)", plan.additional_albums));
+    }
+    if !plan.collection_copies_to_delete.is_empty() {
+        popup = popup.with_warning(format!(
+            "{} collection copy file(s) will also be removed",
+            plan.collection_copies_to_delete.len()
+        ));
+    }
+    if !plan.files_outside_managed.is_empty() {
+        popup = popup.with_warning(format!(
+            "{} file(s) outside managed roots will NOT be deleted",
+            plan.files_outside_managed.len()
+        ));
+    }
+    if plan.deletable_file_count() == 0 {
+        popup = popup.without_checkbox();
+    } else {
+        popup = popup.with_checkbox_label(format!(
+            "Also delete {} file(s) from disk",
+            plan.deletable_file_count()
+        ));
+    }
+    popup
 }
 
 /// Open a directory in the system file manager.

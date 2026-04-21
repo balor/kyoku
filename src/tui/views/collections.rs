@@ -8,10 +8,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use rusqlite::Connection;
 
+use crate::config::Settings;
 use crate::core::organizer::{self, remove_empty_parents, DeleteCollectionPlan};
 use crate::db::queries::{self, CollectionRow, TrackRow};
 use crate::error::Result;
 use crate::tui::keybindings as keys;
+use crate::tui::selection::Selection;
 use crate::tui::themes::Theme;
 use crate::tui::views::library::format_duration_ms;
 use crate::tui::widgets::confirm_delete::{ConfirmAction, ConfirmDelete};
@@ -29,6 +31,8 @@ pub enum CollectionDetailAction {
     EditTrack(i64),
     Organize,
     OpenDir,
+    /// User confirmed a batch track delete.
+    Deleted,
 }
 
 enum InputMode {
@@ -37,6 +41,10 @@ enum InputMode {
     Renaming { input: TextInput, id: i64 },
     ConfirmDelete {
         plan: DeleteCollectionPlan,
+        widget: ConfirmDelete,
+    },
+    ConfirmBatchDelete {
+        plans: Vec<DeleteCollectionPlan>,
         widget: ConfirmDelete,
     },
 }
@@ -48,6 +56,7 @@ pub struct CollectionsView {
     pub organize_scroll: usize,
     pub organize_max_scroll: usize,
     pub organize_details: bool,
+    pub selection: Selection,
     mode: InputMode,
 }
 
@@ -60,6 +69,7 @@ impl Default for CollectionsView {
             organize_scroll: 0,
             organize_max_scroll: 0,
             organize_details: false,
+            selection: Selection::default(),
             mode: InputMode::Normal,
         }
     }
@@ -67,6 +77,8 @@ impl Default for CollectionsView {
 
 impl CollectionsView {
     pub fn load(&mut self, conn: &Connection, search: Option<&str>) -> Result<()> {
+        self.selection.clear();
+        self.mode = InputMode::Normal;
         self.collections = if let Some(q) = search {
             if !q.is_empty() {
                 queries::search_collections(conn, q)?
@@ -181,6 +193,31 @@ impl CollectionsView {
                         organizer::apply_delete_collection(conn, plan, delete_files, music_dir)
                             .ok();
                         self.mode = InputMode::Normal;
+                        self.selection.clear();
+                        return CollectionsAction::Refresh;
+                    }
+                }
+            }
+            InputMode::ConfirmBatchDelete { plans, widget } => {
+                let action = widget.handle_key(key);
+                match action {
+                    ConfirmAction::None => return CollectionsAction::None,
+                    ConfirmAction::Cancel => {
+                        self.mode = InputMode::Normal;
+                        return CollectionsAction::None;
+                    }
+                    ConfirmAction::Confirm { delete_files } => {
+                        for plan in plans.iter() {
+                            organizer::apply_delete_collection(
+                                conn,
+                                plan,
+                                delete_files,
+                                music_dir,
+                            )
+                            .ok();
+                        }
+                        self.mode = InputMode::Normal;
+                        self.selection.clear();
                         return CollectionsAction::Refresh;
                     }
                 }
@@ -238,14 +275,40 @@ impl CollectionsView {
         if key.code == KeyCode::Char('O') {
             return CollectionsAction::OrganizeAll;
         }
-        if key.code == KeyCode::Char('d') && !self.collections.is_empty() {
-            if let Some(coll) = self.collections.get(self.selected)
-                && let Ok(plan) = organizer::plan_delete_collection(conn, coll.id, music_dir) {
+        if keys::is_back(&key) && !self.selection.is_empty() {
+            self.selection.clear();
+            return CollectionsAction::None;
+        }
+
+        if keys::is_toggle_select(&key)
+            && let Some(coll) = self.collections.get(self.selected) {
+                self.selection.toggle(coll.id);
+                if count > 0 && self.selected < count - 1 {
+                    self.selected += 1;
+                }
+                return CollectionsAction::None;
+            }
+
+        if keys::is_delete(&key) && !self.collections.is_empty() {
+            let ids: Vec<i64> = if self.selection.is_empty() {
+                self.collections
+                    .get(self.selected)
+                    .map(|c| vec![c.id])
+                    .unwrap_or_default()
+            } else {
+                self.selection.ids()
+            };
+            if ids.is_empty() {
+                return CollectionsAction::None;
+            }
+
+            if ids.len() == 1 {
+                // Single-collection delete — preserve the existing rich popup.
+                if let Ok(plan) = organizer::plan_delete_collection(conn, ids[0], music_dir) {
                     let mut widget = ConfirmDelete::new(
                         "Confirm Delete",
                         format!("Delete collection '{}'?", plan.collection_name),
                     );
-
                     let total_files = plan.files_to_delete.len();
                     if total_files > 0 {
                         widget = widget.with_summary(format!(
@@ -256,7 +319,6 @@ impl CollectionsView {
                     } else {
                         widget = widget.without_checkbox();
                     }
-
                     if !plan.orphaned_track_ids.is_empty() {
                         widget = widget.with_warning(format!(
                             "{} track(s) only exist in this collection — they'll be \
@@ -264,16 +326,74 @@ impl CollectionsView {
                             plan.orphaned_track_ids.len()
                         ));
                     }
-
                     if !plan.files_outside_music_dir.is_empty() {
                         widget = widget.with_warning(format!(
                             "{} file(s) outside music_dir will NOT be touched",
                             plan.files_outside_music_dir.len()
                         ));
                     }
-
                     self.mode = InputMode::ConfirmDelete { plan, widget };
                 }
+            } else {
+                // Batch — plan every collection and summarise.
+                let mut plans = Vec::with_capacity(ids.len());
+                for id in &ids {
+                    if let Ok(plan) = organizer::plan_delete_collection(conn, *id, music_dir) {
+                        plans.push(plan);
+                    }
+                }
+                if plans.is_empty() {
+                    return CollectionsAction::None;
+                }
+                let total_files: usize =
+                    plans.iter().map(|p| p.files_to_delete.len()).sum();
+                let total_orphans: usize =
+                    plans.iter().map(|p| p.orphaned_track_ids.len()).sum();
+                let total_outside: usize =
+                    plans.iter().map(|p| p.files_outside_music_dir.len()).sum();
+
+                let mut widget = ConfirmDelete::new(
+                    "Confirm Delete",
+                    format!("Delete {} collections?", plans.len()),
+                );
+                if total_files > 0 {
+                    widget = widget.with_summary(format!(
+                        "{} file(s) under {}",
+                        total_files,
+                        music_dir.display()
+                    ));
+                } else {
+                    widget = widget.without_checkbox();
+                }
+                const MAX_SHOWN: usize = 3;
+                for plan in plans.iter().take(MAX_SHOWN) {
+                    widget = widget.with_detail(format!(
+                        "{} ({} file(s))",
+                        plan.collection_name,
+                        plan.files_to_delete.len()
+                    ));
+                }
+                if plans.len() > MAX_SHOWN {
+                    widget = widget.with_detail(format!(
+                        "…and {} more collection(s)",
+                        plans.len() - MAX_SHOWN
+                    ));
+                }
+                if total_orphans > 0 {
+                    widget = widget.with_warning(format!(
+                        "{} track(s) only exist in these collections — they'll be \
+                         removed entirely if you delete files",
+                        total_orphans
+                    ));
+                }
+                if total_outside > 0 {
+                    widget = widget.with_warning(format!(
+                        "{} file(s) outside music_dir will NOT be touched",
+                        total_outside
+                    ));
+                }
+                self.mode = InputMode::ConfirmBatchDelete { plans, widget };
+            }
             return CollectionsAction::None;
         }
 
@@ -287,7 +407,13 @@ impl CollectionsView {
             let is_selected = i == self.selected;
             let desc = coll.description.as_deref().unwrap_or("");
 
+            let gutter_span = if self.selection.contains(coll.id) {
+                Span::styled("▎", Style::default().fg(theme.accent))
+            } else {
+                Span::raw(" ")
+            };
             let row = Row::new(vec![
+                Cell::from(gutter_span),
                 Cell::from(coll.name.clone()),
                 Cell::from(format!("{:>4}", coll.track_count)),
                 Cell::from(desc.to_string()),
@@ -325,6 +451,7 @@ impl CollectionsView {
         }
 
         let header = Row::new(vec![
+            Cell::from(" "),
             Cell::from(Span::styled("Collection", Style::default().fg(theme.accent))),
             Cell::from(Span::styled("Tracks", Style::default().fg(theme.accent))),
             Cell::from(Span::styled("Description", Style::default().fg(theme.accent))),
@@ -334,6 +461,7 @@ impl CollectionsView {
         let table = Table::new(
             rows,
             [
+                Constraint::Length(1),
                 Constraint::Percentage(30),
                 Constraint::Length(8),
                 Constraint::Percentage(50),
@@ -369,6 +497,9 @@ impl CollectionsView {
 
         // Render delete confirmation widget
         if let InputMode::ConfirmDelete { widget, .. } = &self.mode {
+            widget.render(frame, area, theme);
+        }
+        if let InputMode::ConfirmBatchDelete { widget, .. } = &self.mode {
             widget.render(frame, area, theme);
         }
 
@@ -444,6 +575,8 @@ pub struct CollectionDetailView {
     pub scroll_offset: usize,
     confirm_remove: Option<RemoveTrackConfirm>,
     rename_input: Option<TextInput>,
+    pub selection: Selection,
+    pending_delete: Option<(organizer::DeletePlan, ConfirmDelete)>,
 }
 
 struct RemoveTrackConfirm {
@@ -470,6 +603,8 @@ impl Default for CollectionDetailView {
             scroll_offset: 0,
             confirm_remove: None,
             rename_input: None,
+            selection: Selection::default(),
+            pending_delete: None,
         }
     }
 }
@@ -516,6 +651,8 @@ impl CollectionDetailView {
         self.scroll_offset = 0;
         self.confirm_remove = None;
         self.rename_input = None;
+        self.selection.clear();
+        self.pending_delete = None;
         Ok(())
     }
 
@@ -523,6 +660,7 @@ impl CollectionDetailView {
         self.confirm_remove.is_some()
             || self.rename_input.is_some()
             || self.organize_plan.is_some()
+            || self.pending_delete.is_some()
     }
 
     /// Reload tracks, preserving cursor position (clamped to filtered list).
@@ -551,8 +689,29 @@ impl CollectionDetailView {
         &mut self,
         key: KeyEvent,
         conn: &Connection,
-        music_dir: &Path,
+        settings: &Settings,
     ) -> CollectionDetailAction {
+        let music_dir = settings.library.music_dir.as_path();
+        // Delete-confirm popup captures input (batch track delete).
+        if let Some((plan, popup)) = &mut self.pending_delete {
+            match popup.handle_key(key) {
+                ConfirmAction::None => return CollectionDetailAction::None,
+                ConfirmAction::Cancel => {
+                    self.pending_delete = None;
+                    return CollectionDetailAction::None;
+                }
+                ConfirmAction::Confirm { delete_files } => {
+                    let cleanup = organizer::cleanup_roots(settings);
+                    let plan = plan.clone();
+                    self.pending_delete = None;
+                    let _ = organizer::apply_delete_plan(conn, &plan, delete_files, &cleanup);
+                    self.selection.clear();
+                    self.reload_tracks(conn);
+                    return CollectionDetailAction::Deleted;
+                }
+            }
+        }
+
         // Organize popup captures input
         if self.organize_plan.is_some() {
             if keys::is_confirm(&key) {
@@ -694,6 +853,45 @@ impl CollectionDetailView {
             .get(self.selected)
             .and_then(|&i| self.tracks.get(i));
 
+        if keys::is_back(&key) && !self.selection.is_empty() {
+            self.selection.clear();
+            return CollectionDetailAction::None;
+        }
+
+        if keys::is_toggle_select(&key)
+            && let Some(track) = current_track {
+                self.selection.toggle(track.id);
+                if count > 0 && self.selected < count - 1 {
+                    self.selected += 1;
+                }
+                return CollectionDetailAction::None;
+            }
+
+        if keys::is_delete(&key) {
+            let ids: Vec<i64> = if self.selection.is_empty() {
+                current_track.map(|t| vec![t.id]).unwrap_or_default()
+            } else {
+                self.selection.ids()
+            };
+            if ids.is_empty() {
+                return CollectionDetailAction::None;
+            }
+            let cleanup = organizer::cleanup_roots(settings);
+            match organizer::plan_delete_tracks(conn, &ids, &cleanup) {
+                Ok(plan) => {
+                    if plan.is_empty() {
+                        return CollectionDetailAction::None;
+                    }
+                    let popup = build_collection_track_confirm(&plan);
+                    self.pending_delete = Some((plan, popup));
+                }
+                Err(e) => {
+                    self.notice = Some(format!("Delete plan failed: {}", e));
+                }
+            }
+            return CollectionDetailAction::None;
+        }
+
         if key.code == KeyCode::Char('e')
             && let Some(track) = current_track {
                 return CollectionDetailAction::EditTrack(track.id);
@@ -822,7 +1020,13 @@ impl CollectionDetailView {
                 })
                 .unwrap_or_default();
 
+            let gutter_span = if self.selection.contains(track.id) {
+                Span::styled("▎", Style::default().fg(theme.accent))
+            } else {
+                Span::raw(" ")
+            };
             let row = Row::new(vec![
+                Cell::from(gutter_span),
                 Cell::from(track.title.clone()),
                 Cell::from(artist.to_string()),
                 Cell::from(duration),
@@ -844,6 +1048,7 @@ impl CollectionDetailView {
         }
 
         let header = Row::new(vec![
+            Cell::from(" "),
             Cell::from(Span::styled("Title", Style::default().fg(theme.accent))),
             Cell::from(Span::styled("Artist", Style::default().fg(theme.accent))),
             Cell::from(Span::styled("Duration", Style::default().fg(theme.accent))),
@@ -854,6 +1059,7 @@ impl CollectionDetailView {
         let table = Table::new(
             rows,
             [
+                Constraint::Length(1),
                 Constraint::Percentage(35),
                 Constraint::Percentage(30),
                 Constraint::Length(8),
@@ -948,6 +1154,11 @@ impl CollectionDetailView {
             state.widget.render(frame, area, theme);
         }
 
+        // Delete-confirm popup (batch/track delete)
+        if let Some((_, popup)) = &self.pending_delete {
+            popup.render(frame, area, theme);
+        }
+
         // Organize preview popup
         if let Some(plan) = &self.organize_plan {
             use crate::tui::widgets::organize_popup::{self, OrganizeView};
@@ -992,4 +1203,42 @@ impl CollectionDetailView {
             );
         }
     }
+}
+
+fn build_collection_track_confirm(plan: &organizer::DeletePlan) -> ConfirmDelete {
+    let n = plan.track_ids.len();
+    let primary = if n == 1 {
+        "Delete 1 track from library?".to_string()
+    } else {
+        format!("Delete {} tracks from library?", n)
+    };
+    let summary = format!("{} file(s) on disk", plan.deletable_file_count());
+    let mut popup = ConfirmDelete::new("Confirm delete", primary).with_summary(summary);
+    for line in &plan.album_summary_lines {
+        popup = popup.with_detail(line.clone());
+    }
+    if plan.additional_albums > 0 {
+        popup = popup.with_detail(format!("…and {} more album(s)", plan.additional_albums));
+    }
+    if !plan.collection_copies_to_delete.is_empty() {
+        popup = popup.with_warning(format!(
+            "{} collection copy file(s) will also be removed",
+            plan.collection_copies_to_delete.len()
+        ));
+    }
+    if !plan.files_outside_managed.is_empty() {
+        popup = popup.with_warning(format!(
+            "{} file(s) outside managed roots will NOT be deleted",
+            plan.files_outside_managed.len()
+        ));
+    }
+    if plan.deletable_file_count() == 0 {
+        popup = popup.without_checkbox();
+    } else {
+        popup = popup.with_checkbox_label(format!(
+            "Also delete {} file(s) from disk",
+            plan.deletable_file_count()
+        ));
+    }
+    popup
 }

@@ -286,7 +286,7 @@ impl App {
         );
     }
 
-    fn render_help_overlay(&self, frame: &mut Frame, area: Rect) {
+    fn render_help_overlay(&mut self, frame: &mut Frame, area: Rect) {
         self.help.render(frame, area, self.theme);
     }
 }

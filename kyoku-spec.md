@@ -968,8 +968,8 @@ A single MB entity can have both a native-script primary name and one or more La
 ### Milestone 6: Deletion, Cover Art, Full Tag Editing
 **Goal**: Round out the core library-management surface.
 
-- [ ] Multi-select (`Space` toggles rows) in library and album-detail views
-- [ ] Batch delete of tracks / albums / collections with opt-in file deletion (keep-files is the confirm-popup default)
+- [x] Multi-select (`Space` toggles rows) in library and album-detail views
+- [x] Batch delete of tracks / albums / collections with opt-in file deletion (keep-files is the confirm-popup default)
 - [ ] Album cover schema (`albums.cover_path`) + adopt sibling `cover.jpg` / `folder.jpg` on import
 - [ ] TUI album cover preview (kitty/iterm2/sixel with ASCII fallback)
 - [ ] Opt-in cover fetch from Cover Art Archive (`coverartarchive.org/release/{mbid}`)

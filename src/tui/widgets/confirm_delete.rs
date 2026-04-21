@@ -15,12 +15,18 @@ pub struct ConfirmDelete {
     pub primary: String,
     /// Optional summary line (e.g. "47 file(s) under /path").
     pub summary: Option<String>,
+    /// Optional detail lines (muted, neutral colour). Rendered under the
+    /// primary line — useful for per-album breakdowns in batch deletes.
+    pub details: Vec<String>,
     /// Optional warning lines (yellow), e.g. "3 tracks will be removed entirely".
     pub warnings: Vec<String>,
     /// Whether the "also delete files" checkbox is currently checked.
     pub delete_files: bool,
     /// If false, the checkbox is hidden (no files to delete).
     pub show_checkbox: bool,
+    /// Override text for the checkbox row (defaults to
+    /// "Also delete files from disk").
+    pub checkbox_label: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,14 +42,21 @@ impl ConfirmDelete {
             title: title.into(),
             primary: primary.into(),
             summary: None,
+            details: Vec::new(),
             warnings: Vec::new(),
             delete_files: false,
             show_checkbox: true,
+            checkbox_label: None,
         }
     }
 
     pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
         self.summary = Some(summary.into());
+        self
+    }
+
+    pub fn with_detail(mut self, line: impl Into<String>) -> Self {
+        self.details.push(line.into());
         self
     }
 
@@ -54,6 +67,11 @@ impl ConfirmDelete {
 
     pub fn without_checkbox(mut self) -> Self {
         self.show_checkbox = false;
+        self
+    }
+
+    pub fn with_checkbox_label(mut self, label: impl Into<String>) -> Self {
+        self.checkbox_label = Some(label.into());
         self
     }
 
@@ -88,6 +106,16 @@ impl ConfirmDelete {
             )));
         }
 
+        if !self.details.is_empty() {
+            content.push(Line::from(""));
+            for line in &self.details {
+                content.push(Line::from(Span::styled(
+                    format!("  • {}", line),
+                    Style::default().fg(theme.fg_dim),
+                )));
+            }
+        }
+
         for warning in &self.warnings {
             content.push(Line::from(Span::styled(
                 format!("⚠ {}", warning),
@@ -103,9 +131,13 @@ impl ConfirmDelete {
             } else {
                 Style::default().fg(theme.fg)
             };
+            let label = self
+                .checkbox_label
+                .as_deref()
+                .unwrap_or("Also delete files from disk");
             content.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled(format!("{} Also delete files from disk", mark), style),
+                Span::styled(format!("{} {}", mark, label), style),
             ]));
         }
 

@@ -84,7 +84,7 @@ impl App {
                 return AppAction::None;
             }
         }
-        let action = self.library.handle_key(key, &self.conn);
+        let action = self.library.handle_key(key, &self.conn, &self.settings);
         self.process_library_action(action)
     }
 
@@ -109,6 +109,11 @@ impl App {
                     Some(self.search.value.as_str())
                 };
                 self.library.load(&self.conn, query).ok();
+                AppAction::None
+            }
+            crate::tui::views::library::LibraryAction::Deleted => {
+                self.library.load(&self.conn, None).ok();
+                self.refresh_counts();
                 AppAction::None
             }
             crate::tui::views::library::LibraryAction::OrganizeAll => {
@@ -242,6 +247,36 @@ impl App {
                 self.switch_view(AppView::Editor { track_id: id });
                 AppAction::None
             }
+            crate::tui::views::detail::DetailAction::Deleted => {
+                // Reload view data; if the album itself is gone (all tracks
+                // removed with delete_files or the last track), drop to library.
+                match self.view.clone() {
+                    AppView::AlbumDetail { album_id } => {
+                        if queries::get_album(&self.conn, album_id)
+                            .map(|o| o.is_none())
+                            .unwrap_or(true)
+                        {
+                            self.switch_view(AppView::Library);
+                        } else {
+                            let prev = self.album_detail.selected;
+                            self.album_detail.load(&self.conn, album_id).ok();
+                            if prev < self.album_detail.tracks.len() {
+                                self.album_detail.selected = prev;
+                            }
+                        }
+                    }
+                    AppView::LooseTracks => {
+                        let prev = self.album_detail.selected;
+                        self.album_detail.load_loose(&self.conn).ok();
+                        if prev < self.album_detail.tracks.len() {
+                            self.album_detail.selected = prev;
+                        }
+                    }
+                    _ => {}
+                }
+                self.refresh_counts();
+                AppAction::None
+            }
             crate::tui::views::detail::DetailAction::Organize => {
                 // Compute organize plan for the current album (or loose tracks)
                 let filter = if let Some(album) = &self.album_detail.album {
@@ -280,13 +315,20 @@ impl App {
             self.switch_view(AppView::Library);
             return AppAction::None;
         }
-        let action = self.collection_detail.handle_key(
-            key,
-            &self.conn,
-            &self.settings.library.music_dir,
-        );
+        let action =
+            self.collection_detail
+                .handle_key(key, &self.conn, &self.settings);
         match action {
             crate::tui::views::collections::CollectionDetailAction::None => AppAction::None,
+            crate::tui::views::collections::CollectionDetailAction::Deleted => {
+                if let AppView::CollectionDetail { collection_id } = self.view {
+                    self.collection_detail
+                        .load(&self.conn, collection_id, &self.settings.library.music_dir)
+                        .ok();
+                }
+                self.refresh_counts();
+                AppAction::None
+            }
             crate::tui::views::collections::CollectionDetailAction::EditTrack(id) => {
                 self.editor_return_to = Some(self.view.clone());
                 self.switch_view(AppView::Editor { track_id: id });

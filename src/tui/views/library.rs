@@ -8,11 +8,15 @@ use rusqlite::Connection;
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::config::Settings;
+use crate::core::organizer;
 use crate::db::queries::{self, AlbumRow, AlbumSort};
 use crate::error::Result;
 use crate::tui::keybindings as keys;
+use crate::tui::selection::Selection;
 use crate::tui::themes::Theme;
 use crate::tui::widgets::add_to_collection::{AddToCollectionPopup, PopupAction};
+use crate::tui::widgets::confirm_delete::{ConfirmAction, ConfirmDelete};
 
 pub enum LibraryAction {
     None,
@@ -20,6 +24,8 @@ pub enum LibraryAction {
     OpenLoose,
     SortChanged,
     OrganizeAll,
+    /// User confirmed a delete — caller should reload library data and refresh counts.
+    Deleted,
 }
 
 pub struct LibraryView {
@@ -39,6 +45,11 @@ pub struct LibraryView {
     /// `j` at the bottom doesn't let the counter drift past the content.
     pub organize_max_scroll: usize,
     pub notice: Option<String>,
+    /// Album ids the user has marked for batch actions (e.g. delete). Keyed
+    /// by id so sort/filter don't lose the set.
+    pub selection: Selection,
+    /// Pending delete — built by `d` and consumed by the confirm popup.
+    pub pending_delete: Option<(organizer::DeletePlan, ConfirmDelete)>,
 }
 
 impl Default for LibraryView {
@@ -57,12 +68,16 @@ impl Default for LibraryView {
             organize_scroll: 0,
             organize_max_scroll: 0,
             notice: None,
+            selection: Selection::default(),
+            pending_delete: None,
         }
     }
 }
 
 impl LibraryView {
     pub fn load(&mut self, conn: &Connection, search: Option<&str>) -> Result<()> {
+        self.selection.clear();
+        self.pending_delete = None;
         if let Some(query) = search
             && !query.is_empty() {
                 self.albums = queries::search_albums(conn, query, 500)?;
@@ -97,10 +112,61 @@ impl LibraryView {
     }
 
     pub fn has_popup(&self) -> bool {
-        self.add_to_collection.is_some() || self.organize_plan.is_some()
+        self.add_to_collection.is_some()
+            || self.organize_plan.is_some()
+            || self.pending_delete.is_some()
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent, conn: &Connection) -> LibraryAction {
+    pub fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        conn: &Connection,
+        settings: &Settings,
+    ) -> LibraryAction {
+        // Delete-confirm popup captures input
+        if let Some((plan, popup)) = &mut self.pending_delete {
+            match popup.handle_key(key) {
+                ConfirmAction::None => return LibraryAction::None,
+                ConfirmAction::Cancel => {
+                    self.pending_delete = None;
+                    return LibraryAction::None;
+                }
+                ConfirmAction::Confirm { delete_files } => {
+                    let cleanup = organizer::cleanup_roots(settings);
+                    let plan = plan.clone();
+                    self.pending_delete = None;
+                    match organizer::apply_delete_plan(conn, &plan, delete_files, &cleanup) {
+                        Ok(report) => {
+                            let mut parts = Vec::new();
+                            if report.albums_deleted > 0 {
+                                parts.push(format!("{} album(s)", report.albums_deleted));
+                            }
+                            if report.tracks_deleted > 0 {
+                                parts.push(format!("{} track(s)", report.tracks_deleted));
+                            }
+                            if report.files_deleted > 0 {
+                                parts.push(format!("{} file(s)", report.files_deleted));
+                            }
+                            if report.dirs_cleaned > 0 {
+                                parts.push(format!("{} dirs cleaned", report.dirs_cleaned));
+                            }
+                            let msg = if parts.is_empty() {
+                                "Nothing to delete".to_string()
+                            } else {
+                                format!("Deleted: {}", parts.join(", "))
+                            };
+                            self.notice = Some(msg);
+                        }
+                        Err(e) => {
+                            self.notice = Some(format!("Delete failed: {}", e));
+                        }
+                    }
+                    self.selection.clear();
+                    return LibraryAction::Deleted;
+                }
+            }
+        }
+
         // Organize popup captures input
         if self.organize_plan.is_some() {
             if keys::is_confirm(&key) {
@@ -199,6 +265,54 @@ impl LibraryView {
             return LibraryAction::None;
         }
 
+        if keys::is_back(&key) && !self.selection.is_empty() {
+            self.selection.clear();
+            return LibraryAction::None;
+        }
+
+        if keys::is_toggle_select(&key) {
+            // Only albums can be marked; the [loose] virtual row is skipped.
+            if self.selected < self.albums.len() {
+                let id = self.albums[self.selected].id;
+                self.selection.toggle(id);
+                // Advance cursor for quick range-marking.
+                if count > 0 && self.selected < count - 1 {
+                    self.selected += 1;
+                }
+            }
+            return LibraryAction::None;
+        }
+
+        if keys::is_delete(&key) {
+            let ids: Vec<i64> = if self.selection.is_empty() {
+                if self.selected < self.albums.len() {
+                    vec![self.albums[self.selected].id]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                self.selection.ids()
+            };
+            if ids.is_empty() {
+                return LibraryAction::None;
+            }
+            let cleanup = organizer::cleanup_roots(settings);
+            match organizer::plan_delete_albums(conn, &ids, &cleanup) {
+                Ok(plan) => {
+                    if plan.is_empty() {
+                        self.notice = Some("Nothing to delete".to_string());
+                        return LibraryAction::None;
+                    }
+                    let popup = build_album_confirm(&plan, ids.len());
+                    self.pending_delete = Some((plan, popup));
+                }
+                Err(e) => {
+                    self.notice = Some(format!("Delete plan failed: {}", e));
+                }
+            }
+            return LibraryAction::None;
+        }
+
         if keys::is_confirm(&key) {
             if self.selected < self.albums.len() {
                 return LibraryAction::OpenAlbum(self.albums[self.selected].id);
@@ -289,8 +403,14 @@ impl LibraryView {
                     .map(|y| y.to_string())
                     .unwrap_or_default();
                 let fmt = abbreviate_formats(&album.formats);
+                let gutter_span = if self.selection.contains(album.id) {
+                    Span::styled("▎", Style::default().fg(theme.accent))
+                } else {
+                    Span::raw(" ")
+                };
 
                 Row::new(vec![
+                    Cell::from(gutter_span),
                     Cell::from(truncate_str(artist, 24)),
                     Cell::from(truncate_str(&album.title, 30)),
                     Cell::from(year),
@@ -300,6 +420,7 @@ impl LibraryView {
             } else {
                 // [loose] entry
                 Row::new(vec![
+                    Cell::from(" "),
                     Cell::from(Span::styled(
                         "[loose]",
                         Style::default().fg(theme.fg_muted),
@@ -329,6 +450,7 @@ impl LibraryView {
         }
 
         let header = Row::new(vec![
+            Cell::from(" "),
             Cell::from(Span::styled("Artist", Style::default().fg(theme.accent))),
             Cell::from(Span::styled("Album", Style::default().fg(theme.accent))),
             Cell::from(Span::styled("Year", Style::default().fg(theme.accent))),
@@ -343,6 +465,7 @@ impl LibraryView {
         let table = Table::new(
             rows,
             [
+                ratatui::layout::Constraint::Length(1),
                 ratatui::layout::Constraint::Percentage(25),
                 ratatui::layout::Constraint::Percentage(30),
                 ratatui::layout::Constraint::Length(6),
@@ -365,6 +488,11 @@ impl LibraryView {
 
         // Add-to-collection popup overlay
         if let Some(popup) = &self.add_to_collection {
+            popup.render(frame, area, theme);
+        }
+
+        // Delete-confirm popup overlay
+        if let Some((_, popup)) = &self.pending_delete {
             popup.render(frame, area, theme);
         }
 
@@ -463,6 +591,41 @@ fn abbreviate_formats(formats: &str) -> String {
     } else {
         "mix".to_string()
     }
+}
+
+fn build_album_confirm(plan: &organizer::DeletePlan, album_count: usize) -> ConfirmDelete {
+    let primary = if album_count == 1 {
+        "Delete 1 album?".to_string()
+    } else {
+        format!("Delete {} albums?", album_count)
+    };
+    let summary = format!(
+        "{} track(s), {} file(s) on disk",
+        plan.track_ids.len(),
+        plan.deletable_file_count(),
+    );
+    let mut popup = ConfirmDelete::new("Confirm delete", primary).with_summary(summary);
+    for line in &plan.album_summary_lines {
+        popup = popup.with_detail(line.clone());
+    }
+    if plan.additional_albums > 0 {
+        popup = popup.with_detail(format!("…and {} more album(s)", plan.additional_albums));
+    }
+    if !plan.files_outside_managed.is_empty() {
+        popup = popup.with_warning(format!(
+            "{} file(s) outside managed roots will NOT be deleted",
+            plan.files_outside_managed.len()
+        ));
+    }
+    if plan.deletable_file_count() == 0 {
+        popup = popup.without_checkbox();
+    } else {
+        popup = popup.with_checkbox_label(format!(
+            "Also delete {} file(s) from disk",
+            plan.deletable_file_count()
+        ));
+    }
+    popup
 }
 
 pub fn format_duration_ms(ms: i64) -> String {

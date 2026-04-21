@@ -649,6 +649,104 @@ pub fn delete_track(conn: &Connection, track_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Delete an album row. Does NOT delete its tracks — caller is responsible for
+/// handling them first. The `album_id` FK on `tracks` enforces "no action", so
+/// with `PRAGMA foreign_keys=ON` this call will fail if any track still
+/// references the album.
+pub fn delete_album(conn: &Connection, album_id: i64) -> Result<()> {
+    conn.execute("DELETE FROM albums WHERE id = ?1", [album_id])?;
+    Ok(())
+}
+
+/// Info about a track needed when computing a delete plan — the primary file
+/// path, album (if any), and every collection-copy path the track owns.
+#[derive(Debug, Clone)]
+pub struct TrackDeleteInfo {
+    pub track_id: i64,
+    pub title: String,
+    pub file_path: String,
+    pub album_id: Option<i64>,
+    /// Every `collection_tracks.collection_file_path` this track has set.
+    pub collection_copies: Vec<String>,
+}
+
+/// Load delete-planning info for a set of track ids.
+pub fn get_tracks_delete_info(
+    conn: &Connection,
+    track_ids: &[i64],
+) -> Result<Vec<TrackDeleteInfo>> {
+    if track_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = track_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT id, title, file_path, album_id FROM tracks WHERE id IN ({})",
+        placeholders
+    );
+    let params: Vec<&dyn rusqlite::ToSql> =
+        track_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params.as_slice(), |row| {
+        Ok(TrackDeleteInfo {
+            track_id: row.get(0)?,
+            title: row.get(1)?,
+            file_path: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            album_id: row.get(3)?,
+            collection_copies: Vec::new(),
+        })
+    })?;
+    let mut result: Vec<TrackDeleteInfo> = Vec::new();
+    for r in rows {
+        result.push(r?);
+    }
+
+    let mut cstmt = conn.prepare(
+        "SELECT collection_file_path FROM collection_tracks
+         WHERE track_id = ?1 AND collection_file_path IS NOT NULL",
+    )?;
+    for info in &mut result {
+        let copies = cstmt.query_map([info.track_id], |row| row.get::<_, String>(0))?;
+        for c in copies {
+            info.collection_copies.push(c?);
+        }
+    }
+    Ok(result)
+}
+
+/// List track ids belonging to a set of albums.
+pub fn list_tracks_for_albums(conn: &Connection, album_ids: &[i64]) -> Result<Vec<i64>> {
+    if album_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = album_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT id FROM tracks WHERE album_id IN ({})",
+        placeholders
+    );
+    let params: Vec<&dyn rusqlite::ToSql> =
+        album_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, i64>(0))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Short display label for an album: (artist, title).
+pub fn get_album_label(conn: &Connection, album_id: i64) -> Result<Option<(String, String)>> {
+    let row = conn
+        .query_row(
+            "SELECT COALESCE(album_artist, '(unknown)'), title FROM albums WHERE id = ?1",
+            [album_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .ok();
+    Ok(row)
+}
+
 /// Update a track with MusicBrainz metadata.
 pub fn update_track_mb(
     conn: &Connection,

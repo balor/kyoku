@@ -59,3 +59,11 @@ pub fn is_refresh(key: &KeyEvent) -> bool {
     key.code == KeyCode::F(5)
         || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r'))
 }
+
+pub fn is_toggle_select(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char(' ')
+}
+
+pub fn is_delete(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('d')
+}
