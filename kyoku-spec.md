@@ -86,70 +86,6 @@ These are the specific frustrations this project aims to solve:
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Crate / Module Layout
-
-```
-kyoku/
-├── .mise.toml           # Rust toolchain version (managed by mise)
-├── justfile             # Task runner (just) — all dev commands
-├── Cargo.toml
-├── src/
-│   ├── main.rs              # Entry point, CLI dispatch
-│   ├── cli/
-│   │   ├── mod.rs           # clap App definition
-│   │   ├── import.rs        # `kyoku import` command
-│   │   └── setup.rs         # `kyoku setup` interactive wizard
-│   ├── tui/
-│   │   ├── mod.rs           # TUI app struct, main loop
-│   │   ├── app.rs           # App state, event handling
-│   │   ├── views/
-│   │   │   ├── library.rs   # Library browser view
-│   │   │   ├── import.rs    # Import wizard view
-│   │   │   ├── detail.rs    # Album/track detail view
-│   │   │   ├── search.rs    # Search/filter view
-│   │   │   ├── edit.rs      # Tag editor view
-│   │   │   └── sync.rs     # Sync wizard view (device sync)
-│   │   ├── widgets/
-│   │   │   ├── table.rs     # Sortable, filterable table
-│   │   │   ├── diff.rs      # Tag diff display
-│   │   │   ├── progress.rs  # Import progress bar
-│   │   │   └── input.rs     # Text input widget
-│   │   └── keybindings.rs   # Key mapping configuration
-│   │   └── themes.rs       # 4 built-in color themes
-│   ├── core/
-│   │   ├── mod.rs
-│   │   ├── library.rs       # Library operations (add, remove, query)
-│   │   ├── importer.rs      # Import pipeline (scan → match → tag → move)
-│   │   ├── tagger.rs        # Tag read/write abstraction over lofty
-│   │   ├── matcher.rs       # MusicBrainz matching logic
-│   │   ├── renamer.rs       # Path template engine
-│   │   ├── fingerprint.rs   # AcoustID/Chromaprint integration
-│   │   └── sync.rs          # Device sync logic (file diff, copy/delete, fatsort)
-│   ├── db/
-│   │   ├── mod.rs
-│   │   ├── schema.rs        # Table definitions, migrations
-│   │   ├── models.rs        # Rust structs ↔ DB rows
-│   │   └── queries.rs       # Prepared statements, search
-│   ├── config/
-│   │   ├── mod.rs
-│   │   ├── settings.rs      # Configuration struct + defaults
-│   │   └── paths.rs         # XDG path resolution
-│   ├── external/
-│   │   ├── mod.rs
-│   │   ├── musicbrainz.rs   # MB API wrapper (uses musicbrainz_rs)
-│   │   └── acoustid.rs      # AcoustID lookup
-│   └── error.rs             # Unified error types (thiserror)
-├── migrations/
-│   └── 001_initial.sql
-├── config/
-│   └── default.toml         # Default configuration
-└── tests/
-    ├── tag_reader_test.rs  # Integration tests for tag reading
-    └── fixtures/
-        ├── create_fixtures.rs  # Helper to generate test audio files
-        └── sample_library/     # Test audio files (short silence clips with tags)
-```
-
 ---
 
 ## 3. Technology Stack
@@ -290,60 +226,6 @@ CREATE INDEX IF NOT EXISTS idx_collection_tracks_coll ON collection_tracks(colle
 CREATE INDEX IF NOT EXISTS idx_collection_tracks_track ON collection_tracks(track_id);
 ```
 
-### Rust Models
-
-```rust
-// In db/models.rs
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Track {
-    pub id: Option<i64>,
-    pub album_id: Option<i64>,       // None = loose track (not part of any album)
-    pub title: String,
-    pub artist: Option<String>,       // Track artist (may differ from album artist)
-    pub track_number: Option<u32>,
-    pub disc_number: u32,
-    pub duration_ms: Option<u64>,
-    pub mbid: Option<String>,        // Optional — niche content won't have one
-    pub file_path: PathBuf,
-    pub file_format: AudioFormat,
-    pub bitrate: Option<u32>,
-    pub sample_rate: Option<u32>,
-    pub tag_status: TagStatus,
-    pub source_dir: Option<PathBuf>, // Preserved original directory context
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TagStatus {
-    Unmatched,   // Imported but not matched to MB — this is fine, not an error
-    Matched,     // Auto-matched via MB
-    Verified,    // User confirmed the match
-    Manual,      // User manually edited tags
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AlbumType {
-    Album, Compilation, Single, Ep, Soundtrack, Live, Other,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AudioFormat {
-    Mp3, Flac, Ogg, M4a, Wav, Wma, Ape, Opus, Aiff, Unknown(String),
-}
-
-/// A collection is a user-defined grouping orthogonal to albums.
-/// Use cases: "random MP3s from 2005", "DJ set recordings", "to-sort inbox",
-/// "my running playlist", "doujin music unsorted".
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Collection {
-    pub id: Option<i64>,
-    pub name: String,
-    pub description: Option<String>,
-    pub path_template: Option<String>,  // Override global path template
-    pub track_count: u32,               // Computed, not stored
-}
-```
-
 ---
 
 ## 5. Configuration
@@ -407,8 +289,7 @@ skip_duplicates = true
 write_tags = true
 
 [musicbrainz]
-# User agent for MusicBrainz API (required by their ToS)
-user_agent = "kyoku/0.1.0 (https://github.com/yourname/kyoku)"
+# User agent is hardcoded from CARGO_PKG_VERSION — not a config field.
 
 # Rate limiting (MB requires max 1 req/sec)
 rate_limit_ms = 1100
@@ -419,9 +300,8 @@ rate_limit_ms = 1100
 # Track titles are never remapped. Falls back to canonical when no alias matches.
 name_script = "native"
 
-[acoustid]
-# AcoustID API key (get one at https://acoustid.org/new-application)
-api_key = ""
+# [acoustid] — Milestone 8 (not yet wired up)
+# api_key = ""
 
 [ui]
 # TUI color scheme. 4 built-in themes.
@@ -446,40 +326,6 @@ kyoku ships with 4 built-in themes — 2 dark, 2 light. Each theme defines a con
 |-------|---------|-----------|
 | **Tokyo Night** | dark / light | Cool blue-purple, modern. The default. |
 | **Kanagawa** | wave (dark) / lotus (light) | Warm Japanese-inspired, muted sepia tones |
-
-#### Theme Data Structure
-
-Each theme is a Rust struct with named color slots. No hex strings in UI code — always reference semantic names.
-
-```rust
-pub struct Theme {
-    // Backgrounds
-    pub bg: Color,              // Main background
-    pub bg_alt: Color,          // Alternating rows, secondary panels
-    pub bg_highlight: Color,    // Hover/focus highlight
-    pub bg_selected: Color,     // Selected row
-
-    // Borders
-    pub border: Color,          // Default borders
-    pub border_bright: Color,   // Focused/active borders
-
-    // Text
-    pub fg: Color,              // Primary text
-    pub fg_dim: Color,          // Secondary/muted text
-    pub fg_muted: Color,        // Tertiary text, placeholders
-
-    // Semantic colors
-    pub accent: Color,          // Primary accent (links, active tab, focused element)
-    pub accent_alt: Color,      // Secondary accent (collections, alternate highlights)
-    pub green: Color,           // Success, verified, MB match accepted
-    pub yellow: Color,          // Warning, manual status, edits
-    pub red: Color,             // Error, deletion, strikethrough in diffs
-    pub cyan: Color,            // Info, matched status
-    pub orange: Color,          // Inbox count, attention
-}
-```
-
-The agent should define all 4 themes as `const` values in a `src/tui/themes.rs` module. Theme selection happens at startup from config, with no runtime overhead.
 
 ---
 
@@ -959,7 +805,7 @@ There are four templates in `[library]`, each used in a different situation by `
 |---------|----------|---------|
 | `path_template` | Multi-disc album tracks (album hierarchy) | `{album_artist}/{album} ({year})/{disc:0}-{track:02} {title}.{ext}` |
 | `path_template_single_disc` | Single-disc album tracks (album hierarchy) | `{album_artist}/{album} ({year})/{track:02} {title}.{ext}` |
-| `collection_path_template` | Collection copies (one per collection a track is in) | `Collections/{collection}/{album_artist} - {album} - {track:02} {title}.{ext}` |
+| `collection_path_template` | Collection copies (one per collection a track is in) | `Collections/{collection}/{track:02} {album_artist} - {title}.{ext}` |
 | `loose_path_template` | Loose tracks with no album and no collection | `_loose/{artist} - {title}.{ext}` |
 
 A collection can also have its own per-collection `path_template` (in the `collections` table) that overrides `collection_path_template` for that collection only.
@@ -1046,43 +892,6 @@ A single MB entity can have both a native-script primary name and one or more La
 
 ## 9. Error Handling Strategy
 
-### Error Types (thiserror)
-
-```rust
-#[derive(Debug, thiserror::Error)]
-pub enum KyokuError {
-    #[error("File not found: {path}")]
-    FileNotFound { path: PathBuf },
-    
-    #[error("Unsupported audio format: {ext}")]
-    UnsupportedFormat { ext: String },
-    
-    #[error("Tag read error for {path}: {source}")]
-    TagRead { path: PathBuf, #[source] source: lofty::LoftyError },
-    
-    #[error("Tag write error for {path}: {source}")]
-    TagWrite { path: PathBuf, #[source] source: lofty::LoftyError },
-    
-    #[error("Database error: {0}")]
-    Database(#[from] rusqlite::Error),
-    
-    #[error("MusicBrainz API error: {0}")]
-    MusicBrainz(String),
-    
-    #[error("AcoustID error: {0}")]
-    AcoustId(String),
-    
-    #[error("Template error: {message}")]
-    Template { message: String },
-    
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-    
-    #[error("Configuration error: {0}")]
-    Config(String),
-}
-```
-
 ### Principles
 - Never panic on user data (malformed tags, missing fields, bad filenames)
 - Collect errors per-file during batch operations, report summary at end
@@ -1154,13 +963,18 @@ pub enum KyokuError {
 - [x] `kyoku relocate --verify` — detect missing files
 - [x] Clean up empty directories after moves (recursive parent cleanup)
 - [x] `kyoku organize` TUI integration (`O` key — library: organize all, album detail: organize album; summary/detail views with scrollable per-file listing)
+- [x] Filesystem output honours `[musicbrainz] name_script` — artist dirs and album-title segments follow the Latin/native preference resolved at MB-fetch time (see Milestone 4)
 
-### Milestone 6: Polish & Robustness
-**Goal**: Production-quality for daily use.
+### Milestone 6: Deletion, Cover Art, Full Tag Editing
+**Goal**: Round out the core library-management surface.
 
-- [ ] Batch operations (select multiple albums in TUI)
-- [ ] Performance optimization for large libraries (lazy loading, virtual scrolling, pagination)
-- [ ] Comprehensive error recovery (partial import resumption)
+- [ ] Multi-select (`Space` toggles rows) in library and album-detail views
+- [ ] Batch delete of tracks / albums / collections with opt-in file deletion (keep-files is the confirm-popup default)
+- [ ] Album cover schema (`albums.cover_path`) + adopt sibling `cover.jpg` / `folder.jpg` on import
+- [ ] TUI album cover preview (kitty/iterm2/sixel with ASCII fallback)
+- [ ] Opt-in cover fetch from Cover Art Archive (`coverartarchive.org/release/{mbid}`)
+- [ ] Full tag view on album/track detail — every `lofty` frame, grouped by kind
+- [ ] Inline tag editor (add / edit / delete, multi-value preserved) respecting `[tagging] write_tags`
 
 ### Milestone 7: Device Sync
 **Goal**: One-shot sync your library to external devices — MP3 players, SD cards, USB drives — entirely from the TUI. No saved configuration; each sync is an interactive wizard. Device-first workflow: pick the device, not a directory.
@@ -1228,53 +1042,7 @@ pub enum KyokuError {
 
 ---
 
-## 12. Agent Instructions
-
-> These instructions are for the AI coding agent that will implement this application.
-
-### General Principles
-1. **Implement one milestone at a time.** Complete all items in a milestone before moving to the next.
-2. **Write tests alongside code.** Every public function should have at least one test. Run tests after each significant change.
-3. **Use the type system.** Prefer enums over strings for known value sets. Use `Option` for nullable fields. Use newtypes for IDs.
-4. **Handle errors explicitly.** Use `?` propagation with context. Never `unwrap()` in library code (only in tests and `main.rs` with proper error display).
-5. **Keep modules focused.** One responsibility per module. If a module exceeds ~300 lines, consider splitting.
-6. **Generate project tooling files** as part of Milestone 1 scaffolding: `.mise.toml` for Rust version pinning, `justfile` for task running (see Section 13). All dev commands should be discoverable via `just --list`.
-
-### Coding Standards
-- Follow `cargo fmt` and `cargo clippy` (with `#![warn(clippy::all)]`)
-- Use `/// Documentation comments` on all public items
-- Prefer `&str` over `String` in function parameters where ownership isn't needed
-- Use `impl AsRef<Path>` for path parameters
-- Async only where needed (network I/O). Internal operations are sync.
-- Log with `tracing` crate (structured logging, DEBUG level for development)
-
-### How to Implement the Import Pipeline
-This is the most complex feature. Break it down:
-
-1. **Scanner**: Takes a path, returns `Vec<ScannedFile>` (path + basic metadata)
-2. **TagReader**: Takes `ScannedFile`, returns `ImportCandidate` (all tag data)
-3. **AlbumGrouper**: Takes `Vec<ImportCandidate>`, returns `Vec<AlbumCandidate>` (grouped by directory + tags)
-4. **Matcher**: Takes `AlbumCandidate`, queries MB, returns `Vec<MatchResult>` (scored candidates)
-5. **DiffGenerator**: Takes `AlbumCandidate` + selected `MatchResult`, returns `TagDiff` (field-by-field changes)
-6. **Applier**: Takes `TagDiff` + user confirmation, writes tags + moves files + updates DB
-
-Each step is a separate function that can be tested independently.
-
-### Database Guidelines
-- Use prepared statements for all queries (no string interpolation)
-- Wrap multi-step operations in transactions
-- FTS5 triggers should auto-update on INSERT/UPDATE/DELETE
-- Schema version tracking for future migrations
-
-### TUI Architecture
-- Use the **component pattern**: each view is a struct implementing `Widget` + handling its own events
-- App state machine: `enum AppView { Library, Collections, AlbumDetail, CollectionDetail, Import, Editor, Sync, Help }`
-- Separate input handling from rendering (process events → update state → render)
-- Debounce search input (don't query DB on every keystroke, wait 150ms)
-- The TUI is the primary interface — it should feel polished and complete, not an afterthought bolted onto a CLI tool
-- Inbox indicator: on startup, run a lightweight scan of `inbox_dirs` to show pending file count
-
-### Explicit Behavior Rules
+## 12. Explicit Behavior Rules
 
 These are unambiguous rules for edge cases. Do not deviate from them.
 
@@ -1297,113 +1065,3 @@ These are unambiguous rules for edge cases. Do not deviate from them.
 17. **Sync with delete**: Always show a confirmation with the count and list of files that will be deleted before proceeding. Never auto-delete.
 18. **Config file required**: All commands except `setup`, `paths`, and `info` require a config file. If missing, print an error directing the user to run `kyoku setup`. Running bare `kyoku` without a config shows a welcome message suggesting `kyoku setup`.
 
----
-
-## 13. Development Environment
-
-### Prerequisites
-- [mise](https://mise.jdx.dev/) — manages tool versions (Rust, etc.)
-- [just](https://just.systems/) — command runner for project tasks
-- No other system dependencies (pure Rust stack, rusqlite uses `bundled` feature)
-- Runs on macOS, Linux, and Windows (WSL)
-
-### Setup
-
-```bash
-# Install mise (if not already installed)
-curl https://mise.run | sh
-
-# Clone and setup
-git clone https://github.com/yourname/kyoku.git
-cd kyoku
-mise install          # Installs Rust toolchain from .mise.toml
-just setup            # Install dev dependencies, run initial checks
-```
-
-### .mise.toml
-
-```toml
-[tools]
-rust = "1.94.1"
-```
-
-### justfile
-
-```just
-# Default: list available tasks
-default:
-    @just --list
-
-# Setup dev environment
-setup:
-    cargo fetch
-    cargo build
-    @echo "Ready. Run 'just run' to launch kyoku."
-
-# Build the project
-build:
-    cargo build
-
-# Build release binary
-release:
-    cargo build --release
-
-# Run kyoku TUI (default, no args)
-run *ARGS:
-    cargo run -- {{ARGS}}
-
-# Run all tests
-test:
-    cargo test
-
-# Run tests with output visible
-test-verbose:
-    cargo test -- --nocapture
-
-# Lint with clippy
-lint:
-    cargo clippy --all-targets -- -W clippy::all
-
-# Format code
-fmt:
-    cargo fmt
-
-# Check formatting without modifying
-fmt-check:
-    cargo fmt --check
-
-# Run all checks (lint + format + test)
-check: fmt-check lint test
-
-# Run with debug logging
-debug *ARGS:
-    RUST_LOG=debug cargo run -- {{ARGS}}
-
-# Dry-run import on a path
-import-preview PATH:
-    cargo run -- import --pretend {{PATH}}
-
-# Scan inbox directories
-scan:
-    cargo run -- scan
-
-# Show info about a file
-info PATH:
-    cargo run -- info {{PATH}}
-
-# Clean build artifacts
-clean:
-    cargo clean
-```
-
-### Workflow
-
-```bash
-just                   # List all available tasks
-just run               # Launch TUI
-just run import ~/Music/new/   # Import command
-just test              # Run tests
-just check             # Full CI check (fmt + lint + test)
-just debug             # Run with RUST_LOG=debug
-just import-preview ~/Downloads/album/  # Dry-run import
-```
