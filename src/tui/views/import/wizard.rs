@@ -614,7 +614,10 @@ impl ImportView {
             self.mb_rx = Some(rx);
         }
         if self.mb_client.is_none() {
-            self.mb_client = Some(Arc::new(Mutex::new(MbClient::new(self.rate_limit_ms))));
+            self.mb_client = Some(Arc::new(Mutex::new(MbClient::new(
+                self.rate_limit_ms,
+                self.name_script,
+            ))));
         }
     }
 
@@ -641,11 +644,12 @@ impl ImportView {
         self.import_progress = (0, total_tracks);
 
         let rate_limit_ms = self.rate_limit_ms;
+        let name_script = self.name_script;
         let (tx, rx) = mpsc::channel();
         self.import_rx = Some(rx);
 
         std::thread::spawn(move || {
-            run_import_worker(groups_to_import, user_skipped, rate_limit_ms, tx);
+            run_import_worker(groups_to_import, user_skipped, rate_limit_ms, name_script, tx);
         });
     }
 }

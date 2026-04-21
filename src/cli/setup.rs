@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use inquire::{Confirm, Select, Text};
 
-use crate::config::{self, Settings};
+use crate::config::{self, Settings, settings::NameScriptPreference};
 
 pub fn run(current: Settings) -> anyhow::Result<()> {
     let config_path = config::paths::config_file();
@@ -68,6 +68,28 @@ pub fn run(current: Settings) -> anyhow::Result<()> {
         }
         inbox_dirs.push(dir);
     }
+
+    // Name script preference
+    println!();
+    println!("Script preference for artist & album names from MusicBrainz.");
+    println!("Affects what gets written to tags, DB, and filenames when MB");
+    println!("returns both a native-script name and a Latin-script alias");
+    println!("(e.g. ヨルシカ vs Yorushika, 花冷え。 vs HANABIE.).");
+    println!("Track titles are never remapped. Falls back to canonical when");
+    println!("no alias matches.");
+    println!();
+    let scripts = vec![
+        "native — use MB's canonical name (default)",
+        "latin  — prefer Latin-script alias when available",
+    ];
+    let script_default_idx = match current.musicbrainz.name_script {
+        NameScriptPreference::Native => 0,
+        NameScriptPreference::Latin => 1,
+    };
+    let selected_script = Select::new("Name script:", scripts)
+        .with_starting_cursor(script_default_idx)
+        .prompt()?;
+    let name_script = selected_script.split(' ').next().unwrap_or("native");
 
     // Theme
     println!();
@@ -136,6 +158,8 @@ write_tags = true
 [musicbrainz]
 user_agent = "kyoku/0.1.0 (https://github.com/yourname/kyoku)"
 rate_limit_ms = 1100
+# "native" keeps MB canonical names; "latin" prefers romanised alias when present.
+name_script = "{name_script}"
 
 [acoustid]
 # Get a key at https://acoustid.org/new-application

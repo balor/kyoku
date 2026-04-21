@@ -3,6 +3,7 @@
 
 use std::sync::mpsc;
 
+use crate::config::settings::NameScriptPreference;
 use crate::core::tagger;
 use crate::db::queries;
 use crate::external::musicbrainz::MbClient;
@@ -13,6 +14,7 @@ pub(super) fn run_import_worker(
     groups_to_import: Vec<ImportGroup>,
     user_skipped: u32,
     rate_limit_ms: u64,
+    name_script: NameScriptPreference,
     tx: mpsc::Sender<ImportMessage>,
 ) {
     let conn = match crate::db::open_database(crate::config::paths::database_file()) {
@@ -33,7 +35,7 @@ pub(super) fn run_import_worker(
 
     // Fetch full release data for MB-matched groups (search results don't
     // include track listings — we need them for per-track metadata).
-    let mut mb_client = MbClient::new(rate_limit_ms);
+    let mut mb_client = MbClient::new(rate_limit_ms, name_script);
 
     {
         let _ = tx.send(ImportMessage::Progress(done, total_tracks));

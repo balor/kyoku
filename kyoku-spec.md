@@ -413,6 +413,12 @@ user_agent = "kyoku/0.1.0 (https://github.com/yourname/kyoku)"
 # Rate limiting (MB requires max 1 req/sec)
 rate_limit_ms = 1100
 
+# Preferred script for artist & album names written from MusicBrainz matches.
+#   "native" — use MB's canonical credit/title (default)
+#   "latin"  — prefer Latin-script alias (e.g. "Yorushika" over "ヨルシカ")
+# Track titles are never remapped. Falls back to canonical when no alias matches.
+name_script = "native"
+
 [acoustid]
 # AcoustID API key (get one at https://acoustid.org/new-application)
 api_key = ""
@@ -1020,6 +1026,9 @@ This is a first-class concern, not an afterthought. Every layer of the applicati
 - Use `unicode-segmentation` crate for grapheme-cluster-aware truncation.
 - Test TUI rendering with mixed Latin + CJK content in the same table row.
 
+### Script preference for MB-derived names
+A single MB entity can have both a native-script primary name and one or more Latin-script aliases. Users differ on which they want on disk — JP fans typically want `ヨルシカ` / `花冷え。`; Latin-library users want `Yorushika` / `HANABIE.`. The `[musicbrainz] name_script` setting (`native` | `latin`) drives a post-fetch alias resolver that rewrites `MbRelease.artist` and `MbRelease.title` before they enter the DB/tag pipeline. Scope is deliberately limited to artist + album title — track titles ride through unchanged because MB's alias coverage at the recording level is sparse. When no alias matches the preference, the canonical credit name is kept (no synthesised romanisation). Per-artist alias responses are cached on the `MbClient` for the lifetime of an import session so a multi-release import of the same artist pays the `/artist/{mbid}?inc=aliases` cost only once.
+
 ### Sorting
 - Use ICU-aware collation for sorting when possible. At minimum, case-insensitive sorting that handles Unicode correctly.
 - Consider the `icu_collator` crate or simpler approaches like lowercasing with `str::to_lowercase()` (which handles Unicode case folding correctly in Rust).
@@ -1131,6 +1140,7 @@ pub enum KyokuError {
 - [x] Import wizard MB matching integration (TUI) — scan → match → review with candidates → import
 - [x] Tag writing (write matched data back to files via lofty) — `tagger::write_tags()`
 - [x] Config cleanup: hardcoded user agent from CARGO_PKG_VERSION, removed from config
+- [x] Configurable script preference for MB-derived artist/album names (`[musicbrainz] name_script = "native" | "latin"`) — fetches MB aliases and picks the preferred variant at commit time, with per-artist alias caching to stay within MB's rate limit.
 - [ ] `--pretend` mode for all mutating commands
 
 ### Milestone 5: File Organization + Library Management

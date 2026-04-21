@@ -46,6 +46,12 @@ user_agent = "kyoku/0.1.0 (https://github.com/yourname/kyoku)"
 # Rate limiting (MB requires max 1 req/sec)
 rate_limit_ms = 1100
 
+# Preferred script for artist & album names written from MusicBrainz matches.
+#   "native" — use MB's canonical credit/title (default)
+#   "latin"  — prefer Latin-script alias (e.g. "Yorushika" over "ヨルシカ")
+# Track titles are never remapped. Falls back to canonical when no alias matches.
+name_script = "native"
+
 [acoustid]
 # AcoustID API key (get one at https://acoustid.org/new-application)
 api_key = ""

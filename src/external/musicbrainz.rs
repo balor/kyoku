@@ -1,8 +1,11 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+use crate::config::settings::NameScriptPreference;
 use crate::error::Result;
+use crate::external::name_preference::{AliasKind, MbAlias, pick_preferred_name};
 
 const USER_AGENT: &str =
     concat!("kyoku/", env!("CARGO_PKG_VERSION"), " (https://github.com/kyoku-project/kyoku)");
@@ -37,10 +40,15 @@ pub struct MbClient {
     client: reqwest::blocking::Client,
     rate_limit: Duration,
     last_request: Option<Instant>,
+    name_script: NameScriptPreference,
+    /// Per-artist alias cache keyed by MBID. Shared across releases in one
+    /// session so a multi-release import of the same artist pays the
+    /// `/artist/{mbid}?inc=aliases` cost only once.
+    artist_alias_cache: HashMap<String, Vec<MbAlias>>,
 }
 
 impl MbClient {
-    pub fn new(rate_limit_ms: u64) -> Self {
+    pub fn new(rate_limit_ms: u64, name_script: NameScriptPreference) -> Self {
         let client = reqwest::blocking::Client::builder()
             .user_agent(USER_AGENT)
             .timeout(Duration::from_secs(15))
@@ -51,6 +59,8 @@ impl MbClient {
             client,
             rate_limit: Duration::from_millis(rate_limit_ms),
             last_request: None,
+            name_script,
+            artist_alias_cache: HashMap::new(),
         }
     }
 
@@ -281,9 +291,17 @@ impl MbClient {
     }
 
     /// Fetch a specific release with full track listing.
+    ///
+    /// When `name_script = Latin`, applies the preferred-name resolver to
+    /// the release title and artist-credit strings (including per-track
+    /// artist credits when they differ from the release credit). Track
+    /// titles are intentionally left alone — MB's recording-level alias
+    /// coverage is too sparse for a meaningful preference. Release-level
+    /// aliases come in via `inc=aliases`; per-artist aliases need a
+    /// separate `/artist/{mbid}` lookup and are cached on the client.
     pub fn fetch_release(&mut self, mbid: &str) -> Result<MbRelease> {
         let url = format!(
-            "{}/release/{}?inc=recordings+artists+labels&fmt=json",
+            "{}/release/{}?inc=recordings+artists+labels+aliases&fmt=json",
             MB_BASE, mbid,
         );
 
@@ -296,7 +314,103 @@ impl MbClient {
             ))
         })?;
 
-        Ok(parse_full_release(raw))
+        let parsed = parse_full_release(&raw);
+        let mut release = parsed.release;
+
+        if self.name_script == NameScriptPreference::Native {
+            return Ok(release);
+        }
+
+        // Latin preference — resolve release title + release artist + track
+        // artists against alias tiers. Only fetch per-artist aliases when
+        // the canonical name actually warrants a lookup (avoids hitting
+        // `/artist/{mbid}` for already-Latin credits).
+        release.title = pick_preferred_name(
+            &release.title,
+            None,
+            &parsed.title_aliases,
+            self.name_script,
+            AliasKind::Release,
+        );
+
+        let pref = self.name_script;
+
+        if let Some(artist_mbid) = parsed.release_artist_mbid.as_deref() {
+            let aliases = self.get_artist_aliases(artist_mbid, &release.artist)?;
+            release.artist = pick_preferred_name(
+                &release.artist,
+                parsed.release_artist_sort.as_deref(),
+                aliases,
+                pref,
+                AliasKind::Artist,
+            );
+        }
+
+        for (idx, track) in release.tracks.iter_mut().enumerate() {
+            let Some(raw_artist) = track.artist.clone() else {
+                continue;
+            };
+            let mbid_opt = parsed
+                .track_artist_mbids
+                .get(idx)
+                .and_then(|o| o.as_deref());
+            let sort = parsed
+                .track_artist_sorts
+                .get(idx)
+                .and_then(|o| o.as_deref());
+            let Some(mbid) = mbid_opt else { continue };
+            let aliases = self.get_artist_aliases(mbid, &raw_artist)?;
+            track.artist = Some(pick_preferred_name(
+                &raw_artist,
+                sort,
+                aliases,
+                pref,
+                AliasKind::Artist,
+            ));
+        }
+
+        Ok(release)
+    }
+
+    /// Return cached artist aliases, fetching on miss. Avoids the network
+    /// call entirely when the canonical name is already pure Latin — the
+    /// resolver would short-circuit to `canonical` anyway, so the request
+    /// would be wasted rate-limit budget.
+    fn get_artist_aliases(&mut self, mbid: &str, canonical: &str) -> Result<&[MbAlias]> {
+        if crate::external::matching::is_pure_latin(canonical) {
+            // Still cache an empty slot so repeated lookups don't re-check.
+            self.artist_alias_cache
+                .entry(mbid.to_string())
+                .or_default();
+            return Ok(self
+                .artist_alias_cache
+                .get(mbid)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]));
+        }
+        if !self.artist_alias_cache.contains_key(mbid) {
+            let aliases = self.fetch_artist_aliases(mbid)?;
+            self.artist_alias_cache.insert(mbid.to_string(), aliases);
+        }
+        Ok(self
+            .artist_alias_cache
+            .get(mbid)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]))
+    }
+
+    /// Fetch the alias list for one artist MBID.
+    fn fetch_artist_aliases(&mut self, mbid: &str) -> Result<Vec<MbAlias>> {
+        let url = format!("{}/artist/{}?inc=aliases&fmt=json", MB_BASE, mbid);
+        let body = self.get_json_body(&url, "artist-aliases")?;
+        let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+            crate::error::KyokuError::External(format!(
+                "MB artist-aliases parse failed: {}: body={}",
+                e,
+                truncate_for_log(&body, 200),
+            ))
+        })?;
+        Ok(parse_aliases(&v))
     }
 
     /// GET `url` and return the response body as text. Auto-retries once on
@@ -506,13 +620,28 @@ fn parse_search_release(r: MbSearchRelease) -> MbRelease {
     }
 }
 
-fn parse_full_release(v: serde_json::Value) -> MbRelease {
+/// Full-release parse result plus the auxiliary data the caller needs to
+/// apply the script-preference resolver. `release` is the naive MB payload
+/// with canonical names in place; fields below carry the alias payload and
+/// per-credit MBIDs used to fetch per-artist alias lists on demand.
+struct ParsedFullRelease {
+    release: MbRelease,
+    title_aliases: Vec<MbAlias>,
+    release_artist_mbid: Option<String>,
+    release_artist_sort: Option<String>,
+    /// Same index as `release.tracks`. MBID of the track's first artist
+    /// credit when present; `None` when MB didn't expose one.
+    track_artist_mbids: Vec<Option<String>>,
+    /// Parallel vec with `sort-name` per track artist credit.
+    track_artist_sorts: Vec<Option<String>>,
+}
+
+fn parse_full_release(v: &serde_json::Value) -> ParsedFullRelease {
     let id = v["id"].as_str().unwrap_or("").to_string();
     let title = v["title"].as_str().unwrap_or("").to_string();
 
-    let artist = v["artist-credit"]
-        .as_array()
-        .and_then(|ac| ac.first())
+    let first_credit = v["artist-credit"].as_array().and_then(|ac| ac.first());
+    let artist = first_credit
         .and_then(|c| {
             c["name"]
                 .as_str()
@@ -520,6 +649,12 @@ fn parse_full_release(v: serde_json::Value) -> MbRelease {
         })
         .unwrap_or("")
         .to_string();
+    let release_artist_mbid = first_credit
+        .and_then(|c| c["artist"]["id"].as_str())
+        .map(|s| s.to_string());
+    let release_artist_sort = first_credit
+        .and_then(|c| c["artist"]["sort-name"].as_str())
+        .map(|s| s.to_string());
 
     // Same year fallback chain as parse_search_release — direct release
     // lookups populate more fields than search but can still be missing
@@ -548,6 +683,8 @@ fn parse_full_release(v: serde_json::Value) -> MbRelease {
         .map(|s| s.to_string());
 
     let mut tracks = Vec::new();
+    let mut track_artist_mbids: Vec<Option<String>> = Vec::new();
+    let mut track_artist_sorts: Vec<Option<String>> = Vec::new();
     let mut track_count = 0u32;
 
     if let Some(media) = v["media"].as_array() {
@@ -557,10 +694,15 @@ fn parse_full_release(v: serde_json::Value) -> MbRelease {
                     track_count += 1;
                     let position = t["position"].as_u64().unwrap_or(0) as u32;
                     let t_title = t["title"].as_str().unwrap_or("").to_string();
-                    let t_artist = t["artist-credit"]
-                        .as_array()
-                        .and_then(|ac| ac.first())
+                    let first_tc = t["artist-credit"].as_array().and_then(|ac| ac.first());
+                    let t_artist = first_tc
                         .and_then(|c| c["name"].as_str().or(c["artist"]["name"].as_str()))
+                        .map(|s| s.to_string());
+                    let t_artist_mbid = first_tc
+                        .and_then(|c| c["artist"]["id"].as_str())
+                        .map(|s| s.to_string());
+                    let t_artist_sort = first_tc
+                        .and_then(|c| c["artist"]["sort-name"].as_str())
                         .map(|s| s.to_string());
                     let duration_ms = t["length"].as_u64();
                     let recording_id = t["recording"]["id"]
@@ -575,23 +717,49 @@ fn parse_full_release(v: serde_json::Value) -> MbRelease {
                         duration_ms,
                         recording_id,
                     });
+                    track_artist_mbids.push(t_artist_mbid);
+                    track_artist_sorts.push(t_artist_sort);
                 }
             }
         }
     }
 
-    MbRelease {
-        id,
-        title,
-        artist,
-        year,
-        country,
-        label,
-        track_count,
-        tracks,
-        api_score: 100,
-        release_group_id,
+    let title_aliases = parse_aliases(v);
+
+    ParsedFullRelease {
+        release: MbRelease {
+            id,
+            title,
+            artist,
+            year,
+            country,
+            label,
+            track_count,
+            tracks,
+            api_score: 100,
+            release_group_id,
+        },
+        title_aliases,
+        release_artist_mbid,
+        release_artist_sort,
+        track_artist_mbids,
+        track_artist_sorts,
     }
+}
+
+/// Pull the `aliases` array off any MB JSON object (release, artist, …) and
+/// deserialise it into `MbAlias` values. Missing/null field yields an empty
+/// vec — MB returns `aliases: []` for entities with no alternates anyway,
+/// so callers don't need to distinguish.
+fn parse_aliases(v: &serde_json::Value) -> Vec<MbAlias> {
+    v["aliases"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| serde_json::from_value::<MbAlias>(a.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Minimal URL encoding for the query parameter.

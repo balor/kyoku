@@ -211,6 +211,15 @@ const S_HEBREW: u16 = 1 << 6;
 const S_ARABIC: u16 = 1 << 7;
 const S_THAI: u16 = 1 << 8;
 
+/// True when `s` contains no letters from any non-Latin script. Pure digits,
+/// punctuation, and whitespace count as Latin-safe (nothing to romanise).
+///
+/// Used by the MB name-preference resolver to skip alias lookups when the
+/// canonical name is already in Latin script.
+pub fn is_pure_latin(s: &str) -> bool {
+    scripts_of(s) & !S_LATIN == 0
+}
+
 fn scripts_of(s: &str) -> u16 {
     let mut set = 0u16;
     for c in s.chars() {
@@ -476,6 +485,20 @@ mod tests {
             "same-script differing titles must still penalize: {}",
             score.album
         );
+    }
+
+    #[test]
+    fn is_pure_latin_basics() {
+        assert!(is_pure_latin("Yorushika"));
+        assert!(is_pure_latin("HANABIE."));
+        assert!(is_pure_latin("Björk"));
+        assert!(is_pure_latin("Year 2023"));
+        assert!(is_pure_latin(""), "empty → no non-Latin letters");
+        assert!(is_pure_latin("123"), "digits-only → no script bits");
+        assert!(!is_pure_latin("ヨルシカ"));
+        assert!(!is_pure_latin("花冷え。"));
+        assert!(!is_pure_latin("幻燈"));
+        assert!(!is_pure_latin("BUMP OF CHICKEN 結成"));
     }
 
     #[test]

@@ -35,6 +35,7 @@ impl App {
                     &self.settings.library.inbox_dirs,
                     &self.conn,
                     self.settings.musicbrainz.rate_limit_ms,
+                    self.settings.musicbrainz.name_script,
                 );
             }
             AppView::Editor { track_id } => {

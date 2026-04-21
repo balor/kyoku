@@ -72,6 +72,29 @@ pub struct TaggingSettings {
 pub struct MusicBrainzSettings {
     #[serde(default = "default_rate_limit")]
     pub rate_limit_ms: u64,
+
+    /// Preferred script for artist & album names written from MusicBrainz matches.
+    ///
+    /// `Native` uses MB's canonical credit/title as-is (current default).
+    /// `Latin` prefers a Latin-script alias when one exists (e.g. `Yorushika`
+    /// over `ヨルシカ`). Falls back to canonical when no alias matches.
+    #[serde(default)]
+    pub name_script: NameScriptPreference,
+}
+
+/// User preference for which script variant of MB-derived artist / album
+/// names should land in the DB, tags, and filesystem tree. Applied only to
+/// artist names (track.artist + album.album_artist) and album titles — track
+/// titles stay as MB returns them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NameScriptPreference {
+    /// Use MB's canonical name (whatever `artist-credit[0].name` / release
+    /// `title` returns — often native script for JP/KR/etc. releases).
+    #[default]
+    Native,
+    /// Prefer a Latin-script alias when available; fall back to canonical.
+    Latin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,6 +226,7 @@ impl Default for MusicBrainzSettings {
     fn default() -> Self {
         Self {
             rate_limit_ms: default_rate_limit(),
+            name_script: NameScriptPreference::default(),
         }
     }
 }
