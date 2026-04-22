@@ -969,9 +969,9 @@ A single MB entity can have both a native-script primary name and one or more La
 
 - [x] Multi-select (`Space` toggles rows) in library and album-detail views
 - [x] Batch delete of tracks / albums / collections with opt-in file deletion (keep-files is the confirm-popup default)
-- [ ] Album cover schema (`albums.cover_path`) + adopt sibling `cover.jpg` / `folder.jpg` on import
-- [ ] TUI album cover preview (kitty/iterm2/sixel with ASCII fallback)
-- [ ] Opt-in cover fetch from Cover Art Archive (`coverartarchive.org/release/{mbid}`)
+- [x] Album cover schema (`albums.cover_art_path`) + adopt sibling `cover.jpg` / `folder.jpg` on import, moved alongside audio on organize
+- [x] TUI album cover preview (kitty/iterm2/sixel; preview slot dropped on multiplexers and halfblocks-only terminals, with cover filename surfaced in the info panel instead)
+- [x] Opt-in cover fetch from Cover Art Archive (`coverartarchive.org/release/{mbid}`) with configurable size (`[musicbrainz] cover_art_size`) and overwrite confirmation
 - [ ] Full tag view on album/track detail — every `lofty` frame, grouped by kind
 - [ ] Inline tag editor (add / edit / delete, multi-value preserved) respecting `[tagging] write_tags`
 
