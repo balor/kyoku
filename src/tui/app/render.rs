@@ -113,7 +113,7 @@ impl App {
                 Constraint::Length(2), // header
                 Constraint::Length(1), // search bar
                 Constraint::Min(5),   // table
-                Constraint::Length(2), // detail bar
+                Constraint::Length(1), // detail bar
                 Constraint::Length(1), // status bar
             ])
             .split(area);
@@ -145,7 +145,7 @@ impl App {
                 Constraint::Length(2), // header
                 Constraint::Length(1), // search bar
                 Constraint::Min(5),   // table
-                Constraint::Length(2), // detail bar
+                Constraint::Length(1), // detail bar
                 Constraint::Length(1), // status bar
             ])
             .split(area);

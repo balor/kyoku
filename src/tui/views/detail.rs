@@ -6,7 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Cell, Paragraph, Row, Table};
 use rusqlite::Connection;
 
 use crate::config::Settings;
@@ -54,6 +54,10 @@ pub struct AlbumDetailView {
     notice: Option<(NoticeKind, String)>,
     pub selection: Selection,
     pending_delete: Option<(pruner::DeletePlan, ConfirmDelete)>,
+    /// Active "overwrite existing cover?" prompt. Shown after the user
+    /// presses `C` on an album that already has a cover file on disk;
+    /// confirming kicks off the CAA fetch, cancelling is a no-op.
+    pending_cover_overwrite: Option<ConfirmDelete>,
     /// Receiver for an in-flight CAA fetch. `Some` while the background
     /// thread is running; cleared once the result has been processed.
     /// Kept on the view (not on `App`) because the fetch is scoped to
@@ -106,6 +110,7 @@ impl AlbumDetailView {
         self.notice = None;
         self.selection.clear();
         self.pending_delete = None;
+        self.pending_cover_overwrite = None;
         // Dropping the receiver cancels any in-flight fetch scoped to the
         // previous album — the worker thread's send() will simply error
         // on the closed channel and the thread exits.
@@ -127,6 +132,7 @@ impl AlbumDetailView {
         self.notice = None;
         self.selection.clear();
         self.pending_delete = None;
+        self.pending_cover_overwrite = None;
         self.cover_fetch_rx = None;
         Ok(())
     }
@@ -140,6 +146,7 @@ impl AlbumDetailView {
             || self.add_to_collection.is_some()
             || self.organize_plan.is_some()
             || self.pending_delete.is_some()
+            || self.pending_cover_overwrite.is_some()
     }
 
     pub fn set_organize_plan(&mut self, plan: OrganizePlan) {
@@ -158,6 +165,23 @@ impl AlbumDetailView {
         conn: &Connection,
         settings: &Settings,
     ) -> DetailAction {
+        // Overwrite-cover confirm captures input first — it's a simple
+        // y/n gate in front of the CAA fetch.
+        if let Some(popup) = &mut self.pending_cover_overwrite {
+            match popup.handle_key(key) {
+                ConfirmAction::None => return DetailAction::None,
+                ConfirmAction::Cancel => {
+                    self.pending_cover_overwrite = None;
+                    return DetailAction::None;
+                }
+                ConfirmAction::Confirm { .. } => {
+                    self.pending_cover_overwrite = None;
+                    self.launch_cover_fetch(settings);
+                    return DetailAction::None;
+                }
+            }
+        }
+
         // Delete-confirm popup captures input
         if let Some((plan, popup)) = &mut self.pending_delete {
             match popup.handle_key(key) {
@@ -451,21 +475,65 @@ impl AlbumDetailView {
         DetailAction::None
     }
 
-    /// Kick off a CAA fetch on a background thread. Requires that the
-    /// current album has an MB release MBID stored — otherwise CAA has
-    /// nothing to key on. A fetch already in flight is not restarted.
+    /// Entry point for the `C` key. Validates preconditions (no fetch
+    /// already running, album has an MB release MBID) and either prompts
+    /// for overwrite (cover already on disk) or launches the fetch
+    /// straight away. The actual thread spawn lives in
+    /// [`Self::launch_cover_fetch`] so the confirm path can call it too.
     fn start_cover_fetch(&mut self, settings: &Settings) {
-        if self.cover_fetch_rx.is_some() {
+        if self.cover_fetch_rx.is_some() || self.pending_cover_overwrite.is_some() {
             return;
         }
         let Some(album) = self.album.as_ref() else {
             return;
         };
-        let Some(mbid) = album.mbid.clone().filter(|s| !s.is_empty()) else {
+        if album.mbid.as_deref().is_none_or(|s| s.is_empty()) {
             self.notice = Some((
                 NoticeKind::Warning,
                 "No MusicBrainz release ID — match this album first.".to_string(),
             ));
+            return;
+        }
+
+        // If a cover already exists on disk, gate the fetch behind a
+        // confirm — the download will overwrite the existing file and
+        // the user may have placed a hand-picked cover there.
+        let existing = album
+            .cover_art_path
+            .as_deref()
+            .map(Path::new)
+            .filter(|p| p.exists());
+        if let Some(path) = existing {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("cover");
+            self.pending_cover_overwrite = Some(
+                ConfirmDelete::new(
+                    "Overwrite cover",
+                    format!("Replace existing cover ({})?", name),
+                )
+                .with_summary(
+                    "A new cover will be downloaded from MusicBrainz and \
+                     saved over the current file.",
+                )
+                .without_checkbox(),
+            );
+            return;
+        }
+
+        self.launch_cover_fetch(settings);
+    }
+
+    /// Spawn the CAA fetch on a background thread. Callers must have
+    /// already validated that `album.mbid` is present — this is the
+    /// path taken both on direct fetch (no existing cover) and on
+    /// confirmed overwrite.
+    fn launch_cover_fetch(&mut self, settings: &Settings) {
+        let Some(album) = self.album.as_ref() else {
+            return;
+        };
+        let Some(mbid) = album.mbid.clone().filter(|s| !s.is_empty()) else {
             return;
         };
         let album_id = album.id;
@@ -589,6 +657,192 @@ impl AlbumDetailView {
         DetailAction::None
     }
 
+    /// Draw the left-hand info panel: cover (or skeleton/no-cover
+    /// tags) below. The cover slot is only reserved when the terminal
+    /// can actually render the image (native graphics protocol
+    /// available, a file exists on disk, and decode hasn't failed);
+    /// otherwise the whole panel is text, with the cover filename
+    /// surfaced there instead of as a pixel preview.
+    fn render_info_panel(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        covers: &mut CoverRegistry,
+        show_cover: bool,
+        cover_path: Option<&Path>,
+    ) {
+        // Single-col left + single-row top gutter so the panel content
+        // doesn't hug the edge of the terminal / view divider.
+        let area = Rect {
+            x: area.x.saturating_add(1),
+            y: area.y.saturating_add(1),
+            width: area.width.saturating_sub(1),
+            height: area.height.saturating_sub(1),
+        };
+
+        // Only reserve space for a real image. If the terminal can't
+        // render one, or decode has already failed, or there's no cover
+        // file at all, we drop the preview slot entirely — no fake-cover
+        // tile, no skeleton-sized gap. The filename still surfaces in
+        // the text block below.
+        let show_preview = show_cover
+            && covers.can_render_images()
+            && cover_path.is_some_and(|p| !covers.has_failed(p));
+
+        let (cover_area, text_area) = if show_preview {
+            let cover_height = covers.square_cover_height(area.width);
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(cover_height),
+                    Constraint::Length(1), // spacer
+                    Constraint::Min(0),
+                ])
+                .split(area);
+            (Some(rows[0]), rows[2])
+        } else {
+            (None, area)
+        };
+
+        if let Some(cover_area) = cover_area
+            && let Some(path) = cover_path
+        {
+            covers.render(frame, cover_area, theme, path);
+        }
+
+        self.render_info_text(frame, text_area, theme, cover_path);
+    }
+
+    /// Render the textual portion of the info panel (album title, artist,
+    /// year, stats, tags). Kept separate so `render_info_panel` reads top
+    /// to bottom without a wall of Line-building in the middle.
+    ///
+    /// `cover_path` is surfaced as a filename line in the Tags section —
+    /// useful because on terminals without a native graphics protocol
+    /// we don't render the preview tile, and the user still wants to
+    /// know the cover exists (and what it's called).
+    fn render_info_text(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        cover_path: Option<&Path>,
+    ) {
+        if area.height == 0 || area.width == 0 {
+            return;
+        }
+
+        let mut lines: Vec<Line> = Vec::new();
+
+        if let Some(album) = &self.album {
+            // Title (bold, accent).
+            lines.push(Line::from(Span::styled(
+                album.title.clone(),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )));
+
+            // Artist · Year.
+            let artist = album.album_artist.as_deref().unwrap_or("(unknown)");
+            let year = album.year.map(|y| y.to_string()).unwrap_or_default();
+            let artist_line = if year.is_empty() {
+                Line::from(Span::styled(
+                    artist.to_string(),
+                    Style::default().fg(theme.fg),
+                ))
+            } else {
+                Line::from(vec![
+                    Span::styled(artist.to_string(), Style::default().fg(theme.fg)),
+                    Span::styled(" · ", Style::default().fg(theme.fg_muted)),
+                    Span::styled(year, Style::default().fg(theme.fg_dim)),
+                ])
+            };
+            lines.push(artist_line);
+
+            // Stats section.
+            lines.push(Line::from(""));
+            lines.push(section_heading("Stats", theme));
+            lines.push(Line::from(Span::styled(
+                format!("{} tracks", album.track_count),
+                Style::default().fg(theme.fg_dim),
+            )));
+            lines.push(Line::from(Span::styled(
+                format_duration_ms(album.total_duration_ms),
+                Style::default().fg(theme.fg_dim),
+            )));
+            if !album.formats.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    album.formats.to_uppercase(),
+                    Style::default().fg(theme.fg_dim),
+                )));
+            }
+
+            // Tags section — only emit when we actually have something.
+            let has_label = album.label.as_deref().is_some_and(|s| !s.is_empty());
+            let has_genre = album.genre.as_deref().is_some_and(|s| !s.is_empty());
+            let has_mbid = album.mbid.as_deref().is_some_and(|s| !s.is_empty());
+            let cover_name = cover_path
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str());
+            if has_label || has_genre || has_mbid || cover_name.is_some() {
+                lines.push(Line::from(""));
+                lines.push(section_heading("Tags", theme));
+                if let Some(label) = &album.label
+                    && !label.is_empty()
+                {
+                    lines.push(tag_line("Label", label, theme));
+                }
+                if let Some(genre) = &album.genre
+                    && !genre.is_empty()
+                {
+                    lines.push(tag_line("Genre", genre, theme));
+                }
+                if let Some(mbid) = &album.mbid
+                    && !mbid.is_empty()
+                {
+                    let short = &mbid[..mbid.len().min(8)];
+                    lines.push(tag_line("MB", short, theme));
+                }
+                if let Some(name) = cover_name {
+                    lines.push(tag_line("Cover", name, theme));
+                }
+            }
+        } else {
+            // Loose tracks view — no album row, but we can still surface
+            // basic stats so the panel isn't empty.
+            lines.push(Line::from(Span::styled(
+                "Loose Tracks",
+                Style::default()
+                    .fg(theme.accent_alt)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                "not in any album",
+                Style::default().fg(theme.fg_dim),
+            )));
+            lines.push(Line::from(""));
+            lines.push(section_heading("Stats", theme));
+            lines.push(Line::from(Span::styled(
+                format!("{} tracks", self.tracks.len()),
+                Style::default().fg(theme.fg_dim),
+            )));
+            let total_ms: i64 = self
+                .tracks
+                .iter()
+                .map(|t| t.duration_ms.unwrap_or(0) as i64)
+                .sum();
+            lines.push(Line::from(Span::styled(
+                format_duration_ms(total_ms),
+                Style::default().fg(theme.fg_dim),
+            )));
+        }
+
+        let p = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
+        frame.render_widget(p, area);
+    }
+
     pub fn render(
         &mut self,
         frame: &mut Frame,
@@ -597,11 +851,9 @@ impl AlbumDetailView {
         covers: &mut CoverRegistry,
         show_cover: bool,
     ) {
-        // Cover path, if any. Resolved once up front so both layout
-        // decisions and rendering can branch on it without re-reading
-        // the field. `show_cover=false` (from the user's UI config) drops
-        // the cover regardless of whether a file exists on disk — useful
-        // for terminals where halfblock output renders as a blank gap.
+        // Cover path, if any. `show_cover=false` (from the user's UI config)
+        // drops the cover regardless of whether a file exists on disk —
+        // useful for terminals where halfblock output renders as a blank gap.
         let cover_path: Option<PathBuf> = if show_cover {
             self.album
                 .as_ref()
@@ -612,79 +864,49 @@ impl AlbumDetailView {
             None
         };
 
-        // Always a single-line header now — the cover sits beside the
-        // track table (below), which is a better fit for square artwork
-        // than a short wide strip at the top.
+        // Top-level split: content + one-line footer (notice or track path).
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(2), // album header (line + bottom border)
-                Constraint::Min(5),    // content (cover + tracks)
-                Constraint::Length(2), // metadata
-            ])
+            .constraints([Constraint::Min(5), Constraint::Length(1)])
             .split(area);
 
-        // Header
-        let header_line = if let Some(album) = &self.album {
-            let artist = album.album_artist.as_deref().unwrap_or("(unknown)");
-            let year = album
-                .year
-                .map(|y| format!(" ({})", y))
-                .unwrap_or_default();
-            Line::from(vec![
-                Span::styled(
-                    format!(" {} ", artist),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("— ", Style::default().fg(theme.fg_muted)),
-                Span::styled(
-                    format!("{}{}", album.title, year),
-                    Style::default()
-                        .fg(theme.fg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ])
-        } else {
-            // Loose tracks view
-            Line::from(vec![
-                Span::styled(
-                    " Loose Tracks ",
-                    Style::default()
-                        .fg(theme.accent_alt)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("· {} tracks (not in any album)", self.tracks.len()),
-                    Style::default().fg(theme.fg_dim),
-                ),
-            ])
-        };
+        // Responsive: show the info panel (cover + album text) beside the
+        // track table only when there's enough horizontal room. The panel
+        // is ~30 cols wide and the track table needs ~50 to show all its
+        // columns without squeezing titles, so 80 is a reasonable floor.
+        // On narrower terminals we collapse to just the tracks.
+        const INFO_PANEL_WIDTH: u16 = 30;
+        const INFO_PANEL_MIN_TOTAL: u16 = 80;
+        let show_info_panel = chunks[0].width >= INFO_PANEL_MIN_TOTAL;
 
-        // Header is always a single line with a bottom border.
-        let p = Paragraph::new(header_line).block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(theme.border)),
-        );
-        frame.render_widget(p, chunks[0]);
-
-        // Content: split the inner area horizontally when a cover is
-        // present so the square artwork sits to the left of the track
-        // table instead of being squashed into a short top strip. The
-        // 24-col width gives roughly a square region (terminal cells are
-        // ~2:1 tall) without eating too much horizontal space from the
-        // track list.
-        let track_area = if let Some(ref path) = cover_path {
+        let track_area_raw = if show_info_panel {
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(24), Constraint::Min(20)])
-                .split(chunks[1]);
-            covers.render(frame, cols[0], theme, path);
+                .constraints([
+                    Constraint::Length(INFO_PANEL_WIDTH),
+                    Constraint::Min(20),
+                ])
+                .split(chunks[0]);
+            self.render_info_panel(
+                frame,
+                cols[0],
+                theme,
+                covers,
+                show_cover,
+                cover_path.as_deref(),
+            );
             cols[1]
         } else {
-            chunks[1]
+            chunks[0]
+        };
+
+        // 1-row top gutter on the track table — matches the info panel's
+        // top padding so the header row doesn't sit flush against the
+        // top of the content area.
+        let track_area = Rect {
+            y: track_area_raw.y.saturating_add(1),
+            height: track_area_raw.height.saturating_sub(1),
+            ..track_area_raw
         };
 
         // Track table — iterate over filtered indices
@@ -781,14 +1003,10 @@ impl AlbumDetailView {
 
         frame.render_widget(table, track_area);
 
-        // Metadata footer: line 1 = album info, line 2 = selected track path
-        // (or notice if one is active)
-        let footer_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(1)])
-            .split(chunks[2]);
-
-        // Line 1: album metadata or notice
+        // Single-line footer: notice takes priority over the selected
+        // track's file path. Album-level metadata (formats, label, genre,
+        // MB id) now lives in the info panel, so the bottom bar stays
+        // focused on ephemeral state.
         if let Some((kind, msg)) = &self.notice {
             let color = match kind {
                 NoticeKind::Success => theme.green,
@@ -799,54 +1017,22 @@ impl AlbumDetailView {
                 Style::default().fg(color),
             ))
             .style(Style::default().bg(theme.bg_alt));
-            frame.render_widget(p, footer_chunks[0]);
-        } else if let Some(album) = &self.album {
-            let fmt = album.formats.to_uppercase();
-            let duration = format_duration_ms(album.total_duration_ms);
-            let mut parts = vec![format!(" {} · {} tracks · {}", fmt, album.track_count, duration)];
-            if let Some(label) = &album.label
-                && !label.is_empty() {
-                    parts.push(format!("Label: {}", label));
-                }
-            if let Some(genre) = &album.genre
-                && !genre.is_empty() {
-                    parts.push(genre.clone());
-                }
-            if let Some(mbid) = &album.mbid
-                && !mbid.is_empty() {
-                    parts.push(format!("MB: {}", &mbid[..mbid.len().min(8)]));
-                }
-            let meta = parts.join(" · ");
-            let p = Paragraph::new(Span::styled(meta, Style::default().fg(theme.fg_dim)))
-                .style(Style::default().bg(theme.bg_alt));
-            frame.render_widget(p, footer_chunks[0]);
+            frame.render_widget(p, chunks[1]);
         } else {
-            let total_ms: i64 = self
-                .tracks
-                .iter()
-                .map(|t| t.duration_ms.unwrap_or(0) as i64)
-                .sum();
-            let meta = format!(
-                " {} loose track(s) · {}",
-                self.tracks.len(),
-                format_duration_ms(total_ms),
-            );
-            let p = Paragraph::new(Span::styled(meta, Style::default().fg(theme.fg_dim)))
+            let selected_track = visible
+                .get(self.selected)
+                .and_then(|&i| self.tracks.get(i));
+            if let Some(track) = selected_track {
+                let p = Paragraph::new(Span::styled(
+                    format!(" {}", track.file_path),
+                    Style::default().fg(theme.fg_muted),
+                ))
                 .style(Style::default().bg(theme.bg_alt));
-            frame.render_widget(p, footer_chunks[0]);
-        }
-
-        // Line 2: selected track's file path
-        let selected_track = visible
-            .get(self.selected)
-            .and_then(|&i| self.tracks.get(i));
-        if let Some(track) = selected_track {
-            let p = Paragraph::new(Span::styled(
-                format!(" {}", track.file_path),
-                Style::default().fg(theme.fg_muted),
-            ))
-            .style(Style::default().bg(theme.bg_alt));
-            frame.render_widget(p, footer_chunks[1]);
+                frame.render_widget(p, chunks[1]);
+            } else {
+                let p = Paragraph::new("").style(Style::default().bg(theme.bg_alt));
+                frame.render_widget(p, chunks[1]);
+            }
         }
 
         // Rename popup
@@ -864,6 +1050,11 @@ impl AlbumDetailView {
 
         // Delete-confirm popup
         if let Some((_, popup)) = &self.pending_delete {
+            popup.render(frame, area, theme);
+        }
+
+        // Overwrite-cover confirm popup
+        if let Some(popup) = &self.pending_cover_overwrite {
             popup.render(frame, area, theme);
         }
 
@@ -906,6 +1097,28 @@ impl AlbumDetailView {
             );
         }
     }
+}
+
+/// `── Label ──` style heading for info-panel sections. Horizontal rules
+/// aren't strictly necessary, but they break up the short text runs and
+/// give the panel enough structure to read at a glance.
+fn section_heading(label: &str, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("── {} ──", label),
+        Style::default().fg(theme.fg_muted),
+    ))
+}
+
+/// `Key: value` line for the Tags section. Key stays muted, value picks
+/// up the primary foreground so the eye lands there.
+fn tag_line(key: &str, value: &str, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{}: ", key),
+            Style::default().fg(theme.fg_muted),
+        ),
+        Span::styled(value.to_string(), Style::default().fg(theme.fg_dim)),
+    ])
 }
 
 fn build_track_confirm(plan: &pruner::DeletePlan) -> ConfirmDelete {

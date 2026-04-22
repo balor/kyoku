@@ -10,7 +10,11 @@ use crate::tui::themes::Theme;
 const VERSION: &str = concat!("kyoku v", env!("CARGO_PKG_VERSION"));
 
 pub fn render(frame: &mut Frame, area: Rect, theme: &Theme, hints: &[(&str, &str)]) {
-    let mut spans = Vec::new();
+    // Leading space: matches the 1-col left gutter used elsewhere (album
+    // info panel, notice/path footer) so shortcut keys don't hug the
+    // terminal edge. The Paragraph paints bg_alt across the full width,
+    // so this is just visual padding, not a layout carve-out.
+    let mut spans = vec![Span::raw(" ")];
 
     for (i, (key, action)) in hints.iter().enumerate() {
         if i > 0 {
