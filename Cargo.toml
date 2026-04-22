@@ -10,6 +10,11 @@ default-run = "kyoku"
 ratatui = "0.30"
 crossterm = "0.29"
 
+# Cover art preview. `chafa-dyn` is opted out so the build doesn't require
+# a system libchafa; kitty/iterm2/sixel/halfblocks cover the common cases.
+ratatui-image = { version = "10", default-features = false, features = ["crossterm", "image-defaults"] }
+image = "0.25"
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 

@@ -22,6 +22,7 @@ use super::views::global_search::GlobalSearchView;
 use super::views::help::HelpOverlay;
 use super::views::import::ImportView;
 use super::views::library::LibraryView;
+use super::widgets::cover_preview::CoverRegistry;
 use super::widgets::input::TextInput;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +67,10 @@ pub struct App {
 
     // View to return to when leaving the editor
     editor_return_to: Option<AppView>,
+
+    /// Session-wide cover-art renderer — one picker + per-path protocol
+    /// cache shared across every view that shows album art.
+    pub covers: CoverRegistry,
 }
 
 impl App {
@@ -95,6 +100,8 @@ impl App {
             search_debounce: None,
 
             editor_return_to: None,
+
+            covers: CoverRegistry::new(),
         };
 
         // Initial data load
@@ -205,6 +212,13 @@ impl App {
         // Tick import view for background operations
         if self.view == AppView::Import {
             self.import.tick(&self.conn);
+        }
+
+        // Tick album detail so an in-flight cover-art fetch can land even
+        // while the user isn't pressing keys. Cheap no-op when nothing is
+        // pending.
+        if matches!(self.view, AppView::AlbumDetail { .. }) {
+            self.album_detail.tick(&self.conn);
         }
     }
 }

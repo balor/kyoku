@@ -181,6 +181,7 @@ fn help_content(theme: &Theme) -> Vec<Line<'static>> {
         binding("e", "Edit selected track tags"),
         binding("R", "Rename album"),
         binding("O", "Organize this album (preview + apply)"),
+        binding("C", "Fetch cover art from MusicBrainz"),
         binding("a", "Add selected track to a collection"),
         binding("o", "Open file location in system file manager"),
         binding("d", "Delete track(s) (with file-removal opt-in)"),

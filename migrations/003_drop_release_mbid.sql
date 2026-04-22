@@ -1,0 +1,14 @@
+-- Drop the unused `albums.release_mbid` column.
+--
+-- Originally intended to hold the MusicBrainz *release* MBID (specific
+-- edition), alongside `albums.mbid` holding the *release group* MBID.
+-- In practice the importer only ever writes the release MBID, and it
+-- writes it to `albums.mbid` — `release_mbid` has always stayed NULL.
+-- Rather than untangle the two by touching the importer + writing a
+-- data-migration to split ids that were never captured separately, we
+-- drop the dead column and let `albums.mbid` carry the release MBID.
+-- The spec already explicitly declares this as the chosen semantics.
+--
+-- Requires SQLite >= 3.35 for DROP COLUMN; rusqlite ships a bundled
+-- SQLite well past that threshold.
+ALTER TABLE albums DROP COLUMN release_mbid;

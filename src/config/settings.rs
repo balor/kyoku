@@ -80,6 +80,48 @@ pub struct MusicBrainzSettings {
     /// over `ヨルシカ`). Falls back to canonical when no alias matches.
     #[serde(default)]
     pub name_script: NameScriptPreference,
+
+    /// Cover Art Archive download size for the `C` fetch in album detail.
+    /// CAA exposes a few fixed-width thumbnails plus the original upload.
+    /// `Px500` is small but loads fast and stays well under 100 KB on disk;
+    /// `Px1200` is a sensible quality/size trade for media-server use;
+    /// `Original` gets whatever the uploader provided (often 1500-3000 px,
+    /// sometimes multiple MB) and falls back to `Px1200` then `Px500` when
+    /// no original is archived.
+    #[serde(default)]
+    pub cover_art_size: CoverArtSize,
+}
+
+/// Width preset for Cover Art Archive front-cover downloads.
+///
+/// CAA serves these at fixed URL suffixes (`/release/{mbid}/front-N`); the
+/// `Original` variant maps to `/release/{mbid}/front` (no suffix), which
+/// returns whatever the uploader provided.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CoverArtSize {
+    #[serde(rename = "250")]
+    Px250,
+    #[default]
+    #[serde(rename = "500")]
+    Px500,
+    #[serde(rename = "1200")]
+    Px1200,
+    #[serde(rename = "original")]
+    Original,
+}
+
+impl CoverArtSize {
+    /// URL fragment used after `/release/{mbid}/front` (or empty for
+    /// `Original`, which uses `/front` directly).
+    pub fn url_suffix(self) -> &'static str {
+        match self {
+            CoverArtSize::Px250 => "-250",
+            CoverArtSize::Px500 => "-500",
+            CoverArtSize::Px1200 => "-1200",
+            CoverArtSize::Original => "",
+        }
+    }
 }
 
 /// User preference for which script variant of MB-derived artist / album
@@ -101,6 +143,12 @@ pub enum NameScriptPreference {
 pub struct UiSettings {
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Draw the album cover preview in album detail view. Set to `false`
+    /// when running inside a terminal/multiplexer combination that can't
+    /// render halfblock graphics cleanly (some zellij + native-protocol
+    /// terminals show a blank gap where the cover should be).
+    #[serde(default = "default_true")]
+    pub show_cover_preview: bool,
 }
 
 // Default value functions
@@ -227,6 +275,7 @@ impl Default for MusicBrainzSettings {
         Self {
             rate_limit_ms: default_rate_limit(),
             name_script: NameScriptPreference::default(),
+            cover_art_size: CoverArtSize::default(),
         }
     }
 }
@@ -235,6 +284,7 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             theme: default_theme(),
+            show_cover_preview: true,
         }
     }
 }

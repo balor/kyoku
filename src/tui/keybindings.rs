@@ -67,3 +67,10 @@ pub fn is_toggle_select(key: &KeyEvent) -> bool {
 pub fn is_delete(key: &KeyEvent) -> bool {
     key.code == KeyCode::Char('d')
 }
+
+/// "C" — fetch cover art from MusicBrainz / Cover Art Archive for the
+/// currently focused album. Upper-case so it doesn't collide with `c`
+/// bindings in views that browse collections.
+pub fn is_fetch_cover(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('C')
+}

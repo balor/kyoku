@@ -162,6 +162,10 @@ pub struct AlbumRow {
     pub track_count: i64,
     pub formats: String,
     pub total_duration_ms: i64,
+    /// MusicBrainz release MBID for this album. Despite the bare name this
+    /// holds the *release* id (specific edition), not the release-group id —
+    /// the importer only captures the release it matched against. Used as
+    /// the key for Cover Art Archive lookups.
     pub mbid: Option<String>,
     pub label: Option<String>,
     pub genre: Option<String>,
@@ -691,7 +695,6 @@ pub fn delete_album(conn: &Connection, album_id: i64) -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct TrackDeleteInfo {
     pub track_id: i64,
-    pub title: String,
     pub file_path: String,
     pub album_id: Option<i64>,
     /// Every `collection_tracks.collection_file_path` this track has set.
@@ -708,7 +711,7 @@ pub fn get_tracks_delete_info(
     }
     let placeholders = track_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
-        "SELECT id, title, file_path, album_id FROM tracks WHERE id IN ({})",
+        "SELECT id, file_path, album_id FROM tracks WHERE id IN ({})",
         placeholders
     );
     let params: Vec<&dyn rusqlite::ToSql> =
@@ -718,9 +721,8 @@ pub fn get_tracks_delete_info(
     let rows = stmt.query_map(params.as_slice(), |row| {
         Ok(TrackDeleteInfo {
             track_id: row.get(0)?,
-            title: row.get(1)?,
-            file_path: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-            album_id: row.get(3)?,
+            file_path: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            album_id: row.get(2)?,
             collection_copies: Vec::new(),
         })
     })?;
@@ -798,17 +800,16 @@ pub fn update_album_mb(
     conn: &Connection,
     album_id: i64,
     mbid: &str,
-    release_mbid: Option<&str>,
     artist: &str,
     title: &str,
     year: Option<i32>,
     label: Option<&str>,
 ) -> Result<()> {
     conn.execute(
-        "UPDATE albums SET mbid = ?1, release_mbid = ?2, album_artist = ?3,
-                title = ?4, year = ?5, label = ?6, updated_at = datetime('now')
-         WHERE id = ?7",
-        rusqlite::params![mbid, release_mbid, artist, title, year, label, album_id],
+        "UPDATE albums SET mbid = ?1, album_artist = ?2, title = ?3,
+                year = ?4, label = ?5, updated_at = datetime('now')
+         WHERE id = ?6",
+        rusqlite::params![mbid, artist, title, year, label, album_id],
     )?;
     Ok(())
 }

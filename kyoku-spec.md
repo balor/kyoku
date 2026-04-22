@@ -129,8 +129,7 @@ CREATE TABLE IF NOT EXISTS albums (
     title           TEXT NOT NULL,
     album_artist    TEXT,
     year            INTEGER,
-    mbid            TEXT UNIQUE,        -- MusicBrainz release group ID
-    release_mbid    TEXT,               -- MusicBrainz release ID (specific edition)
+    mbid            TEXT UNIQUE,        -- MusicBrainz release MBID (the specific edition we matched)
     disc_total      INTEGER DEFAULT 1,
     track_total     INTEGER,
     genre           TEXT,               -- Primary genre

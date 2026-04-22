@@ -6,7 +6,6 @@ CREATE TABLE IF NOT EXISTS albums (
     album_artist    TEXT,
     year            INTEGER,
     mbid            TEXT UNIQUE,
-    release_mbid    TEXT,
     disc_total      INTEGER DEFAULT 1,
     track_total     INTEGER,
     genre           TEXT,

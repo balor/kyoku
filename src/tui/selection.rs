@@ -35,10 +35,6 @@ impl Selection {
         v
     }
 
-    pub fn len(&self) -> usize {
-        self.marked.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.marked.is_empty()
     }
@@ -54,7 +50,7 @@ mod tests {
         assert!(s.is_empty());
         s.toggle(7);
         assert!(s.contains(7));
-        assert_eq!(s.len(), 1);
+        assert_eq!(s.ids(), vec![7]);
         s.toggle(7);
         assert!(!s.contains(7));
         assert!(s.is_empty());

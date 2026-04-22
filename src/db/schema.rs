@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use crate::error::Result;
 
 /// Current schema version.
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 /// Initialize the database schema. Creates tables if they don't exist
 /// and runs any pending migrations.
@@ -17,6 +17,9 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     }
     if version < 2 {
         apply_v2(conn)?;
+    }
+    if version < 3 {
+        apply_v3(conn)?;
     }
     set_schema_version(conn, SCHEMA_VERSION)?;
 
@@ -40,6 +43,25 @@ fn apply_v1(conn: &Connection) -> Result<()> {
 
 fn apply_v2(conn: &Connection) -> Result<()> {
     conn.execute_batch(include_str!("../../migrations/002_fts_triggers.sql"))?;
+    Ok(())
+}
+
+fn apply_v3(conn: &Connection) -> Result<()> {
+    // `release_mbid` was removed from the v1 schema file at the same time
+    // this migration was introduced, so a brand-new DB goes straight to
+    // v3 and never has the column. Only drop when the column is still
+    // there (i.e. an existing DB migrating up from v1/v2). SQLite has no
+    // `DROP COLUMN IF EXISTS`, so we probe `PRAGMA table_info` first.
+    let has_column: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(albums)")?;
+        let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        names
+            .filter_map(|r| r.ok())
+            .any(|n| n == "release_mbid")
+    };
+    if has_column {
+        conn.execute_batch(include_str!("../../migrations/003_drop_release_mbid.sql"))?;
+    }
     Ok(())
 }
 

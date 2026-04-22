@@ -1,5 +1,6 @@
 pub mod add_to_collection;
 pub mod confirm_delete;
+pub mod cover_preview;
 pub mod input;
 pub mod organize_popup;
 pub mod pick_collection;

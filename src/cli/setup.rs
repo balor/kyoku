@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use inquire::{Confirm, Select, Text};
 
-use crate::config::{self, Settings, settings::NameScriptPreference};
+use crate::config::{self, Settings, settings::{CoverArtSize, NameScriptPreference}};
 
 pub fn run(current: Settings) -> anyhow::Result<()> {
     let config_path = config::paths::config_file();
@@ -91,6 +91,31 @@ pub fn run(current: Settings) -> anyhow::Result<()> {
         .prompt()?;
     let name_script = selected_script.split(' ').next().unwrap_or("native");
 
+    // Cover Art Archive download size
+    println!();
+    println!("Download size for album covers fetched from the Cover Art Archive");
+    println!("(the `C` key in album detail). Larger = better quality but more");
+    println!("disk space and slower downloads. Cover is also rendered in the TUI;");
+    println!("the TUI itself doesn't benefit much past 500 px, but a larger file");
+    println!("helps if you also feed your library to a media server or web app.");
+    println!();
+    let sizes = vec![
+        "250      — ~20 KB, throwaway thumbnail",
+        "500      — ~80 KB, default; fine for TUI",
+        "1200     — ~300 KB, sweet spot for media servers",
+        "original — full upload (1-8 MB), falls back to 1200 then 500",
+    ];
+    let size_default_idx = match current.musicbrainz.cover_art_size {
+        CoverArtSize::Px250 => 0,
+        CoverArtSize::Px500 => 1,
+        CoverArtSize::Px1200 => 2,
+        CoverArtSize::Original => 3,
+    };
+    let selected_size = Select::new("Cover art size:", sizes)
+        .with_starting_cursor(size_default_idx)
+        .prompt()?;
+    let cover_art_size = selected_size.split_whitespace().next().unwrap_or("500");
+
     // Theme
     println!();
     let themes = vec![
@@ -160,6 +185,14 @@ user_agent = "kyoku/0.1.0 (https://github.com/yourname/kyoku)"
 rate_limit_ms = 1100
 # "native" keeps MB canonical names; "latin" prefers romanised alias when present.
 name_script = "{name_script}"
+# Cover Art Archive download size for the `C` fetch in album detail.
+# Options:
+#   "250"      — tiny thumbnail, ~20 KB
+#   "500"      — default, ~80 KB, plenty for the TUI preview
+#   "1200"     — ~300 KB, good if you also use a media server / web UI
+#   "original" — uploader's full image (often 1-8 MB);
+#                falls back to 1200 then 500 when no original is archived
+cover_art_size = "{cover_art_size}"
 
 [acoustid]
 # Get a key at https://acoustid.org/new-application

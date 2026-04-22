@@ -1,3 +1,6 @@
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -10,6 +13,7 @@ use crate::config::Settings;
 use crate::core::organizer::{self, OrganizePlan};
 use crate::core::pruner;
 use crate::db::queries::{self, AlbumRow, TrackRow};
+use crate::external::cover_art_archive::{CaaClient, CoverImage};
 use crate::error::Result;
 use crate::tui::keybindings as keys;
 use crate::tui::selection::Selection;
@@ -17,6 +21,7 @@ use crate::tui::themes::Theme;
 use crate::tui::views::library::format_duration_ms;
 use crate::tui::widgets::add_to_collection::{AddToCollectionPopup, PopupAction};
 use crate::tui::widgets::confirm_delete::{ConfirmAction, ConfirmDelete};
+use crate::tui::widgets::cover_preview::CoverRegistry;
 use crate::tui::widgets::input::TextInput;
 
 pub enum DetailAction {
@@ -49,6 +54,20 @@ pub struct AlbumDetailView {
     notice: Option<(NoticeKind, String)>,
     pub selection: Selection,
     pending_delete: Option<(pruner::DeletePlan, ConfirmDelete)>,
+    /// Receiver for an in-flight CAA fetch. `Some` while the background
+    /// thread is running; cleared once the result has been processed.
+    /// Kept on the view (not on `App`) because the fetch is scoped to
+    /// whichever album is currently shown — navigating away cancels the
+    /// fetch implicitly by dropping the receiver.
+    cover_fetch_rx: Option<mpsc::Receiver<CoverFetchResult>>,
+}
+
+/// Outcome of one background cover fetch. Always tagged with the album
+/// id the fetch was initiated for, so a stale result from a previous
+/// album doesn't get applied after the user navigates elsewhere.
+struct CoverFetchResult {
+    album_id: i64,
+    result: crate::error::Result<Option<CoverImage>>,
 }
 
 impl AlbumDetailView {
@@ -87,6 +106,10 @@ impl AlbumDetailView {
         self.notice = None;
         self.selection.clear();
         self.pending_delete = None;
+        // Dropping the receiver cancels any in-flight fetch scoped to the
+        // previous album — the worker thread's send() will simply error
+        // on the closed channel and the thread exits.
+        self.cover_fetch_rx = None;
         Ok(())
     }
 
@@ -104,6 +127,7 @@ impl AlbumDetailView {
         self.notice = None;
         self.selection.clear();
         self.pending_delete = None;
+        self.cover_fetch_rx = None;
         Ok(())
     }
 
@@ -419,7 +443,128 @@ impl AlbumDetailView {
             return DetailAction::Organize;
         }
 
+        if keys::is_fetch_cover(&key) {
+            self.start_cover_fetch(settings);
+            return DetailAction::None;
+        }
+
         DetailAction::None
+    }
+
+    /// Kick off a CAA fetch on a background thread. Requires that the
+    /// current album has an MB release MBID stored — otherwise CAA has
+    /// nothing to key on. A fetch already in flight is not restarted.
+    fn start_cover_fetch(&mut self, settings: &Settings) {
+        if self.cover_fetch_rx.is_some() {
+            return;
+        }
+        let Some(album) = self.album.as_ref() else {
+            return;
+        };
+        let Some(mbid) = album.mbid.clone().filter(|s| !s.is_empty()) else {
+            self.notice = Some((
+                NoticeKind::Warning,
+                "No MusicBrainz release ID — match this album first.".to_string(),
+            ));
+            return;
+        };
+        let album_id = album.id;
+        let rate_limit_ms = settings.musicbrainz.rate_limit_ms;
+        let size = settings.musicbrainz.cover_art_size;
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut client = CaaClient::new(rate_limit_ms);
+            let result = client.fetch_front(&mbid, size);
+            // If the user navigated away the receiver is already dropped,
+            // in which case send fails silently — nothing to do.
+            let _ = tx.send(CoverFetchResult { album_id, result });
+        });
+        self.cover_fetch_rx = Some(rx);
+        self.notice = Some((
+            NoticeKind::Success,
+            "Fetching cover art from MusicBrainz...".to_string(),
+        ));
+    }
+
+    /// Called each tick — polls the cover-fetch receiver and, on a
+    /// result, writes bytes to `<album_dir>/cover.<ext>`, updates
+    /// `albums.cover_art_path`, and reloads the album row so the header
+    /// picks up the new path on the next render.
+    pub fn tick(&mut self, conn: &Connection) {
+        let Some(rx) = self.cover_fetch_rx.as_ref() else {
+            return;
+        };
+        let Ok(msg) = rx.try_recv() else {
+            return;
+        };
+        self.cover_fetch_rx = None;
+
+        // Guard against stale results landing after navigation.
+        let current_id = self.album.as_ref().map(|a| a.id);
+        if current_id != Some(msg.album_id) {
+            return;
+        }
+
+        match msg.result {
+            Ok(Some(img)) => match self.save_fetched_cover(conn, msg.album_id, &img) {
+                Ok(path) => {
+                    self.notice = Some((
+                        NoticeKind::Success,
+                        format!("Cover saved to {}", path.display()),
+                    ));
+                }
+                Err(e) => {
+                    self.notice = Some((
+                        NoticeKind::Warning,
+                        format!("Cover save failed: {}", e),
+                    ));
+                }
+            },
+            Ok(None) => {
+                self.notice = Some((
+                    NoticeKind::Warning,
+                    "MusicBrainz has no cover art for this release.".to_string(),
+                ));
+            }
+            Err(e) => {
+                self.notice = Some((
+                    NoticeKind::Warning,
+                    format!("Cover fetch failed: {}", e),
+                ));
+            }
+        }
+    }
+
+    /// Write the fetched bytes to `<album_dir>/cover.<ext>`, record the
+    /// path in the DB, and refresh the in-memory album row. The album
+    /// directory is inferred from the first track's parent — safe because
+    /// a post-organize album has all its tracks in one directory, and
+    /// pre-organize the user presumably imports+organizes before fetching
+    /// art anyway. Returns the saved path for the success notice.
+    fn save_fetched_cover(
+        &mut self,
+        conn: &Connection,
+        album_id: i64,
+        img: &CoverImage,
+    ) -> Result<PathBuf> {
+        let album_dir = self
+            .tracks
+            .first()
+            .map(|t| PathBuf::from(&t.file_path))
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .ok_or_else(|| {
+                crate::error::KyokuError::External(
+                    "album has no tracks on disk — can't infer a directory to save the cover in"
+                        .to_string(),
+                )
+            })?;
+        std::fs::create_dir_all(&album_dir)?;
+        let dest = album_dir.join(format!("cover.{}", img.extension));
+        std::fs::write(&dest, &img.bytes)?;
+        queries::set_album_cover_path(conn, album_id, &dest.to_string_lossy())?;
+        // Refresh the cached row so the header renders with the new path.
+        self.album = queries::get_album(conn, album_id)?;
+        Ok(dest)
     }
 
     fn handle_add_to_collection_key(
@@ -444,18 +589,43 @@ impl AlbumDetailView {
         DetailAction::None
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    pub fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        covers: &mut CoverRegistry,
+        show_cover: bool,
+    ) {
+        // Cover path, if any. Resolved once up front so both layout
+        // decisions and rendering can branch on it without re-reading
+        // the field. `show_cover=false` (from the user's UI config) drops
+        // the cover regardless of whether a file exists on disk — useful
+        // for terminals where halfblock output renders as a blank gap.
+        let cover_path: Option<PathBuf> = if show_cover {
+            self.album
+                .as_ref()
+                .and_then(|a| a.cover_art_path.as_deref())
+                .map(PathBuf::from)
+                .filter(|p| p.exists())
+        } else {
+            None
+        };
+
+        // Always a single-line header now — the cover sits beside the
+        // track table (below), which is a better fit for square artwork
+        // than a short wide strip at the top.
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2), // album header
-                Constraint::Min(5),   // track table
+                Constraint::Length(2), // album header (line + bottom border)
+                Constraint::Min(5),    // content (cover + tracks)
                 Constraint::Length(2), // metadata
             ])
             .split(area);
 
         // Header
-        let header = if let Some(album) = &self.album {
+        let header_line = if let Some(album) = &self.album {
             let artist = album.album_artist.as_deref().unwrap_or("(unknown)");
             let year = album
                 .year
@@ -491,17 +661,36 @@ impl AlbumDetailView {
                 ),
             ])
         };
-        let p = Paragraph::new(header).block(
+
+        // Header is always a single line with a bottom border.
+        let p = Paragraph::new(header_line).block(
             Block::default()
                 .borders(Borders::BOTTOM)
                 .border_style(Style::default().fg(theme.border)),
         );
         frame.render_widget(p, chunks[0]);
 
+        // Content: split the inner area horizontally when a cover is
+        // present so the square artwork sits to the left of the track
+        // table instead of being squashed into a short top strip. The
+        // 24-col width gives roughly a square region (terminal cells are
+        // ~2:1 tall) without eating too much horizontal space from the
+        // track list.
+        let track_area = if let Some(ref path) = cover_path {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(24), Constraint::Min(20)])
+                .split(chunks[1]);
+            covers.render(frame, cols[0], theme, path);
+            cols[1]
+        } else {
+            chunks[1]
+        };
+
         // Track table — iterate over filtered indices
         let visible = self.filtered_indices();
         let total = visible.len();
-        let visible_height = chunks[1].height.saturating_sub(1) as usize;
+        let visible_height = track_area.height.saturating_sub(1) as usize;
         let scroll = if self.selected < self.scroll_offset {
             self.selected
         } else if self.selected + 1 >= self.scroll_offset + visible_height {
@@ -590,7 +779,7 @@ impl AlbumDetailView {
         )
         .header(header);
 
-        frame.render_widget(table, chunks[1]);
+        frame.render_widget(table, track_area);
 
         // Metadata footer: line 1 = album info, line 2 = selected track path
         // (or notice if one is active)

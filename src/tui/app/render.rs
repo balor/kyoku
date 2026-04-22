@@ -182,7 +182,13 @@ impl App {
             .split(area);
 
         self.search.render(frame, chunks[0], self.theme);
-        self.album_detail.render(frame, chunks[1], self.theme);
+        self.album_detail.render(
+            frame,
+            chunks[1],
+            self.theme,
+            &mut self.covers,
+            self.settings.ui.show_cover_preview,
+        );
         crate::tui::widgets::status_bar::render(
             frame,
             chunks[2],
@@ -192,6 +198,7 @@ impl App {
                 ("e", "edit"),
                 ("R", "rename"),
                 ("O", "organize"),
+                ("C", "fetch cover"),
                 ("a", "add to coll"),
                 ("o", "open dir"),
                 ("?", "keybinds"),
@@ -202,6 +209,7 @@ impl App {
                 ("e", "edit"),
                 ("R", "rename"),
                 ("O", "organize"),
+                ("C", "fetch cover"),
                 ("a", "add to coll"),
                 ("?", "keybinds"),
                 ("Esc", "back"),

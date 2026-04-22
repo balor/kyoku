@@ -95,7 +95,6 @@ pub(super) fn run_import_worker(
                     conn,
                     aid,
                     &mb.id,
-                    None,
                     &mb.artist,
                     &mb.title,
                     mb.year,
