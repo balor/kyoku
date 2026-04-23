@@ -506,7 +506,7 @@ impl ImportView {
             let mut client = client.lock().unwrap();
             let mut search_error: Option<String> = None;
             let mut candidates: Vec<MbCandidate> = match client
-                .search_releases(&artist, &album, 5)
+                .search_releases(&artist, &album, track_count, 5)
             {
                 Ok(releases) => releases
                     .into_iter()

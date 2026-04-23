@@ -87,6 +87,7 @@ impl MbClient {
         &mut self,
         artist: &str,
         album: &str,
+        local_track_count: u32,
         limit: u32,
     ) -> Result<Vec<MbRelease>> {
         // Clean inputs for matching:
@@ -95,8 +96,24 @@ impl MbClient {
         let clean_artist = strip_trailing_punct(artist);
         let clean_album = strip_parenthesized_suffix(album);
 
+        // Groups with several tracks can't plausibly match a single. MB's
+        // own relevance ranking doesn't know that — a same-named single
+        // often outranks the real album, pushing the album out of the
+        // top-N. Restrict the initial passes to Album/EP releases so the
+        // first thing we see is the right *kind* of release, not just the
+        // highest-scoring string match.
+        //
+        // `None` means "no type filter" — small groups (1-3 tracks) might
+        // legitimately *be* a single, so we leave them alone.
+        let type_filter: Option<&str> = if local_track_count >= 4 {
+            Some("primarytype:(Album OR EP)")
+        } else {
+            None
+        };
+
         // First attempt: artist + album (string match on credit name)
-        let releases = self.run_search_artist(&clean_artist, Some(&clean_album), limit)?;
+        let releases =
+            self.run_search_artist(&clean_artist, Some(&clean_album), limit, type_filter)?;
         if !releases.is_empty() {
             return Ok(releases);
         }
@@ -111,33 +128,54 @@ impl MbClient {
         };
 
         // Fallback 1: arid + album — catches releases whose credit uses a
-        // different script/name than the file tags.
+        // different script/name than the file tags. Keep the Album/EP filter
+        // here too — same reasoning as the first pass.
         if let Some(ref mbid) = arid {
-            let releases = self.run_search_arid(mbid, Some(&clean_album), limit)?;
+            let releases = self.run_search_arid(mbid, Some(&clean_album), limit, type_filter)?;
             if !releases.is_empty() {
                 return Ok(releases);
             }
         }
 
-        // Fallback 2: artist only (string match), in case album spelling differs
+        // From here on, filtering is a rescue operation — we've already
+        // tried the precise matches. Drop the type filter so we don't
+        // leave the user empty-handed when MB happens to classify the
+        // right release as e.g. Other/Broadcast/Compilation.
+
+        // Fallback 2: artist + album, no type filter (catches misclassified releases)
+        if type_filter.is_some() {
+            let releases =
+                self.run_search_artist(&clean_artist, Some(&clean_album), limit, None)?;
+            if !releases.is_empty() {
+                return Ok(releases);
+            }
+            if let Some(ref mbid) = arid {
+                let releases = self.run_search_arid(mbid, Some(&clean_album), limit, None)?;
+                if !releases.is_empty() {
+                    return Ok(releases);
+                }
+            }
+        }
+
+        // Fallback 3: artist only (string match), in case album spelling differs
         if !clean_artist.trim().is_empty() {
-            let releases = self.run_search_artist(&clean_artist, None, limit)?;
+            let releases = self.run_search_artist(&clean_artist, None, limit, None)?;
             if !releases.is_empty() {
                 return Ok(releases);
             }
         }
 
-        // Fallback 3: arid only (all releases by that artist, any credit)
+        // Fallback 4: arid only (all releases by that artist, any credit)
         if let Some(ref mbid) = arid {
-            let releases = self.run_search_arid(mbid, None, limit)?;
+            let releases = self.run_search_arid(mbid, None, limit, None)?;
             if !releases.is_empty() {
                 return Ok(releases);
             }
         }
 
-        // Fallback 4: original artist (with punctuation) + album
+        // Fallback 5: original artist (with punctuation) + album
         if clean_artist != artist {
-            let releases = self.run_search_artist(artist, Some(&clean_album), limit)?;
+            let releases = self.run_search_artist(artist, Some(&clean_album), limit, None)?;
             if !releases.is_empty() {
                 return Ok(releases);
             }
@@ -183,8 +221,9 @@ impl MbClient {
         artist: &str,
         album: Option<&str>,
         limit: u32,
+        type_filter: Option<&str>,
     ) -> Result<Vec<MbRelease>> {
-        let query = if let Some(album) = album {
+        let mut query = if let Some(album) = album {
             format!(
                 "artist:({}) AND release:({})",
                 escape_lucene(artist),
@@ -193,6 +232,10 @@ impl MbClient {
         } else {
             format!("artist:({})", escape_lucene(artist))
         };
+        if let Some(tf) = type_filter {
+            query.push_str(" AND ");
+            query.push_str(tf);
+        }
         self.run_release_query(&query, limit)
     }
 
@@ -201,8 +244,9 @@ impl MbClient {
         arid: &str,
         album: Option<&str>,
         limit: u32,
+        type_filter: Option<&str>,
     ) -> Result<Vec<MbRelease>> {
-        let query = if let Some(album) = album {
+        let mut query = if let Some(album) = album {
             format!(
                 "arid:{} AND release:({})",
                 arid,
@@ -211,6 +255,10 @@ impl MbClient {
         } else {
             format!("arid:{}", arid)
         };
+        if let Some(tf) = type_filter {
+            query.push_str(" AND ");
+            query.push_str(tf);
+        }
         self.run_release_query(&query, limit)
     }
 

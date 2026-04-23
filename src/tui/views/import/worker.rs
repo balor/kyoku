@@ -7,7 +7,8 @@ use lofty::tag::ItemKey;
 
 use crate::config::settings::NameScriptPreference;
 use crate::core::importer::detect_sibling_cover;
-use crate::core::tagger::{self, TagChanges, TagValue};
+use crate::core::tagger::{self, TagChanges, TagData, TagValue};
+use crate::db::models::Track;
 use crate::db::queries;
 use crate::external::musicbrainz::{MbClient, MbRelease, MbTrack};
 
@@ -202,6 +203,19 @@ pub(super) fn run_import_worker(
                 stamp_sibling_cover(conn, aid, group);
             }
 
+            // Pair each local track to an MB track once, up front. We need
+            // the pairing to survive iteration order (partial album like
+            // "tracks 5-11 of an 11-track release" has enumeration indices
+            // 0-6 — matching by index would tag them with MB positions 1-7
+            // instead of 5-11). Pairing uses track_number tags first, then
+            // title similarity (beets-style), then positional as a last
+            // resort. See `match_group_to_mb` for the full policy.
+            let mb_pairing: Vec<Option<usize>> = if let Some(mb) = &mb_full {
+                match_group_to_mb(&group.tracks, &mb.tracks)
+            } else {
+                Vec::new()
+            };
+
             for (i, (track, _tag_data)) in group.tracks.iter().enumerate() {
                 let path_str = track.file_path.display().to_string();
 
@@ -234,8 +248,10 @@ pub(super) fn run_import_worker(
 
                         // Apply per-track MB data (title, artist, recording MBID)
                         if let Some(mb) = &mb_full {
-                            // Match local track to MB track by position (1-based)
-                            let mb_track = mb.tracks.iter().find(|t| t.position == (i + 1) as u32);
+                            let mb_track = mb_pairing
+                                .get(i)
+                                .and_then(|o| *o)
+                                .and_then(|idx| mb.tracks.get(idx));
                             if let Some(mbt) = mb_track {
                                 queries::update_track_mb(
                                     conn,
@@ -300,6 +316,168 @@ pub(super) fn run_import_worker(
         parts.push(format!("Errors: {}", errors));
     }
     let _ = tx.send(ImportMessage::Complete(parts.join(", ")));
+}
+
+/// Pull a 1-based track position out of a filename's leading digits
+/// (e.g. `05. Foo.flac` → 5, `12 - Bar.mp3` → 12). Returns `None` if
+/// there are no leading digits or the number is 0. Used only as a
+/// fallback when the track_number tag is absent.
+fn parse_filename_position(path: &std::path::Path) -> Option<u32> {
+    let stem = path.file_stem()?.to_str()?;
+    let digits: String = stem.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<u32>().ok().filter(|n| *n > 0)
+}
+
+/// Strip common filename-boilerplate prefixes so a filename-derived title
+/// can be compared against an MB track title. Removes a leading `NN` /
+/// `NN.` / `NN -` sequence followed by a single `Artist - ` prefix.
+/// Called only when the title tag is absent (i.e. `track.title` is a raw
+/// file stem).
+fn strip_filename_title_prefixes(s: &str) -> String {
+    let after_digits = s.trim_start().trim_start_matches(|c: char| c.is_ascii_digit());
+    let after_sep =
+        after_digits.trim_start_matches(|c: char| c == '.' || c == '-' || c == '_' || c == ' ');
+    // Drop one "Something - " prefix if present (typical Artist separator).
+    if let Some((_, tail)) = after_sep.split_once(" - ") {
+        tail.trim().to_string()
+    } else {
+        after_sep.trim().to_string()
+    }
+}
+
+/// Pair each local track in a group to an MB track. Returns a vec parallel
+/// to `group_tracks`; `matches[i] = Some(mi)` means local track `i` maps to
+/// `mb_tracks[mi]`, and `None` means we couldn't confidently pair it.
+///
+/// Tag values are the authoritative signal throughout. Filename-derived
+/// hints only come into play when the corresponding tag is **absent** —
+/// they never override a present tag (even a wrong one). If a user has
+/// corrupted tags, that's an unrecoverable input-side problem, and
+/// silently second-guessing present tags would just hide it.
+///
+/// Matching runs in three passes, each claiming MB tracks greedily so later
+/// passes can't steal them:
+///
+///   1. **By track-number** — tag track number when present. If absent,
+///      parse leading digits from the filename (`05. Foo.flac` → 5).
+///      Handles the "partial album" case (files 5-11 of an 11-track
+///      release) directly.
+///   2. **By title similarity** — Jaro-Winkler ≥ 0.85 against the MB
+///      track title. When the title tag is absent, `track.title` is
+///      already filename-derived (see `tagger::read_track`), so we strip
+///      common `NN.` / `Artist -` prefixes before scoring to avoid
+///      blowing the similarity score on boilerplate.
+///   3. **Positional** — fill any remaining gap with the `(i+1)`-th MB
+///      track if still available. Kept for the truly tag-less case.
+///
+/// This mirrors the tiered strategy beets uses (it does full bipartite
+/// assignment with duration weighting, but for typical single-disc albums
+/// greedy matching on the two strongest signals is equivalent in practice).
+fn match_group_to_mb(
+    group_tracks: &[(Track, Option<TagData>)],
+    mb_tracks: &[MbTrack],
+) -> Vec<Option<usize>> {
+    let n = group_tracks.len();
+    let mut matches: Vec<Option<usize>> = vec![None; n];
+    let mut taken: Vec<bool> = vec![false; mb_tracks.len()];
+
+    // Pass 1: track_number (tag first, filename as fallback only when tag
+    // is absent) → MB position.
+    for (li, (track, tag_data)) in group_tracks.iter().enumerate() {
+        let tag_tn = tag_data.as_ref().and_then(|t| t.track_number);
+        let tn = match tag_tn {
+            Some(0) => continue, // bogus "0" — don't hijack anything
+            Some(n) => n,
+            None => match parse_filename_position(&track.file_path) {
+                Some(n) => n,
+                None => continue,
+            },
+        };
+        for (mi, mt) in mb_tracks.iter().enumerate() {
+            if taken[mi] {
+                continue;
+            }
+            if mt.position == tn {
+                matches[li] = Some(mi);
+                taken[mi] = true;
+                break;
+            }
+        }
+    }
+
+    // Pass 2: title similarity, greedy by best-score-first.
+    // Collect (local_idx, mb_idx, score) for all plausible pairs, then
+    // claim them in descending score order.
+    let mut candidates: Vec<(usize, usize, f64)> = Vec::new();
+    for (li, (track, tag_data)) in group_tracks.iter().enumerate() {
+        if matches[li].is_some() {
+            continue;
+        }
+        // If the title tag is absent, `track.title` carries the raw file
+        // stem (e.g. "05. 9Lana - Nandemoshitaikara"). Strip the usual
+        // prefixes so the comparison is between just the song titles.
+        let tag_title_present = tag_data
+            .as_ref()
+            .and_then(|t| t.title.as_deref())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let compare_title: String = if tag_title_present {
+            track.title.clone()
+        } else {
+            strip_filename_title_prefixes(&track.title)
+        };
+        let local_title: String = compare_title
+            .chars()
+            .flat_map(|c| c.to_lowercase())
+            .collect();
+        for (mi, mt) in mb_tracks.iter().enumerate() {
+            if taken[mi] {
+                continue;
+            }
+            let mb_title: String = mt
+                .title
+                .chars()
+                .flat_map(|c| c.to_lowercase())
+                .collect();
+            let score = strsim::jaro_winkler(&local_title, &mb_title);
+            if score >= 0.85 {
+                candidates.push((li, mi, score));
+            }
+        }
+    }
+    candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    for (li, mi, _) in candidates {
+        if matches[li].is_some() || taken[mi] {
+            continue;
+        }
+        matches[li] = Some(mi);
+        taken[mi] = true;
+    }
+
+    // Pass 3: positional fallback — fills remaining gaps for fully
+    // tag-less groups. Intentionally last so it can't overwrite a
+    // title-based hit.
+    for li in 0..n {
+        if matches[li].is_some() {
+            continue;
+        }
+        let want = (li + 1) as u32;
+        for (mi, mt) in mb_tracks.iter().enumerate() {
+            if taken[mi] {
+                continue;
+            }
+            if mt.position == want {
+                matches[li] = Some(mi);
+                taken[mi] = true;
+                break;
+            }
+        }
+    }
+
+    matches
 }
 
 /// Build the tag delta we apply to a file after a successful MB match.
@@ -367,5 +545,284 @@ fn stamp_sibling_cover(conn: &rusqlite::Connection, album_id: i64, group: &Impor
     };
     if let Some(cover) = detect_sibling_cover(source_dir) {
         let _ = queries::set_album_cover_path(conn, album_id, &cover.display().to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::models::{AudioFormat, TagStatus};
+    use std::path::PathBuf;
+
+    /// Build a (Track, TagData) pair where the tag data carries both the
+    /// title and the track number — i.e. the "tags are present" case.
+    fn local(title: &str, track_number: Option<u32>) -> (Track, Option<TagData>) {
+        let t = Track {
+            id: None,
+            album_id: None,
+            title: title.to_string(),
+            artist: None,
+            track_number,
+            disc_number: 1,
+            duration_ms: None,
+            mbid: None,
+            file_path: PathBuf::from(format!("/tmp/{}.mp3", title)),
+            file_format: AudioFormat::Mp3,
+            bitrate: None,
+            sample_rate: None,
+            tag_status: TagStatus::Unmatched,
+            source_dir: None,
+        };
+        let td = TagData {
+            title: Some(title.to_string()),
+            artist: None,
+            album: None,
+            album_artist: None,
+            year: None,
+            track_number,
+            disc_number: None,
+            genre: None,
+            duration: None,
+        };
+        (t, Some(td))
+    }
+
+    /// Build a (Track, TagData) pair simulating a fully tag-less file:
+    /// `track.title` carries the raw file stem (as `tagger::read_track`
+    /// does), and TagData's title/track_number are None.
+    fn local_untagged(file_stem: &str) -> (Track, Option<TagData>) {
+        let t = Track {
+            id: None,
+            album_id: None,
+            title: file_stem.to_string(),
+            artist: None,
+            track_number: None,
+            disc_number: 1,
+            duration_ms: None,
+            mbid: None,
+            file_path: PathBuf::from(format!("/tmp/{}.mp3", file_stem)),
+            file_format: AudioFormat::Mp3,
+            bitrate: None,
+            sample_rate: None,
+            tag_status: TagStatus::Unmatched,
+            source_dir: None,
+        };
+        let td = TagData {
+            title: None,
+            artist: None,
+            album: None,
+            album_artist: None,
+            year: None,
+            track_number: None,
+            disc_number: None,
+            genre: None,
+            duration: None,
+        };
+        (t, Some(td))
+    }
+
+    fn mb(position: u32, title: &str) -> MbTrack {
+        MbTrack {
+            position,
+            title: title.to_string(),
+            artist: None,
+            duration_ms: None,
+            recording_id: String::new(),
+        }
+    }
+
+    #[test]
+    fn partial_album_matches_by_track_number() {
+        // 7 local tracks carrying their real positions 5..=11; 11-track
+        // MB release. The index-based loop would put them at MB 1..=7,
+        // which was the actual bug. Pass 1 must pair them 5..=11.
+        let group = vec![
+            local("E", Some(5)),
+            local("F", Some(6)),
+            local("G", Some(7)),
+            local("H", Some(8)),
+            local("I", Some(9)),
+            local("J", Some(10)),
+            local("K", Some(11)),
+        ];
+        let mb_tracks: Vec<MbTrack> = (1..=11)
+            .map(|p| mb(p, &format!("mb-title-{}", p)))
+            .collect();
+
+        let matches = match_group_to_mb(&group, &mb_tracks);
+
+        let got: Vec<u32> = matches
+            .iter()
+            .map(|m| mb_tracks[m.unwrap()].position)
+            .collect();
+        assert_eq!(got, vec![5, 6, 7, 8, 9, 10, 11]);
+    }
+
+    #[test]
+    fn title_similarity_rescues_missing_track_numbers() {
+        // track_number tags absent across the board; titles match MB
+        // titles exactly. Pass 2 must pair them up by title instead of
+        // falling through to the positional fallback.
+        let group = vec![
+            local("Never Give Up (Instrumental)", None),
+            local("Let me battle (Instrumental)", None),
+            local("propose (Instrumental)", None),
+        ];
+        let mb_tracks = vec![
+            mb(1, "Let me battle"),
+            mb(2, "Never Give Up"),
+            mb(3, "propose"),
+            mb(4, "Let me battle (Instrumental)"),
+            mb(5, "Never Give Up (Instrumental)"),
+            mb(6, "propose (Instrumental)"),
+        ];
+
+        let matches = match_group_to_mb(&group, &mb_tracks);
+
+        let got_titles: Vec<&str> = matches
+            .iter()
+            .map(|m| mb_tracks[m.unwrap()].title.as_str())
+            .collect();
+        assert_eq!(
+            got_titles,
+            vec![
+                "Never Give Up (Instrumental)",
+                "Let me battle (Instrumental)",
+                "propose (Instrumental)",
+            ]
+        );
+    }
+
+    #[test]
+    fn positional_fallback_only_when_nothing_else_matches() {
+        // No track numbers, titles totally opaque (no similarity to MB
+        // titles). Must fall through to positional — regression check
+        // that the positional pass is *still* there for tag-less files.
+        let group = vec![
+            local("xxxxxxxxxxxxx", None),
+            local("yyyyyyyyyyyyy", None),
+        ];
+        let mb_tracks = vec![
+            mb(1, "Alpha"),
+            mb(2, "Beta"),
+            mb(3, "Gamma"),
+        ];
+
+        let matches = match_group_to_mb(&group, &mb_tracks);
+        assert_eq!(matches, vec![Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn zero_track_number_is_ignored() {
+        // Some rippers write "0" for track number on singles/unknowns.
+        // Must not let a "0" hijack anything — should fall through to
+        // title match.
+        let group = vec![local("Alpha", Some(0))];
+        let mb_tracks = vec![mb(1, "Alpha")];
+        let matches = match_group_to_mb(&group, &mb_tracks);
+        assert_eq!(matches, vec![Some(0)]);
+    }
+
+    fn local_untagged_at(stem: &str, dir_path: &str) -> (Track, Option<TagData>) {
+        let mut t = local_untagged(stem);
+        t.0.file_path = PathBuf::from(format!("{}/{}.flac", dir_path, stem));
+        t
+    }
+
+    #[test]
+    fn filename_position_used_when_track_number_tag_absent() {
+        // Fully tag-less files (title tag None, track_number tag None).
+        // Filenames carry positions 5..=7 — the filename-position
+        // fallback should place them at MB 5/6/7, not the dumb
+        // positional (i+1) = 1/2/3.
+        let group = vec![
+            local_untagged_at("05. 9Lana - Nandemoshitaikara", "/tmp/album"),
+            local_untagged_at("06. 9Lana - Never Give Up", "/tmp/album"),
+            local_untagged_at("07. 9Lana - propose", "/tmp/album"),
+        ];
+        let mb_tracks: Vec<MbTrack> = (1..=11)
+            .map(|p| mb(p, &format!("track-{}", p)))
+            .collect();
+
+        let matches = match_group_to_mb(&group, &mb_tracks);
+        let got: Vec<u32> = matches
+            .iter()
+            .map(|m| mb_tracks[m.unwrap()].position)
+            .collect();
+        assert_eq!(got, vec![5, 6, 7]);
+    }
+
+    #[test]
+    fn filename_title_prefixes_stripped_for_similarity() {
+        // No track_number tag, no title tag; track.title carries the
+        // raw file stem. Pass 1 puts them by filename position, but
+        // suppose positions collide — strip the digits-and-artist
+        // boilerplate so Pass 2 would still recognise the song title.
+        let group = vec![local_untagged("05. 9Lana - Nandemoshitaikara")];
+        // Only one MB track, and its position doesn't match the
+        // filename's "05". Pass 1 finds no position 5, Pass 2 must
+        // score "Nandemoshitaikara" (after stripping "05. 9Lana - ")
+        // against the MB title.
+        let mb_tracks = vec![mb(1, "Nandemoshitaikara")];
+        let matches = match_group_to_mb(&group, &mb_tracks);
+        assert_eq!(matches, vec![Some(0)]);
+    }
+
+    #[test]
+    fn present_title_tag_is_not_second_guessed_by_filename() {
+        // Tags are PRESENT but wrong (the corrupt-import scenario).
+        // Rule: tags stay authoritative — we must NOT reach for the
+        // filename to "repair" them. Here the tag title wrongly says
+        // "Let me battle" and the tag track_number wrongly says 1.
+        // MB has a "Let me battle" at position 1. The matcher should
+        // honour the (wrong) tags and pair local→MB 1, even though the
+        // filename hints at position 5 / title "Nandemoshitaikara".
+        let mut item = local("Let me battle", Some(1));
+        item.0.file_path =
+            PathBuf::from("/tmp/album/05. 9Lana - Nandemoshitaikara.flac");
+        let group = vec![item];
+        let mb_tracks = vec![
+            mb(1, "Let me battle"),
+            mb(5, "Nandemoshitaikara"),
+        ];
+        let matches = match_group_to_mb(&group, &mb_tracks);
+        // Honour the wrong tags — pair to MB position 1, not 5.
+        assert_eq!(matches, vec![Some(0)]);
+    }
+
+    #[test]
+    fn strip_filename_title_prefixes_cases() {
+        assert_eq!(
+            strip_filename_title_prefixes("05. 9Lana - Nandemoshitaikara"),
+            "Nandemoshitaikara"
+        );
+        assert_eq!(
+            strip_filename_title_prefixes("12 - Never Give Up"),
+            "Never Give Up"
+        );
+        // Digit-dot-only, no artist prefix
+        assert_eq!(strip_filename_title_prefixes("07. Song"), "Song");
+        // Already clean — untouched
+        assert_eq!(strip_filename_title_prefixes("Nandemoshitaikara"), "Nandemoshitaikara");
+    }
+
+    #[test]
+    fn parse_filename_position_cases() {
+        use std::path::Path;
+        assert_eq!(
+            parse_filename_position(Path::new("/x/05. 9Lana - Foo.flac")),
+            Some(5)
+        );
+        assert_eq!(
+            parse_filename_position(Path::new("/x/12 - Bar.mp3")),
+            Some(12)
+        );
+        // No leading digits
+        assert_eq!(
+            parse_filename_position(Path::new("/x/Unknown.flac")),
+            None
+        );
+        // "00" — treated as None so it can't hijack
+        assert_eq!(parse_filename_position(Path::new("/x/00_Intro.mp3")), None);
     }
 }
