@@ -54,6 +54,18 @@ pub fn run(current: Settings) -> anyhow::Result<()> {
     println!();
 
     let mut inbox_dirs: Vec<String> = Vec::new();
+
+    // Offer any Nicotine+ download directories we can detect.
+    for dir in detect_nicotine_download_dirs() {
+        let prompt = format!(
+            "Detected Nicotine+ download folder: {}  —  add as inbox?",
+            dir.display()
+        );
+        if Confirm::new(&prompt).with_default(true).prompt()? {
+            inbox_dirs.push(dir.display().to_string());
+        }
+    }
+
     loop {
         let prompt = if inbox_dirs.is_empty() {
             "Add an inbox directory (or press Enter to skip):"
@@ -222,4 +234,131 @@ theme = "{theme}"
     println!("You're all set! Run `kyoku` to launch the TUI, or `kyoku --help` for commands.");
 
     Ok(())
+}
+
+/// Look for a Nicotine+ config file and return any `downloaddir` paths that
+/// exist on disk. Nicotine+ stores its config as INI-ish text under the
+/// platform config dir (e.g. `~/.config/nicotine/config`).
+fn detect_nicotine_download_dirs() -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(config_dir) = dirs::config_dir() {
+        candidates.push(config_dir.join("nicotine").join("config"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        // Linux-style fallback (useful on macOS where users sometimes point
+        // Nicotine+ at `~/.config` instead of `~/Library/Application Support`).
+        let linux_style = home.join(".config").join("nicotine").join("config");
+        if !candidates.contains(&linux_style) {
+            candidates.push(linux_style);
+        }
+    }
+
+    let mut found: Vec<PathBuf> = Vec::new();
+    for cfg in candidates {
+        let Ok(content) = std::fs::read_to_string(&cfg) else {
+            continue;
+        };
+        let mut in_transfers = false;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some(section) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                in_transfers = section.eq_ignore_ascii_case("transfers");
+                continue;
+            }
+            if !in_transfers {
+                continue;
+            }
+            let Some((key, value)) = trimmed.split_once('=') else {
+                continue;
+            };
+            if key.trim() != "downloaddir" {
+                continue;
+            }
+            let value = value.trim().trim_matches(&['\'', '"'][..]);
+            if value.is_empty() {
+                continue;
+            }
+            let Some(expanded) = expand_path_vars(value) else {
+                continue;
+            };
+            if expanded.is_dir() && !found.contains(&expanded) {
+                found.push(expanded);
+            }
+        }
+    }
+    found
+}
+
+/// Expand `${VAR}`, `$VAR` and a leading `~` the way a Nicotine+ config
+/// path tends to use them. Returns `None` if any referenced variable can't
+/// be resolved (so we don't offer a broken path).
+fn expand_path_vars(input: &str) -> Option<PathBuf> {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' {
+            // ${VAR}
+            if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                let end = bytes[i + 2..].iter().position(|&b| b == b'}')?;
+                let name = &input[i + 2..i + 2 + end];
+                out.push_str(&resolve_var(name)?);
+                i += 2 + end + 1;
+                continue;
+            }
+            // $VAR
+            let rest = &input[i + 1..];
+            let name_len = rest
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                .count();
+            if name_len > 0 {
+                let name = &rest[..name_len];
+                out.push_str(&resolve_var(name)?);
+                i += 1 + name_len;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+
+    // Leading `~` or `~/` → home dir.
+    let path = if out == "~" {
+        dirs::home_dir()?
+    } else if let Some(rest) = out.strip_prefix("~/") {
+        dirs::home_dir()?.join(rest)
+    } else {
+        PathBuf::from(out)
+    };
+    Some(path)
+}
+
+/// Resolve a variable name found in a Nicotine+ config path. Falls back to
+/// Nicotine+'s own defaults for `NICOTINE_DATA_HOME` / `NICOTINE_CONFIG_HOME`
+/// when the env var isn't set, because Nicotine+ resolves those internally.
+fn resolve_var(name: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(name) {
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    let home = dirs::home_dir()?;
+    let path = match name {
+        "NICOTINE_DATA_HOME" => std::env::var("XDG_DATA_HOME")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(|v| PathBuf::from(v).join("nicotine"))
+            .unwrap_or_else(|| home.join(".local").join("share").join("nicotine")),
+        "NICOTINE_CONFIG_HOME" => std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(|v| PathBuf::from(v).join("nicotine"))
+            .unwrap_or_else(|| home.join(".config").join("nicotine")),
+        "XDG_DATA_HOME" => home.join(".local").join("share"),
+        "XDG_CONFIG_HOME" => home.join(".config"),
+        "HOME" => home,
+        _ => return None,
+    };
+    Some(path.to_string_lossy().into_owned())
 }
