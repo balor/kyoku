@@ -39,7 +39,9 @@ impl App {
                 );
             }
             AppView::Editor { track_id } => {
-                self.editor.load(&self.conn, *track_id).ok();
+                self.editor
+                    .load(&self.conn, *track_id, &self.settings)
+                    .ok();
             }
         }
         self.search.clear();

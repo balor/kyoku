@@ -972,8 +972,8 @@ A single MB entity can have both a native-script primary name and one or more La
 - [x] Album cover schema (`albums.cover_art_path`) + adopt sibling `cover.jpg` / `folder.jpg` on import, moved alongside audio on organize
 - [x] TUI album cover preview (kitty/iterm2/sixel; preview slot dropped on multiplexers and halfblocks-only terminals, with cover filename surfaced in the info panel instead)
 - [x] Opt-in cover fetch from Cover Art Archive (`coverartarchive.org/release/{mbid}`) with configurable size (`[musicbrainz] cover_art_size`) and overwrite confirmation
-- [ ] Full tag view on album/track detail — every `lofty` frame, grouped by kind
-- [ ] Inline tag editor (add / edit / delete, multi-value preserved) respecting `[tagging] write_tags`
+- [x] Full tag view on track edit — every standard `lofty::ItemKey` frame, grouped by kind (Standard / MusicBrainz / ReplayGain)
+- [x] Inline tag editor (edit existing frames, clear frame to delete, multi-value preserved via `|` separator) respecting `[tagging] write_tags`; atomic file write via copy-tmp-rename
 
 ### Milestone 7: Device Sync
 **Goal**: One-shot sync your library to external devices — MP3 players, SD cards, USB drives — entirely from the TUI. No saved configuration; each sync is an interactive wizard. Device-first workflow: pick the device, not a directory.

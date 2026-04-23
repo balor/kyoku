@@ -271,7 +271,7 @@ impl App {
         crate::tui::widgets::status_bar::render(frame, chunks[1], self.theme, &hints);
     }
 
-    fn render_editor(&self, frame: &mut Frame, area: Rect) {
+    fn render_editor(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
