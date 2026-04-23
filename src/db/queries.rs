@@ -1017,6 +1017,127 @@ fn map_track_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRow> {
     })
 }
 
+// ---------- Duplicate detection helpers ----------
+
+/// Slim view of an existing track row, as needed by the import-time
+/// duplicate picker. Covers just the fields the UI shows + enough identity
+/// to act on the row (id, file_path).
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // album_id/disc_number/duration_ms/mbid surface in v2 picker variants
+pub struct ExistingTrackRef {
+    pub id: i64,
+    pub album_id: Option<i64>,
+    pub title: String,
+    pub artist: Option<String>,
+    pub album_title: Option<String>,
+    pub track_number: Option<u32>,
+    pub disc_number: u32,
+    pub duration_ms: Option<u64>,
+    pub bitrate: Option<u32>,
+    pub file_format: String,
+    pub file_path: String,
+    pub file_size: Option<i64>,
+    pub mbid: Option<String>,
+    pub tag_status: String,
+}
+
+fn map_existing_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExistingTrackRef> {
+    Ok(ExistingTrackRef {
+        id: row.get(0)?,
+        album_id: row.get(1)?,
+        title: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        artist: row.get(3)?,
+        album_title: row.get(4)?,
+        track_number: row.get(5)?,
+        disc_number: row.get::<_, Option<u32>>(6)?.unwrap_or(1),
+        duration_ms: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+        bitrate: row.get(8)?,
+        file_format: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+        file_path: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+        file_size: row.get(11)?,
+        mbid: row.get(12)?,
+        tag_status: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
+    })
+}
+
+const EXISTING_TRACK_SELECT: &str = "SELECT \
+    t.id, t.album_id, t.title, t.artist, a.title AS album_title, \
+    t.track_number, t.disc_number, t.duration_ms, t.bitrate, \
+    t.file_format, t.file_path, t.file_size, t.mbid, t.tag_status \
+    FROM tracks t LEFT JOIN albums a ON a.id = t.album_id";
+
+/// Look up an existing track by its MusicBrainz recording id. Returns the
+/// first hit if duplicate MBIDs ever slipped in (shouldn't, but the DB has
+/// no unique constraint there so we don't fail hard).
+///
+/// Unused for now — staged for the next iteration of duplicate detection,
+/// which will also key on MBID once the worker's MB release fetch moves
+/// ahead of the detection step.
+#[allow(dead_code)]
+pub fn find_track_by_mbid(conn: &Connection, mbid: &str) -> Result<Option<ExistingTrackRef>> {
+    let sql = format!("{} WHERE t.mbid = ?1 LIMIT 1", EXISTING_TRACK_SELECT);
+    let row = conn
+        .query_row(&sql, [mbid], map_existing_track)
+        .ok();
+    Ok(row)
+}
+
+/// Look up an existing track by its position within an album (album + disc
+/// + track number). Used as the secondary duplicate signal when MBIDs
+/// aren't available on one or both sides.
+pub fn find_track_by_album_slot(
+    conn: &Connection,
+    album_id: i64,
+    disc_number: u32,
+    track_number: u32,
+) -> Result<Option<ExistingTrackRef>> {
+    let sql = format!(
+        "{} WHERE t.album_id = ?1 AND t.disc_number = ?2 AND t.track_number = ?3 LIMIT 1",
+        EXISTING_TRACK_SELECT
+    );
+    let row = conn
+        .query_row(
+            &sql,
+            rusqlite::params![album_id, disc_number, track_number],
+            map_existing_track,
+        )
+        .ok();
+    Ok(row)
+}
+
+// ---------- Orphaned files ----------
+
+/// Record a file as orphaned — its DB row is gone (or about to go) but the
+/// file itself is still on disk, pending cleanup by the organize step.
+pub fn insert_orphan(
+    conn: &Connection,
+    file_path: &str,
+    title: Option<&str>,
+    artist: Option<&str>,
+    album_title: Option<&str>,
+    reason: &str,
+) -> Result<()> {
+    // Same path might already be tracked as an orphan from an earlier run
+    // — OR IGNORE keeps the older row (first-wins), which preserves the
+    // original reason/timestamp.
+    conn.execute(
+        "INSERT OR IGNORE INTO orphaned_files \
+            (file_path, title, artist, album_title, reason) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![file_path, title, artist, album_title, reason],
+    )?;
+    Ok(())
+}
+
+/// How many orphaned files are currently awaiting cleanup.
+///
+/// Unused for now — will be read by the organize step's cleanup pass.
+#[allow(dead_code)]
+pub fn count_orphans(conn: &Connection) -> Result<i64> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM orphaned_files", [], |row| row.get(0))?;
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

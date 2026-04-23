@@ -36,6 +36,9 @@ impl ImportView {
             ImportStep::Review => {
                 self.handle_review_key(key, conn);
             }
+            ImportStep::ResolveDuplicates => {
+                self.handle_resolve_dup_key(key);
+            }
             ImportStep::Importing => {
                 // Can't interact during import
             }
@@ -152,7 +155,14 @@ impl ImportView {
         // p goes back to the last group to change a decision.
         if self.is_in_summary() {
             match key.code {
-                KeyCode::Char('p') => self.prev_group(),
+                KeyCode::Char('p') => {
+                    // Actions may change after going back — the cached
+                    // conflict preview is no longer trustworthy.
+                    self.conflicts.clear();
+                    self.decisions.clear();
+                    self.conflict_cursor = 0;
+                    self.prev_group();
+                }
                 KeyCode::Enter => {
                     if self.groups.iter().all(|g| g.action == GroupAction::Skip) {
                         // Nothing to import — emit an empty completion so the
@@ -160,6 +170,10 @@ impl ImportView {
                         self.result_summary =
                             Some("Nothing imported (all groups skipped)".to_string());
                         self.step = ImportStep::Complete;
+                    } else if !self.conflicts.is_empty() {
+                        // Detection already ran when we entered the summary
+                        // — just jump to the resolver.
+                        self.step = ImportStep::ResolveDuplicates;
                     } else {
                         self.start_import();
                     }
@@ -266,6 +280,33 @@ impl ImportView {
             KeyCode::Char('p') => self.prev_group(),
             KeyCode::Char('r') => self.retry_mb_for_current_group(),
             _ => {}
+        }
+
+        // If that action bumped us into the summary view for the first
+        // time, run duplicate detection now so the summary can advertise
+        // the count. Cached in `self.conflicts`; cleared when the user
+        // hits `p` to go back.
+        if self.is_in_summary() && self.conflicts.is_empty() {
+            self.refresh_conflict_preview(conn);
+        }
+    }
+
+    /// Re-run duplicate detection against the current set of groups +
+    /// actions. Populates `conflicts` / `decisions` for the summary
+    /// line and the resolver step. Called when entering the summary.
+    fn refresh_conflict_preview(&mut self, conn: &Connection) {
+        match super::dup_detect::detect(conn, &self.groups) {
+            Ok(conflicts) => {
+                self.decisions = conflicts.iter().map(default_decision_for).collect();
+                self.conflicts = conflicts;
+                self.conflict_cursor = 0;
+            }
+            Err(e) => {
+                tracing::warn!("duplicate detection failed: {}", e);
+                self.conflicts.clear();
+                self.decisions.clear();
+                self.conflict_cursor = 0;
+            }
         }
     }
 
@@ -621,15 +662,67 @@ impl ImportView {
         }
     }
 
+    /// Keyboard for the `ResolveDuplicates` step: 1/2 pick a side,
+    /// n/p navigate, Enter commit and proceed to import.
+    fn handle_resolve_dup_key(&mut self, key: KeyEvent) {
+        use super::dup_detect::ConflictDecision as D;
+        if self.conflicts.is_empty() {
+            // Shouldn't happen, but guard against accidentally stranding
+            // the user on an empty picker.
+            self.start_import();
+            return;
+        }
+        match key.code {
+            KeyCode::Char('1') => {
+                if let Some(d) = self.decisions.get_mut(self.conflict_cursor) {
+                    *d = D::KeepOther;
+                }
+                self.advance_conflict_cursor();
+            }
+            KeyCode::Char('2') => {
+                if let Some(d) = self.decisions.get_mut(self.conflict_cursor) {
+                    *d = D::KeepNew;
+                }
+                self.advance_conflict_cursor();
+            }
+            KeyCode::Char('n') => self.advance_conflict_cursor(),
+            KeyCode::Char('p') => {
+                if self.conflict_cursor > 0 {
+                    self.conflict_cursor -= 1;
+                }
+            }
+            KeyCode::Enter => {
+                // All conflicts have a decision already (defaulted on
+                // entry, then possibly edited). Fire the import.
+                self.start_import();
+            }
+            _ => {}
+        }
+    }
+
+    fn advance_conflict_cursor(&mut self) {
+        if self.conflict_cursor + 1 < self.conflicts.len() {
+            self.conflict_cursor += 1;
+        }
+    }
+
     fn start_import(&mut self) {
         self.step = ImportStep::Importing;
 
-        let groups_to_import: Vec<ImportGroup> = self
+        // Materialise the decisions into per-track plans *before* we
+        // filter groups, so the (group_idx, track_idx) coordinates in
+        // `BatchTrackRef` still align. Then filter Skip groups (plans
+        // stay aligned because we map groups+plans in lockstep).
+        let plans =
+            super::dup_detect::plan_from_decisions(&self.groups, &self.conflicts, &self.decisions);
+
+        let (groups_to_import, plans_to_import): (Vec<ImportGroup>, Vec<Vec<_>>) = self
             .groups
             .iter()
-            .filter(|g| g.action != GroupAction::Skip)
-            .cloned()
-            .collect();
+            .zip(plans.into_iter())
+            .filter(|(g, _)| g.action != GroupAction::Skip)
+            .map(|(g, p)| (g.clone(), p))
+            .unzip();
 
         // Count tracks in groups the user marked Skip — we want to show
         // those in the summary so the user sees what they decided to drop.
@@ -652,6 +745,7 @@ impl ImportView {
         std::thread::spawn(move || {
             run_import_worker(
                 groups_to_import,
+                plans_to_import,
                 user_skipped,
                 rate_limit_ms,
                 name_script,
@@ -659,6 +753,18 @@ impl ImportView {
                 tx,
             );
         });
+    }
+}
+
+/// Pick the conservative default for a freshly-detected conflict. Library
+/// conflicts default to "keep what's already there" (no destructive op);
+/// intra-batch conflicts default to "keep the first" (the later one is
+/// dropped). User can override with 1/2/S before confirming.
+fn default_decision_for(conflict: &super::dup_detect::Conflict) -> super::dup_detect::ConflictDecision {
+    use super::dup_detect::{ConflictDecision, DupOther};
+    match conflict.other {
+        DupOther::Library(_) => ConflictDecision::KeepOther,
+        DupOther::Batch(_) => ConflictDecision::KeepOther,
     }
 }
 

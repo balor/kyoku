@@ -2,9 +2,12 @@
 //! sibling submodules — `wizard` owns key/async logic, `render` owns tick
 //! and every draw call, `worker` hosts the standalone import thread.
 
+mod dup_detect;
 mod render;
 mod wizard;
 mod worker;
+
+pub use dup_detect::{Conflict, ConflictDecision};
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
@@ -23,6 +26,10 @@ pub enum ImportStep {
     SelectSource,
     Scanning,
     Review,
+    /// Reached after the review summary when duplicate detection finds
+    /// conflicts. User picks a side per conflict, then moves on to
+    /// `Importing`. Skipped entirely when there are no conflicts.
+    ResolveDuplicates,
     Importing,
     Complete,
 }
@@ -104,6 +111,13 @@ pub struct ImportView {
     collection_picker: Option<PickCollectionPopup>,
     /// Receives progress messages from the background importer.
     import_rx: Option<mpsc::Receiver<ImportMessage>>,
+    /// Pending duplicate conflicts detected between review and import.
+    /// `decisions[i]` is the user's choice for `conflicts[i]`; `cursor`
+    /// is the one currently on screen. Empty when no conflicts (the
+    /// wizard skips `ResolveDuplicates` entirely in that case).
+    pub(super) conflicts: Vec<Conflict>,
+    pub(super) decisions: Vec<ConflictDecision>,
+    pub(super) conflict_cursor: usize,
 }
 
 enum ScanMessage {
@@ -150,6 +164,9 @@ impl Default for ImportView {
             mbid_fetch_rx: None,
             collection_picker: None,
             import_rx: None,
+            conflicts: Vec::new(),
+            decisions: Vec::new(),
+            conflict_cursor: 0,
         }
     }
 }
@@ -175,6 +192,9 @@ impl ImportView {
         self.mbid_fetch_rx = None;
         self.collection_picker = None;
         self.import_rx = None;
+        self.conflicts.clear();
+        self.decisions.clear();
+        self.conflict_cursor = 0;
         self.rate_limit_ms = rate_limit_ms;
         self.name_script = name_script;
         self.write_tags = write_tags;
@@ -204,7 +224,10 @@ impl ImportView {
     pub fn can_cancel(&self) -> bool {
         matches!(
             self.step,
-            ImportStep::SelectSource | ImportStep::Review | ImportStep::Complete
+            ImportStep::SelectSource
+                | ImportStep::Review
+                | ImportStep::ResolveDuplicates
+                | ImportStep::Complete
         )
     }
 

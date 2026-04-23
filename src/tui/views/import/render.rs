@@ -11,6 +11,7 @@ use rusqlite::Connection;
 
 use crate::tui::themes::Theme;
 
+use super::dup_detect::{ConflictDecision, DupOther};
 use super::{GroupAction, ImportMessage, ImportStep, ImportView, MbMatchState, ScanMessage};
 
 impl ImportView {
@@ -161,6 +162,13 @@ impl ImportView {
                     hints
                 }
             }
+            ImportStep::ResolveDuplicates => vec![
+                ("1", "keep A"),
+                ("2", "keep B"),
+                ("n/p", "nav"),
+                ("Enter", "confirm & import"),
+                ("Esc", "cancel"),
+            ],
             ImportStep::Importing => vec![],
             ImportStep::Complete => vec![("any key", "done")],
         }
@@ -171,6 +179,7 @@ impl ImportView {
             ImportStep::SelectSource => self.render_select_source(frame, area, theme),
             ImportStep::Scanning => self.render_scanning(frame, area, theme),
             ImportStep::Review => self.render_review(frame, area, theme),
+            ImportStep::ResolveDuplicates => self.render_resolve_dups(frame, area, theme),
             ImportStep::Importing => self.render_importing(frame, area, theme),
             ImportStep::Complete => self.render_complete(frame, area, theme),
         }
@@ -679,10 +688,44 @@ impl ImportView {
             )));
         }
 
+        // Duplicate preview — detection runs when the user enters this
+        // summary; the count is stashed on the view. Surfacing it here
+        // so nobody is surprised by a mid-flow resolver screen.
+        if !self.conflicts.is_empty() {
+            let (lib_count, batch_count) = self.conflicts.iter().fold((0u32, 0u32), |acc, c| {
+                match c.other {
+                    super::dup_detect::DupOther::Library(_) => (acc.0 + 1, acc.1),
+                    super::dup_detect::DupOther::Batch(_) => (acc.0, acc.1 + 1),
+                }
+            });
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "  Duplicates: ",
+                    Style::default().fg(theme.yellow).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "{} conflict(s) detected ({} already in library, {} within this batch).",
+                        self.conflicts.len(),
+                        lib_count,
+                        batch_count
+                    ),
+                    Style::default().fg(theme.fg_dim),
+                ),
+            ]));
+            lines.push(Line::from(Span::styled(
+                "  You'll pick a side for each before import starts.",
+                Style::default().fg(theme.fg_muted),
+            )));
+        }
+
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             if all_skipped {
                 "  Nothing to import. Press Enter or Esc to close, or p to go back and change."
+            } else if !self.conflicts.is_empty() {
+                "  Press Enter to resolve duplicates, p to go back and change, Esc to cancel."
             } else {
                 "  Press Enter to import, p to go back and change, Esc to cancel."
             },
@@ -691,6 +734,233 @@ impl ImportView {
 
         let p = Paragraph::new(lines);
         frame.render_widget(p, area);
+    }
+
+    fn render_resolve_dups(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let block = Block::default()
+            .title(Span::styled(
+                " Resolve Duplicates ",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let Some(conflict) = self.conflicts.get(self.conflict_cursor) else {
+            // Cursor out of range (shouldn't happen — the wizard guards
+            // against an empty list). Render a terse hint and let Enter
+            // fall through to start_import.
+            let p = Paragraph::new(Span::styled(
+                "  No conflicts — press Enter to continue.",
+                Style::default().fg(theme.fg_dim),
+            ));
+            frame.render_widget(p, inner);
+            return;
+        };
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // header
+                Constraint::Min(0),    // side-by-side panels
+                Constraint::Length(4), // footer hint
+            ])
+            .split(inner);
+
+        // ── Header: progress + conflict description
+        let decision = self.decisions.get(self.conflict_cursor).copied();
+        let decision_label = match decision {
+            Some(ConflictDecision::KeepOther) => Span::styled(
+                "  → keep A",
+                Style::default().fg(theme.green).add_modifier(Modifier::BOLD),
+            ),
+            Some(ConflictDecision::KeepNew) => Span::styled(
+                "  → keep B (replace)",
+                Style::default().fg(theme.yellow).add_modifier(Modifier::BOLD),
+            ),
+            None => Span::raw(""),
+        };
+        let total = self.conflicts.len();
+        let header_lines = vec![
+            Line::from(Span::styled(
+                format!("  Conflict {} of {}", self.conflict_cursor + 1, total),
+                Style::default()
+                    .fg(theme.fg)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(vec![
+                Span::styled(
+                    "  Same slot on the same album.",
+                    Style::default().fg(theme.fg_dim),
+                ),
+                decision_label,
+            ]),
+        ];
+        frame.render_widget(Paragraph::new(header_lines), chunks[0]);
+
+        // ── Panels: A (other) | B (new)
+        let panels = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(chunks[1]);
+
+        let a_label = match &conflict.other {
+            DupOther::Library(_) => "A — already in library",
+            DupOther::Batch(_) => "A — earlier in this batch",
+        };
+        let a_lines: Vec<Line> = match &conflict.other {
+            DupOther::Library(e) => vec![
+                Line::from(Span::styled(
+                    format!("  {}", e.title),
+                    Style::default()
+                        .fg(theme.fg)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    format!(
+                        "  {} · pos {}",
+                        e.artist.as_deref().unwrap_or("—"),
+                        e.track_number
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "—".into())
+                    ),
+                    Style::default().fg(theme.fg_dim),
+                )),
+                Line::from(Span::styled(
+                    format!(
+                        "  {} · {} kbps{}",
+                        e.file_format.to_uppercase(),
+                        e.bitrate.map(|b| b.to_string()).unwrap_or_else(|| "—".into()),
+                        e.file_size
+                            .map(|s| format!(" · {:.1} MB", s as f64 / 1_000_000.0))
+                            .unwrap_or_default(),
+                    ),
+                    Style::default().fg(theme.fg_muted),
+                )),
+                Line::from(Span::styled(
+                    format!("  {}", e.file_path),
+                    Style::default().fg(theme.fg_muted),
+                )),
+                Line::from(Span::styled(
+                    format!("  status: {}", e.tag_status),
+                    Style::default().fg(theme.fg_muted),
+                )),
+            ],
+            DupOther::Batch(r) => {
+                let (t, _td) = self
+                    .groups
+                    .get(r.group)
+                    .and_then(|g| g.tracks.get(r.index))
+                    .map(|(t, td)| (t.clone(), td.clone()))
+                    .expect("batch ref must point at an existing track");
+                vec![
+                    Line::from(Span::styled(
+                        format!("  {}", t.title),
+                        Style::default()
+                            .fg(theme.fg)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(Span::styled(
+                        format!(
+                            "  {} · pos {}",
+                            t.artist.as_deref().unwrap_or("—"),
+                            t.track_number
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|| "—".into())
+                        ),
+                        Style::default().fg(theme.fg_dim),
+                    )),
+                    Line::from(Span::styled(
+                        format!(
+                            "  {} · {} kbps",
+                            t.file_format.as_str().to_uppercase(),
+                            t.bitrate.map(|b| b.to_string()).unwrap_or_else(|| "—".into()),
+                        ),
+                        Style::default().fg(theme.fg_muted),
+                    )),
+                    Line::from(Span::styled(
+                        format!("  {}", t.file_path.display()),
+                        Style::default().fg(theme.fg_muted),
+                    )),
+                ]
+            }
+        };
+        let a_block = Block::default()
+            .title(Span::styled(
+                format!(" {} ", a_label),
+                Style::default().fg(theme.cyan),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border));
+        frame.render_widget(Paragraph::new(a_lines).block(a_block), panels[0]);
+
+        // B panel — the new batch track
+        let (new_track, _) = self
+            .groups
+            .get(conflict.new.group)
+            .and_then(|g| g.tracks.get(conflict.new.index))
+            .map(|(t, td)| (t.clone(), td.clone()))
+            .expect("conflict.new must reference an existing track");
+        let b_lines = vec![
+            Line::from(Span::styled(
+                format!("  {}", new_track.title),
+                Style::default()
+                    .fg(theme.fg)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "  {} · pos {}",
+                    new_track.artist.as_deref().unwrap_or("—"),
+                    new_track
+                        .track_number
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "—".into())
+                ),
+                Style::default().fg(theme.fg_dim),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "  {} · {} kbps",
+                    new_track.file_format.as_str().to_uppercase(),
+                    new_track
+                        .bitrate
+                        .map(|b| b.to_string())
+                        .unwrap_or_else(|| "—".into()),
+                ),
+                Style::default().fg(theme.fg_muted),
+            )),
+            Line::from(Span::styled(
+                format!("  {}", new_track.file_path.display()),
+                Style::default().fg(theme.fg_muted),
+            )),
+        ];
+        let b_block = Block::default()
+            .title(Span::styled(
+                " B — new (import) ",
+                Style::default().fg(theme.yellow),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border));
+        frame.render_widget(Paragraph::new(b_lines).block(b_block), panels[1]);
+
+        // ── Footer: keys + progress note
+        let resolved = self.conflict_cursor + 1;
+        let footer_lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  [1] keep A   [2] keep B (replace)   [n/p] nav   [Enter] confirm & import",
+                Style::default().fg(theme.fg_dim),
+            )),
+            Line::from(Span::styled(
+                format!("  Viewing {}/{}. Enter commits all decisions and starts the import.", resolved, total),
+                Style::default().fg(theme.fg_muted),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(footer_lines), chunks[2]);
     }
 
     fn render_importing(&self, frame: &mut Frame, area: Rect, theme: &Theme) {

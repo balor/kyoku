@@ -16,6 +16,10 @@ use super::{GroupAction, ImportGroup, ImportMessage};
 
 pub(super) fn run_import_worker(
     groups_to_import: Vec<ImportGroup>,
+    // Parallel to `groups_to_import`: `plans[gi][ti]` is the per-track
+    // decision from the duplicate-resolution step. Empty inner vecs (or an
+    // empty outer vec) mean "no plans — insert everything normally".
+    plans: Vec<Vec<super::dup_detect::BatchTrackPlan>>,
     user_skipped: u32,
     rate_limit_ms: u64,
     name_script: NameScriptPreference,
@@ -37,6 +41,11 @@ pub(super) fn run_import_worker(
     let mut skipped = 0u32;
     let mut errors = 0u32;
     let mut added_to_collection = 0u32;
+    // Counters for the duplicate-resolution outcome — surfaced in the
+    // final summary so the user sees what their picks did.
+    let mut dup_replaced = 0u32;
+    let mut dup_user_skipped = 0u32;
+    let mut orphaned = 0u32;
 
     // Fetch full release data for MB-matched groups (search results don't
     // include track listings — we need them for per-track metadata).
@@ -44,8 +53,9 @@ pub(super) fn run_import_worker(
 
     {
         let _ = tx.send(ImportMessage::Progress(done, total_tracks));
-        for group in &groups_to_import {
+        for (gi, group) in groups_to_import.iter().enumerate() {
             let loose = group.action == GroupAction::Loose;
+            let group_plans = plans.get(gi);
 
             // Resolve this group's target collection (if any)
             let target_collection_name = group.target_collection.trim();
@@ -219,6 +229,51 @@ pub(super) fn run_import_worker(
             for (i, (track, _tag_data)) in group.tracks.iter().enumerate() {
                 let path_str = track.file_path.display().to_string();
 
+                // Duplicate-resolution plan for this track, if any. Must
+                // happen before the path-existence check because the user
+                // may have explicitly chosen to replace an existing row
+                // (its path could collide with the incoming file's path,
+                // though usually they're different on disk).
+                let plan = group_plans.and_then(|gp| gp.get(i));
+
+                if let Some(p) = plan
+                    && p.skip
+                {
+                    dup_user_skipped += 1;
+                    done += 1;
+                    let _ = tx.send(ImportMessage::Progress(done, total_tracks));
+                    continue;
+                }
+
+                // Apply a "replace" decision: delete the existing row
+                // (its file stays on disk) and log the path as an orphan
+                // for the next organize pass to clean up.
+                if let Some(p) = plan
+                    && let Some(repl) = p.replace_existing.as_ref()
+                {
+                    if let Err(e) = queries::delete_track(conn, repl.id) {
+                        tracing::warn!("dup replace: delete_track({}) failed: {}", repl.id, e);
+                    } else {
+                        dup_replaced += 1;
+                    }
+                    if let Err(e) = queries::insert_orphan(
+                        conn,
+                        &repl.file_path,
+                        Some(&repl.title),
+                        repl.artist.as_deref(),
+                        repl.album_title.as_deref(),
+                        "replaced by duplicate during import",
+                    ) {
+                        tracing::warn!(
+                            "dup replace: insert_orphan({}) failed: {}",
+                            repl.file_path,
+                            e
+                        );
+                    } else {
+                        orphaned += 1;
+                    }
+                }
+
                 if queries::track_exists_by_path(conn, &path_str).unwrap_or(false) {
                     skipped += 1;
                     done += 1;
@@ -307,7 +362,24 @@ pub(super) fn run_import_worker(
         parts.push(format!("Added to collections: {}", added_to_collection));
     }
     if skipped > 0 {
+        // "Duplicates" here means "file path already in DB". Keep the
+        // label as-is so old users recognise it; the new resolution
+        // counters below use distinct wording.
         parts.push(format!("Duplicates: {}", skipped));
+    }
+    if dup_replaced > 0 {
+        parts.push(format!("Replaced: {}", dup_replaced));
+    }
+    if dup_user_skipped > 0 {
+        parts.push(format!("Dup-skipped: {}", dup_user_skipped));
+    }
+    if orphaned > 0 {
+        // The replaced files are still on disk — mention it so the user
+        // knows the next organize pass will clean them up.
+        parts.push(format!(
+            "Orphaned: {} (will be removed on next organize)",
+            orphaned
+        ));
     }
     if user_skipped > 0 {
         parts.push(format!("Skipped: {}", user_skipped));
