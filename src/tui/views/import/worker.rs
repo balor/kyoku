@@ -3,11 +3,13 @@
 
 use std::sync::mpsc;
 
+use lofty::tag::ItemKey;
+
 use crate::config::settings::NameScriptPreference;
 use crate::core::importer::detect_sibling_cover;
-use crate::core::tagger;
+use crate::core::tagger::{self, TagChanges, TagValue};
 use crate::db::queries;
-use crate::external::musicbrainz::MbClient;
+use crate::external::musicbrainz::{MbClient, MbRelease, MbTrack};
 
 use super::{GroupAction, ImportGroup, ImportMessage};
 
@@ -16,6 +18,7 @@ pub(super) fn run_import_worker(
     user_skipped: u32,
     rate_limit_ms: u64,
     name_script: NameScriptPreference,
+    write_tags: bool,
     tx: mpsc::Sender<ImportMessage>,
 ) {
     let conn = match crate::db::open_database(crate::config::paths::database_file()) {
@@ -243,6 +246,23 @@ pub(super) fn run_import_worker(
                                     "matched",
                                 )
                                 .ok();
+
+                                // Mirror the MB match to the file's tags. DB is
+                                // now authoritative either way, but beets-style
+                                // behaviour is to keep the file in sync so the
+                                // library is portable to other tools.
+                                if write_tags {
+                                    let changes = build_mb_tag_changes(mb, mbt);
+                                    if let Err(e) =
+                                        tagger::write_tags(&track.file_path, &changes)
+                                    {
+                                        tracing::warn!(
+                                            "tag write failed for {}: {}",
+                                            track.file_path.display(),
+                                            e
+                                        );
+                                    }
+                                }
                             } else {
                                 // No positional match — still mark as matched at album level
                                 queries::set_track_tag_status(conn, track_id, "matched")
@@ -280,6 +300,58 @@ pub(super) fn run_import_worker(
         parts.push(format!("Errors: {}", errors));
     }
     let _ = tx.send(ImportMessage::Complete(parts.join(", ")));
+}
+
+/// Build the tag delta we apply to a file after a successful MB match.
+/// Covers the core fields every format supports plus the two MBIDs we carry
+/// through (release + recording). Other MBIDs aren't populated upstream yet,
+/// and on ID3v2 the MB-prefixed keys are lossy via lofty's generic `Tag`
+/// API — see the limitation note in `core::tagger` — so MP3 imports still
+/// benefit from the non-MB frames even when the MBIDs silently drop.
+fn build_mb_tag_changes(mb: &MbRelease, mbt: &MbTrack) -> TagChanges {
+    let mut changes = TagChanges::default();
+    let artist = mbt.artist.as_deref().unwrap_or(&mb.artist);
+
+    changes
+        .set
+        .push((ItemKey::TrackTitle, TagValue::Text(mbt.title.clone())));
+    changes
+        .set
+        .push((ItemKey::TrackArtist, TagValue::Text(artist.to_string())));
+    changes
+        .set
+        .push((ItemKey::AlbumTitle, TagValue::Text(mb.title.clone())));
+    changes
+        .set
+        .push((ItemKey::AlbumArtist, TagValue::Text(mb.artist.clone())));
+    if let Some(year) = mb.year {
+        changes
+            .set
+            .push((ItemKey::Year, TagValue::Text(year.to_string())));
+    }
+    changes.set.push((
+        ItemKey::TrackNumber,
+        TagValue::Text(mbt.position.to_string()),
+    ));
+    let total = if mb.track_count > 0 {
+        mb.track_count
+    } else {
+        mb.tracks.len() as u32
+    };
+    if total > 0 {
+        changes
+            .set
+            .push((ItemKey::TrackTotal, TagValue::Text(total.to_string())));
+    }
+    changes.set.push((
+        ItemKey::MusicBrainzReleaseId,
+        TagValue::Text(mb.id.clone()),
+    ));
+    changes.set.push((
+        ItemKey::MusicBrainzRecordingId,
+        TagValue::Text(mbt.recording_id.clone()),
+    ));
+    changes
 }
 
 /// Scan the group's source directory for a cover-art file and stamp it onto

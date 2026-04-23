@@ -36,6 +36,7 @@ impl App {
                     &self.conn,
                     self.settings.musicbrainz.rate_limit_ms,
                     self.settings.musicbrainz.name_script,
+                    self.settings.tagging.write_tags,
                 );
             }
             AppView::Editor { track_id } => {

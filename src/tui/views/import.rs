@@ -83,6 +83,9 @@ pub struct ImportView {
     /// shared `MbClient` and to the import worker so both apply the same
     /// resolution on search-result fetches and on per-group commits.
     pub name_script: crate::config::settings::NameScriptPreference,
+    /// Whether the import worker should mirror MB-matched metadata to the
+    /// audio file's tags. Sourced from `[tagging] write_tags` in config.
+    pub write_tags: bool,
     scan_rx: Option<mpsc::Receiver<ScanMessage>>,
     /// Persistent MB search channel. Lives across all searches so a prefetch
     /// of the *next* group can complete even after the user navigates and we
@@ -138,6 +141,7 @@ impl Default for ImportView {
             custom_path_error: None,
             rate_limit_ms: 1100,
             name_script: crate::config::settings::NameScriptPreference::Native,
+            write_tags: true,
             scan_rx: None,
             mb_rx: None,
             mb_tx: None,
@@ -157,6 +161,7 @@ impl ImportView {
         _conn: &Connection,
         rate_limit_ms: u64,
         name_script: crate::config::settings::NameScriptPreference,
+        write_tags: bool,
     ) {
         self.step = ImportStep::SelectSource;
         self.groups.clear();
@@ -172,6 +177,7 @@ impl ImportView {
         self.import_rx = None;
         self.rate_limit_ms = rate_limit_ms;
         self.name_script = name_script;
+        self.write_tags = write_tags;
 
         // Reset SelectSource fields
         self.custom_path = TextInput::new("~/Music/new-album").with_label(" Path: ");

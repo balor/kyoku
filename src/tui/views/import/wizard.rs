@@ -645,11 +645,19 @@ impl ImportView {
 
         let rate_limit_ms = self.rate_limit_ms;
         let name_script = self.name_script;
+        let write_tags = self.write_tags;
         let (tx, rx) = mpsc::channel();
         self.import_rx = Some(rx);
 
         std::thread::spawn(move || {
-            run_import_worker(groups_to_import, user_skipped, rate_limit_ms, name_script, tx);
+            run_import_worker(
+                groups_to_import,
+                user_skipped,
+                rate_limit_ms,
+                name_script,
+                write_tags,
+                tx,
+            );
         });
     }
 }
