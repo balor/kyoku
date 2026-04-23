@@ -656,6 +656,29 @@ impl ImportView {
             ]));
         }
 
+        // Disclaimer: imports with MB matches will rewrite the audio files'
+        // tag frames (title, artist, album, track number, MBIDs, etc.) so
+        // the on-disk tags stay in sync with what we commit to the DB.
+        // Shown only when it actually applies — at least one MB group AND
+        // write_tags enabled — so it never pops up as dead noise.
+        if accept_mb > 0 && self.write_tags {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("  Note: ", Style::default().fg(theme.yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(
+                        "MB metadata will be written to the tags of {} file(s).",
+                        accept_mb_tracks
+                    ),
+                    Style::default().fg(theme.fg_dim),
+                ),
+            ]));
+            lines.push(Line::from(Span::styled(
+                "  Disable in config with [tagging] write_tags = false.",
+                Style::default().fg(theme.fg_muted),
+            )));
+        }
+
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             if all_skipped {
