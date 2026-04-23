@@ -66,14 +66,30 @@ pub fn score_release(
     // matching, and other heuristics we can't easily reproduce locally.
     let api_score = candidate.api_score as f64 / 100.0;
 
-    // Track count: exact match = 1.0, each missing/extra track is a steep penalty.
+    // Track count: ratio-based with an asymmetric curve.
+    //
+    // The two directions carry different priors:
+    // - Candidate has *more* tracks than local: plausible (expanded edition,
+    //   compilation, bonus-track version — the user just doesn't have them
+    //   all). Linear `local/cand` — a 7-vs-11 split still scores ~0.64.
+    // - Candidate has *fewer* tracks than local: can't be a correct match
+    //   on its own — a 7-track local can't be a 1-track single. Square the
+    //   `cand/local` ratio so small-candidate mismatches fall off a cliff
+    //   (a 1-vs-7 case scores 0.02 here instead of 0.10 under the previous
+    //   linear curve). This is the fix for the "7-track local gets 76%
+    //   against a same-named single" case.
+    //
+    // 0.5 is still the "can't compare" sentinel when either side is zero
+    // (loose tracks, missing search metadata).
     let track_count = if local_track_count == 0 || candidate.track_count == 0 {
         0.5
     } else if local_track_count == candidate.track_count {
         1.0
+    } else if local_track_count < candidate.track_count {
+        local_track_count as f64 / candidate.track_count as f64
     } else {
-        let diff = (local_track_count as i64 - candidate.track_count as i64).abs() as f64;
-        (1.0 - diff * 0.15).max(0.0)
+        let ratio = candidate.track_count as f64 / local_track_count as f64;
+        ratio * ratio
     };
 
     // Year: exact = 1.0, 1 off = 0.8, 2 off = 0.5, 3+ = proportional decay.
@@ -132,7 +148,7 @@ pub fn score_release(
     // Always available
     let factors: &[(f64, f64)] = &[
         (api_score, 0.10),
-        (track_count, 0.20),
+        (track_count, 0.25),
     ];
     for &(score, weight) in factors {
         weighted_sum += score * weight;
@@ -499,6 +515,58 @@ mod tests {
         assert!(!is_pure_latin("花冷え。"));
         assert!(!is_pure_latin("幻燈"));
         assert!(!is_pure_latin("BUMP OF CHICKEN 結成"));
+    }
+
+    #[test]
+    fn single_track_candidate_loses_to_multi_track_album() {
+        // Real-world case: local has 7 tracks of "Let me battle" by 9Lana;
+        // MB surfaces a same-named 1-track single alongside the 11-track
+        // album. Artist, album title, and year all match for both — only
+        // track count distinguishes them. The single must score decisively
+        // below the album so the UI surfaces the right candidate.
+        let single = make_release("9Lana", "Let me battle", &[]);
+        let single = MbRelease {
+            track_count: 1,
+            year: Some(2024),
+            ..single
+        };
+        let album = make_release("9Lana", "Let me battle", &[]);
+        let album = MbRelease {
+            track_count: 11,
+            year: Some(2024),
+            ..album
+        };
+
+        let single_score = score_release(
+            "9Lana",
+            "Let me battle",
+            Some(2024),
+            7,
+            &[],
+            0,
+            &single,
+        );
+        let album_score = score_release(
+            "9Lana",
+            "Let me battle",
+            Some(2024),
+            7,
+            &[],
+            0,
+            &album,
+        );
+
+        assert!(
+            album_score.total > single_score.total + 0.15,
+            "album (11 trk) should decisively beat single (1 trk): album={}, single={}",
+            album_score.total,
+            single_score.total,
+        );
+        assert!(
+            single_score.total < 0.72,
+            "1-track single vs 7-track local must score below 0.72: {}",
+            single_score.total,
+        );
     }
 
     #[test]
