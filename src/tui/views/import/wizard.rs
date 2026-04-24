@@ -115,6 +115,17 @@ impl ImportView {
                 PickAction::Picked(name) => {
                     if let Some(group) = self.groups.get_mut(self.current_group) {
                         group.target_collection = name.trim().to_string();
+                        // Assigning a collection to a Skip group is
+                        // contradictory — flip back to an import action.
+                        // Prefer AcceptMb if a candidate is already
+                        // selected, else fall back to AcceptAsIs.
+                        if group.action == GroupAction::Skip {
+                            group.action = if group.selected_candidate.is_some() {
+                                GroupAction::AcceptMb
+                            } else {
+                                GroupAction::AcceptAsIs
+                            };
+                        }
                     }
                     self.collection_picker = None;
                     return;
@@ -813,7 +824,19 @@ impl ImportView {
             .map(|g| g.tracks.len() as u32)
             .sum();
 
-        let total_tracks: usize = groups_to_import.iter().map(|g| g.tracks.len()).sum();
+        // Denominator must match what the worker uses — it excludes tracks
+        // the duplicate resolver has already marked as skip. Without this
+        // subtraction, the UI briefly shows the pre-skip total until the
+        // worker's first Progress message lands.
+        let planned_skip: usize = plans_to_import
+            .iter()
+            .map(|gp| gp.iter().filter(|p| p.skip).count())
+            .sum();
+        let total_tracks: usize = groups_to_import
+            .iter()
+            .map(|g| g.tracks.len())
+            .sum::<usize>()
+            .saturating_sub(planned_skip);
         self.import_progress = (0, total_tracks);
 
         let rate_limit_ms = self.rate_limit_ms;

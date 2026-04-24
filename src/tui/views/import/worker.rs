@@ -35,7 +35,18 @@ pub(super) fn run_import_worker(
     };
     let conn = &conn;
 
-    let total_tracks: usize = groups_to_import.iter().map(|g| g.tracks.len()).sum();
+    // Progress denominator excludes tracks the duplicate resolver has
+    // already decided to drop — they don't touch disk or DB, so counting
+    // them would inflate the total past the number actually imported.
+    let planned_skip: usize = plans
+        .iter()
+        .map(|gp| gp.iter().filter(|p| p.skip).count())
+        .sum();
+    let total_tracks: usize = groups_to_import
+        .iter()
+        .map(|g| g.tracks.len())
+        .sum::<usize>()
+        .saturating_sub(planned_skip);
     let mut done = 0usize;
     let mut imported = 0u32;
     let mut skipped = 0u32;
@@ -239,9 +250,10 @@ pub(super) fn run_import_worker(
                 if let Some(p) = plan
                     && p.skip
                 {
+                    // Plan-skipped tracks aren't part of the progress
+                    // denominator (see `total_tracks` above), so don't
+                    // advance `done` here either.
                     dup_user_skipped += 1;
-                    done += 1;
-                    let _ = tx.send(ImportMessage::Progress(done, total_tracks));
                     continue;
                 }
 
@@ -448,7 +460,7 @@ fn strip_filename_title_prefixes(s: &str) -> String {
 /// This mirrors the tiered strategy beets uses (it does full bipartite
 /// assignment with duration weighting, but for typical single-disc albums
 /// greedy matching on the two strongest signals is equivalent in practice).
-fn match_group_to_mb(
+pub(super) fn match_group_to_mb(
     group_tracks: &[(Track, Option<TagData>)],
     mb_tracks: &[MbTrack],
 ) -> Vec<Option<usize>> {

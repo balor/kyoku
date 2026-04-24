@@ -272,11 +272,28 @@ impl ImportView {
                 Style::default().fg(theme.fg_muted),
             )));
         } else {
-            for path in &self.source_paths {
-                inbox_lines.push(Line::from(Span::styled(
+            // The library entry gets an inline "(library)" tag in accent color
+            // so the user knows it's not a regular inbox dir — we scan it to
+            // catch files the DB doesn't know about (manual drops, leftovers).
+            for (idx, path) in self.source_paths.iter().enumerate() {
+                let is_library = self.library_source_index == Some(idx);
+                let path_span = Span::styled(
                     format!("  {}", path.display()),
                     Style::default().fg(inbox_body_color),
-                )));
+                );
+                if is_library {
+                    let tag_style = if self.use_custom_path {
+                        Style::default().fg(theme.fg_muted)
+                    } else {
+                        Style::default().fg(theme.accent)
+                    };
+                    inbox_lines.push(Line::from(vec![
+                        path_span,
+                        Span::styled("  (library)", tag_style),
+                    ]));
+                } else {
+                    inbox_lines.push(Line::from(path_span));
+                }
             }
         }
         let p = Paragraph::new(inbox_lines);
@@ -442,7 +459,10 @@ impl ImportView {
             ),
             action_label,
         ];
-        if !group.target_collection.is_empty() {
+        // Collection suffix only shows when the group will actually import —
+        // otherwise it's contradictory (e.g. "[Skip] → coll: X" misleads the
+        // user into thinking the group is still being routed somewhere).
+        if !group.target_collection.is_empty() && group.action != GroupAction::Skip {
             nav_spans.push(Span::styled(
                 format!(" → coll: {}", group.target_collection),
                 Style::default()
@@ -826,6 +846,7 @@ impl ImportView {
         let signal_text = match conflict.signal {
             DupSignal::AlbumSlot => "  Same slot on the same album.",
             DupSignal::Mbid => "  Same MusicBrainz recording.",
+            DupSignal::AlbumTitle => "  Same album + same title (disc/pos disagree).",
         };
         let header_lines = vec![
             Line::from(Span::styled(

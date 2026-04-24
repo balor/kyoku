@@ -8,7 +8,7 @@
 //!   * **Existing tracks in the library** — catches re-import of content
 //!     that's already in the DB.
 //!
-//! Detection runs two passes per invocation:
+//! Detection runs three passes per invocation:
 //!   1. **Album-slot**: `(album_id, disc, position)` — fast, DB-only, and
 //!      catches the "partial then full re-import" case.
 //!   2. **Recording MBID**: for AcceptMb groups whose selected candidate
@@ -17,6 +17,14 @@
 //!      and against other batch tracks. Skipped for (group, track) pairs
 //!      that album-slot already flagged — MBID only *disambiguates*, it
 //!      never replaces the slot signal.
+//!   3. **Album + title**: intra-batch only. Keyed on
+//!      `(album_key, normalized_title)` where `album_key` is a set of
+//!      best-effort stable identifiers for the group's album (DB
+//!      `album_id` if it exists, MB `release.id` for AcceptMb, and a
+//!      normalized tag `album|album_artist` fallback). Catches the case
+//!      where the same release is imported twice from different sources
+//!      and the two copies disagree on disc/track numbering — the
+//!      album-slot pass misses those, but the titles still line up.
 //!
 //! The MBID pass depends on `ImportView::ensure_full_release_for_group`
 //! having populated `MbCandidate.release.tracks` via a background fetch.
@@ -67,6 +75,12 @@ pub enum DupSignal {
     /// raised for `AcceptMb` groups whose full release has been
     /// fetched (`ensure_full_release_for_group`).
     Mbid,
+    /// Same album + same (normalized) track title. Used as a fallback
+    /// when two batch groups describe the same release with disagreeing
+    /// disc/position tags — album-slot would miss them but titles still
+    /// line up. Intra-batch only; library-side title matching is too
+    /// noisy (remixes, alternate versions) to raise automatically.
+    AlbumTitle,
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +206,92 @@ fn target_album_id_for_group(conn: &Connection, group: &ImportGroup) -> Result<O
     }
 }
 
+/// Compute a set of best-effort stable identifiers for the album a
+/// group would commit to. Used by the title-based intra-batch pass so
+/// two groups describing the same release match even when the album
+/// isn't in the DB yet and even when the two groups arrived via
+/// different actions (one AcceptMb, one AcceptAsIs).
+///
+/// Prefixes keep the namespaces separate so "db:12" can't accidentally
+/// collide with "mb:12".
+fn album_keys_for_group(conn: &Connection, group: &ImportGroup) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Ok(Some(id)) = target_album_id_for_group(conn, group) {
+        keys.push(format!("db:{}", id));
+    }
+    if group.action == GroupAction::AcceptMb {
+        if let Some(idx) = group.selected_candidate {
+            if let Some(cand) = group.mb_candidates.get(idx) {
+                if !cand.release.id.is_empty() {
+                    keys.push(format!("mb:{}", cand.release.id));
+                }
+                // Also emit a tag-equivalent key so this AcceptMb group
+                // matches a sibling AcceptAsIs group of the same release.
+                keys.push(format!(
+                    "tag:{}|{}",
+                    normalize_album_token(&cand.release.title),
+                    normalize_album_token(&cand.release.artist),
+                ));
+            }
+        }
+    }
+    if group.action == GroupAction::AcceptAsIs {
+        if let Some((_, Some(td))) = group.tracks.first() {
+            if let Some(album) = td.album.as_deref() {
+                let artist = td
+                    .album_artist
+                    .as_deref()
+                    .or(td.artist.as_deref())
+                    .unwrap_or("");
+                keys.push(format!(
+                    "tag:{}|{}",
+                    normalize_album_token(album),
+                    normalize_album_token(artist),
+                ));
+            }
+        }
+    }
+    keys
+}
+
+/// Lowercase + whitespace-collapsed token. Used for both album keys and
+/// track titles — a forgiving match, but not so aggressive that it
+/// conflates genuinely different titles (no punctuation stripping, no
+/// feature-artist removal).
+fn normalize_album_token(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_space = false;
+    for ch in s.trim().chars() {
+        if ch.is_whitespace() {
+            if !last_space {
+                out.push(' ');
+                last_space = true;
+            }
+        } else {
+            for c in ch.to_lowercase() {
+                out.push(c);
+            }
+            last_space = false;
+        }
+    }
+    out
+}
+
+/// Normalized track title for the AlbumTitle pass. Empty titles return
+/// `None` so the pass skips them — we don't want a group of
+/// tag-less/title-less tracks to all collapse onto the empty key.
+fn normalized_title(group: &ImportGroup, track_idx: usize) -> Option<String> {
+    let (track, tag) = group.tracks.get(track_idx)?;
+    // Prefer the raw tag title; fall back to the Track's title (which
+    // the scanner may have already filled from the filename).
+    let raw = tag
+        .as_ref()
+        .and_then(|t| t.title.as_deref())
+        .unwrap_or(track.title.as_str());
+    let norm = normalize_album_token(raw);
+    if norm.is_empty() { None } else { Some(norm) }
+}
+
 /// Find an existing album row by title + album_artist. Returns None if
 /// absent — detection then treats the group as "new album, nothing to
 /// clash with in the library".
@@ -282,6 +382,19 @@ pub fn detect(conn: &Connection, groups: &[ImportGroup]) -> Result<Vec<Conflict>
     // ── Pass 2: recording MBID ────────────────────────────────────────
     // Maps recording_id → first batch track that claimed it. Scoped to
     // this pass so album-slot hits don't accidentally suppress it.
+    //
+    // Recording IDs are precomputed per group using the *same* greedy
+    // pairing the worker uses at import time (taken[]-tracked, so each
+    // MB track can only be claimed once). Doing it per-track with
+    // `iter().find(|t| t.position == pos)` was the old bug: on multi-disc
+    // releases MbTrack positions aren't globally unique (MB reports
+    // per-disc positions, flattened into release.tracks), so disc-2 pos=1
+    // would spuriously share a recording_id with disc-1 pos=1 — producing
+    // phantom intra-group MBID conflicts for every disc-2 track.
+    let group_rec_ids: Vec<Vec<Option<String>>> = groups
+        .iter()
+        .map(|g| recording_ids_for_group(g))
+        .collect();
     let mut batch_mbids: HashMap<String, BatchTrackRef> = HashMap::new();
     for (gi, group) in groups.iter().enumerate() {
         if matches!(group.action, GroupAction::Skip | GroupAction::Loose) {
@@ -291,7 +404,7 @@ pub fn detect(conn: &Connection, groups: &[ImportGroup]) -> Result<Vec<Conflict>
             if flagged.contains(&(gi, ti)) {
                 continue;
             }
-            let Some(recording_id) = recording_id_for_batch_track(group, ti) else {
+            let Some(recording_id) = group_rec_ids[gi].get(ti).cloned().flatten() else {
                 continue;
             };
             let new_ref = BatchTrackRef { group: gi, index: ti };
@@ -303,6 +416,7 @@ pub fn detect(conn: &Connection, groups: &[ImportGroup]) -> Result<Vec<Conflict>
                     other: DupOther::Library(existing),
                     signal: DupSignal::Mbid,
                 });
+                flagged.insert((gi, ti));
                 batch_mbids.entry(recording_id).or_insert(new_ref);
                 continue;
             }
@@ -314,43 +428,188 @@ pub fn detect(conn: &Connection, groups: &[ImportGroup]) -> Result<Vec<Conflict>
                     other: DupOther::Batch(*earlier),
                     signal: DupSignal::Mbid,
                 });
+                flagged.insert((gi, ti));
             } else {
                 batch_mbids.insert(recording_id, new_ref);
             }
         }
     }
 
+    // ── Pass 3: album + title (cross-group only) ──────────────────────
+    // Catches two groups importing the same release from different
+    // sources when their disc/position tags disagree (or when the album
+    // isn't yet in the DB, so pass 1 was a no-op). For each group we
+    // precompute a set of candidate album_keys; two tracks collide if
+    // any album_key + normalized_title tuple is shared.
+    //
+    // Deliberately *cross-group only*: within a single group, a shared
+    // album + shared normalized title almost always means legitimate
+    // alt-versions (feat./remix/instrumental) where the differentiation
+    // lives in the artist field or only in the filename — not a dup.
+    // Pass 1 already handles genuine same-group same-slot dups.
+    // Library-side title matching is deferred for the same reason
+    // (remixes, alt-versions are too noisy to raise automatically).
+    let group_album_keys: Vec<Vec<String>> = groups
+        .iter()
+        .map(|g| {
+            if matches!(g.action, GroupAction::Skip | GroupAction::Loose) {
+                Vec::new()
+            } else {
+                album_keys_for_group(conn, g)
+            }
+        })
+        .collect();
+    // Pool of claims from earlier groups. Each incoming track picks the
+    // best still-unclaimed entry, preferring a position match when one
+    // exists — so a release with several tracks sharing a title (e.g.
+    // multiple "feat." versions) pairs correctly across groups by slot
+    // number rather than all collapsing onto the first claim.
+    //
+    // Position match is only preferred, not required — the disc-divergent
+    // re-import case has two copies of the same album with disagreeing
+    // disc/position tags, so same-title tracks there find each other via
+    // the title-only fallback.
+    //
+    // `taken[]` ensures each earlier-group claim pairs with at most one
+    // later-group track; claims aren't reused.
+    // One entry per earlier-group track; `album_keys` lists every key
+    // the track's group emits (so a sibling group matches via any of
+    // them). `taken` is per-entry so claiming via one key also prevents
+    // matching via another key — a track can only pair with one later
+    // counterpart.
+    struct Claim {
+        album_keys: Vec<String>,
+        title: String,
+        position: Option<u32>,
+        track_ref: BatchTrackRef,
+    }
+    let mut pool: Vec<Claim> = Vec::new();
+    let mut taken: Vec<bool> = Vec::new();
+
+    let shares_key = |claim_keys: &[String], group_keys: &[String]| -> bool {
+        claim_keys.iter().any(|ck| group_keys.iter().any(|gk| gk == ck))
+    };
+
+    for (gi, group) in groups.iter().enumerate() {
+        if matches!(group.action, GroupAction::Skip | GroupAction::Loose) {
+            continue;
+        }
+        let keys = &group_album_keys[gi];
+        if keys.is_empty() {
+            continue;
+        }
+        // Buffer this group's new claims and only merge into the pool
+        // after the group is fully processed. That's what keeps intra-
+        // group same-title tracks from matching each other — they never
+        // see their own group's entries during lookup.
+        let mut new_claims: Vec<Claim> = Vec::new();
+        for (ti, (track, _)) in group.tracks.iter().enumerate() {
+            if flagged.contains(&(gi, ti)) {
+                continue;
+            }
+            let Some(title) = normalized_title(group, ti) else {
+                continue;
+            };
+            let pos = track.track_number;
+            let new_ref = BatchTrackRef { group: gi, index: ti };
+
+            // Tier 1: exact (album_key, title, position).
+            let mut chosen: Option<usize> = None;
+            if let Some(p) = pos {
+                for (ci, c) in pool.iter().enumerate() {
+                    if taken[ci] || c.title != title || c.position != Some(p) {
+                        continue;
+                    }
+                    if shares_key(&c.album_keys, keys) {
+                        chosen = Some(ci);
+                        break;
+                    }
+                }
+            }
+            // Tier 2: title-only fallback for disc-divergent reimports.
+            if chosen.is_none() {
+                for (ci, c) in pool.iter().enumerate() {
+                    if taken[ci] || c.title != title {
+                        continue;
+                    }
+                    if shares_key(&c.album_keys, keys) {
+                        chosen = Some(ci);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(ci) = chosen {
+                conflicts.push(Conflict {
+                    new: new_ref,
+                    other: DupOther::Batch(pool[ci].track_ref),
+                    signal: DupSignal::AlbumTitle,
+                });
+                flagged.insert((gi, ti));
+                taken[ci] = true;
+                continue;
+            }
+
+            // No earlier match — register this track as a claim for
+            // later groups to pair against.
+            new_claims.push(Claim {
+                album_keys: keys.clone(),
+                title,
+                position: pos,
+                track_ref: new_ref,
+            });
+        }
+        for c in new_claims {
+            pool.push(c);
+            taken.push(false);
+        }
+    }
+
     Ok(conflicts)
 }
 
-/// Resolve the MB `recording_id` that would be assigned to this local
-/// track at import time, if we have enough data. Returns `None` for
-/// groups that aren't AcceptMb, have no selected candidate, have an
-/// unfetched release (empty `tracks`), or whose local track has no
-/// resolvable position in the MB tracklist.
-fn recording_id_for_batch_track(group: &ImportGroup, track_idx: usize) -> Option<String> {
+/// Resolve the MB `recording_id` each local track in a group would get
+/// at import time. Returns a vec parallel to `group.tracks`.
+///
+/// Uses the *same* pairing function the worker runs at commit time
+/// (`worker::match_group_to_mb`) so detection and import agree on which
+/// local track maps to which MB track. That function tracks claimed MB
+/// indices with a `taken[]` array, which is essential for multi-disc
+/// releases: MB's per-disc positions are flattened into `release.tracks`,
+/// so positions 1..N appear once per disc. Matching each local track
+/// independently via `.find(|t| t.position == pos)` would assign every
+/// disc's pos=N the disc-1 recording_id.
+///
+/// Returns an all-`None` vec for groups that aren't AcceptMb, have no
+/// selected candidate, or whose release hasn't been fetched yet
+/// (`release.tracks` empty — this is the pre-fetch state that the full
+/// release fetch populates).
+fn recording_ids_for_group(group: &ImportGroup) -> Vec<Option<String>> {
+    let empty = vec![None; group.tracks.len()];
     if group.action != GroupAction::AcceptMb {
-        return None;
+        return empty;
     }
-    let cand_idx = group.selected_candidate?;
-    let cand = group.mb_candidates.get(cand_idx)?;
+    let Some(cand_idx) = group.selected_candidate else {
+        return empty;
+    };
+    let Some(cand) = group.mb_candidates.get(cand_idx) else {
+        return empty;
+    };
     if cand.release.tracks.is_empty() {
-        return None;
+        return empty;
     }
-    let (local, _) = group.tracks.get(track_idx)?;
-    let pos = local.track_number?;
-    if pos == 0 {
-        return None;
-    }
-    // MbTrack has no disc field (MB returns per-disc tracklists but our
-    // parser flattens positions). Fall back to matching on position
-    // alone — the same approximation album-slot uses.
-    let mb_track = cand.release.tracks.iter().find(|t| t.position == pos)?;
-    if mb_track.recording_id.is_empty() {
-        None
-    } else {
-        Some(mb_track.recording_id.clone())
-    }
+    let pairing = super::worker::match_group_to_mb(&group.tracks, &cand.release.tracks);
+    pairing
+        .into_iter()
+        .map(|mi| {
+            let mt = cand.release.tracks.get(mi?)?;
+            if mt.recording_id.is_empty() {
+                None
+            } else {
+                Some(mt.recording_id.clone())
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -832,5 +1091,341 @@ mod tests {
             conflicts.is_empty(),
             "empty tracklist → MBID pass skipped, no conflicts"
         );
+    }
+
+    // ── Album-title fallback pass ─────────────────────────────────────
+
+    /// Same as `track` but lets the caller override disc_number on both
+    /// the Track and the TagData — needed to reproduce "two copies of
+    /// the same album tagged with disagreeing disc numbers".
+    fn track_with_disc(
+        title: &str,
+        track_number: Option<u32>,
+        disc: u32,
+        path: &str,
+    ) -> (Track, Option<TagData>) {
+        let (mut t, td) = track(title, track_number, path);
+        t.disc_number = disc;
+        let td = td.map(|mut t| {
+            t.disc_number = Some(disc);
+            t
+        });
+        (t, td)
+    }
+
+    #[test]
+    fn detects_intra_batch_title_conflict_when_disc_tags_disagree() {
+        // Scenario: two groups of the same 40-track album imported from
+        // different sources. Positions 1 aligns on disc=1, but position
+        // "21" is tagged disc=1 pos=21 in group A and disc=2 pos=1 in
+        // group B. Album-slot sees them as different keys. Title must
+        // catch it.
+        let conn = db::open_memory().unwrap();
+        queries::get_or_create_album(&conn, "Album", Some("Artist"), None, None, 11).unwrap();
+
+        let g1 = group(
+            "A",
+            GroupAction::AcceptAsIs,
+            vec![track_with_disc("Late Song", Some(21), 1, "/in/a/21.flac")],
+        );
+        let g2 = group(
+            "B",
+            GroupAction::AcceptAsIs,
+            vec![track_with_disc("Late Song", Some(1), 2, "/in/b/2-01.flac")],
+        );
+        let conflicts = detect(&conn, &[g1, g2]).unwrap();
+        assert_eq!(conflicts.len(), 1, "title pass must catch disc-divergent dup");
+        assert_eq!(conflicts[0].signal, DupSignal::AlbumTitle);
+        match &conflicts[0].other {
+            DupOther::Batch(earlier) => {
+                assert_eq!(earlier.group, 0);
+                assert_eq!(conflicts[0].new.group, 1);
+            }
+            _ => panic!("expected Batch conflict"),
+        }
+    }
+
+    #[test]
+    fn title_pass_fires_even_when_album_is_new() {
+        // No DB album row at all. Pass 1 returns None for both groups;
+        // pass 3 uses the tag album|artist key and still catches the
+        // intra-batch dup.
+        let conn = db::open_memory().unwrap();
+        let g1 = group(
+            "A",
+            GroupAction::AcceptAsIs,
+            vec![track("Only Song", Some(1), "/in/a/01.flac")],
+        );
+        let g2 = group(
+            "B",
+            GroupAction::AcceptAsIs,
+            vec![track_with_disc("Only Song", Some(1), 2, "/in/b/01.flac")],
+        );
+        let conflicts = detect(&conn, &[g1, g2]).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].signal, DupSignal::AlbumTitle);
+    }
+
+    #[test]
+    fn title_pass_skipped_when_album_slot_already_flagged() {
+        // Same album, same disc, same position, same title. Album-slot
+        // raises a single conflict; title pass must not double-count.
+        let conn = db::open_memory().unwrap();
+        queries::get_or_create_album(&conn, "Album", Some("Artist"), None, None, 11).unwrap();
+
+        let g = group(
+            "A",
+            GroupAction::AcceptAsIs,
+            vec![
+                track("Same Title", Some(5), "/in/a.flac"),
+                track("Same Title", Some(5), "/in/b.flac"),
+            ],
+        );
+        let conflicts = detect(&conn, &[g]).unwrap();
+        assert_eq!(conflicts.len(), 1, "one conflict, not two");
+        assert_eq!(conflicts[0].signal, DupSignal::AlbumSlot);
+    }
+
+    #[test]
+    fn title_pass_ignores_different_titles_at_same_slot() {
+        // Two tracks at the same album but genuinely different titles —
+        // e.g. disc 1 track 21 on group A, disc 2 track 1 on group B,
+        // both for the same album but actually different songs. Pass 3
+        // must not conflate them just because the album matches.
+        let conn = db::open_memory().unwrap();
+        queries::get_or_create_album(&conn, "Album", Some("Artist"), None, None, 11).unwrap();
+
+        let g1 = group(
+            "A",
+            GroupAction::AcceptAsIs,
+            vec![track_with_disc("Song Alpha", Some(21), 1, "/in/a.flac")],
+        );
+        let g2 = group(
+            "B",
+            GroupAction::AcceptAsIs,
+            vec![track_with_disc("Song Beta", Some(1), 2, "/in/b.flac")],
+        );
+        let conflicts = detect(&conn, &[g1, g2]).unwrap();
+        assert!(conflicts.is_empty(), "different titles → no conflict");
+    }
+
+    #[test]
+    fn title_pass_skips_empty_titles() {
+        // Two groups each with a title-less track — must not collapse
+        // under the empty-string key.
+        let conn = db::open_memory().unwrap();
+        queries::get_or_create_album(&conn, "Album", Some("Artist"), None, None, 11).unwrap();
+
+        let mut t1 = track("", Some(99), "/in/a.flac");
+        if let Some(td) = &mut t1.1 {
+            td.title = Some(String::new());
+        }
+        t1.0.title = String::new();
+        let mut t2 = track("", Some(100), "/in/b.flac");
+        if let Some(td) = &mut t2.1 {
+            td.title = Some(String::new());
+        }
+        t2.0.title = String::new();
+
+        let g1 = group("A", GroupAction::AcceptAsIs, vec![t1]);
+        let g2 = group("B", GroupAction::AcceptAsIs, vec![t2]);
+        let conflicts = detect(&conn, &[g1, g2]).unwrap();
+        assert!(conflicts.is_empty(), "empty titles → no title-pass conflict");
+    }
+
+    /// Build an MB candidate whose release has `per_disc * discs` tracks.
+    /// Each disc's positions run 1..=per_disc (mirroring MB's per-disc
+    /// position numbering — the exact shape that tripped the old
+    /// position-only recording_id lookup on multi-disc releases).
+    /// `recording_id` is unique per (disc, position).
+    fn candidate_multi_disc(discs: u32, per_disc: u32) -> MbCandidate {
+        let mut tracks = Vec::with_capacity((discs * per_disc) as usize);
+        for d in 1..=discs {
+            for p in 1..=per_disc {
+                tracks.push(MbTrack {
+                    position: p,
+                    title: format!("D{}T{}", d, p),
+                    artist: None,
+                    duration_ms: None,
+                    recording_id: format!("rec-d{}-p{}", d, p),
+                });
+            }
+        }
+        let release = MbRelease {
+            id: "release-multi".to_string(),
+            title: "Album".to_string(),
+            artist: "Artist".to_string(),
+            year: None,
+            country: None,
+            label: None,
+            track_count: discs * per_disc,
+            tracks,
+            api_score: 0,
+            release_group_id: None,
+        };
+        MbCandidate {
+            release,
+            score: MatchScore {
+                total: 0.0,
+                artist: 0.0,
+                album: 0.0,
+                track_count: 0.0,
+                year: 0.0,
+                duration: 0.0,
+                tracks: 0.0,
+            },
+        }
+    }
+
+    #[test]
+    fn mbid_pass_handles_multi_disc_without_phantom_intra_group_dups() {
+        // The regression this guards: MB releases with multiple discs
+        // carry per-disc positions (1..N per disc, not 1..(discs*N)
+        // globally). The old `recording_id_for_batch_track` matched MB
+        // tracks by position alone, so for a 2-disc 20+20 album every
+        // local disc-2 track at pos P would inherit the disc-1 pos P
+        // recording_id — producing 20 false intra-group MBID conflicts
+        // per group (and 40 inter-group), i.e. "40 → 60 conflicts" once
+        // the async release fetch lands.
+        let conn = db::open_memory().unwrap();
+        let cand = candidate_multi_disc(2, 3);
+
+        // Local group: 3 tracks on disc 1 + 3 on disc 2, all with
+        // per-disc positions 1..=3. Two groups of the same album —
+        // simulating two source dirs dropped into one import.
+        let make_tracks = |prefix: &str| {
+            let mut v = Vec::new();
+            for d in 1u32..=2 {
+                for p in 1u32..=3 {
+                    v.push(track_with_disc(
+                        &format!("D{}T{}", d, p),
+                        Some(p),
+                        d,
+                        &format!("/in/{}/d{}-p{}.flac", prefix, d, p),
+                    ));
+                }
+            }
+            v
+        };
+        let g1 = mb_group("A", make_tracks("a"), cand.clone());
+        let g2 = mb_group("B", make_tracks("b"), cand);
+        let conflicts = detect(&conn, &[g1, g2]).unwrap();
+
+        // Every disc/pos combo appears exactly twice (once per group),
+        // so we expect exactly 6 inter-group conflicts — and zero
+        // intra-group.
+        assert_eq!(
+            conflicts.len(),
+            6,
+            "6 inter-group dup pairs, no intra-group phantoms"
+        );
+        for c in &conflicts {
+            match &c.other {
+                DupOther::Batch(earlier) => {
+                    assert_ne!(
+                        earlier.group, c.new.group,
+                        "conflict within a single group is the old bug resurfacing"
+                    );
+                }
+                _ => panic!("expected intra-batch conflicts"),
+            }
+        }
+    }
+
+    #[test]
+    fn title_pass_cross_group_pairs_by_position_when_titles_repeat() {
+        // Two groups of an album where several consecutive tracks share
+        // the same TITLE tag (differentiation lives in the filename —
+        // e.g. 4× "Let me battle" at positions 1..4). The pos-preferring
+        // tier must pair each later-group track with its position twin,
+        // not collapse all four onto the first earlier-group track.
+        let conn = db::open_memory().unwrap();
+        queries::get_or_create_album(&conn, "Album", Some("Artist"), None, None, 11).unwrap();
+
+        let make = |prefix: &str| {
+            vec![
+                track("Song", Some(1), &format!("/in/{}/1.flac", prefix)),
+                track("Song", Some(2), &format!("/in/{}/2.flac", prefix)),
+                track("Song", Some(3), &format!("/in/{}/3.flac", prefix)),
+                track("Song", Some(4), &format!("/in/{}/4.flac", prefix)),
+            ]
+        };
+        let g1 = group("A", GroupAction::AcceptAsIs, make("a"));
+        let g2 = group("B", GroupAction::AcceptAsIs, make("b"));
+        let conflicts = detect(&conn, &[g1, g2]).unwrap();
+
+        assert_eq!(conflicts.len(), 4, "one conflict per later-group track");
+        // Each later-group track must pair with the earlier-group track
+        // at the SAME position, not with g0[0] four times.
+        for c in &conflicts {
+            assert_eq!(c.new.group, 1);
+            match c.other {
+                DupOther::Batch(earlier) => {
+                    assert_eq!(earlier.group, 0);
+                    assert_eq!(
+                        earlier.index, c.new.index,
+                        "later-group track at index {} should pair with earlier-group track at the same index",
+                        c.new.index
+                    );
+                }
+                _ => panic!("expected Batch conflict"),
+            }
+        }
+    }
+
+    #[test]
+    fn title_pass_ignores_intra_group_same_title_tracks() {
+        // Real-world case: a single album with multiple versions of the
+        // same song at different track slots — e.g. "Let me battle" on
+        // tracks 1/2/3/4 where the TITLE tag is identical and the
+        // differentiation lives in the filename (feat. X, feat. Y, ...).
+        // Pass 3 must not collapse them — that's the multi-version
+        // false-positive the cross-group restriction guards against.
+        let conn = db::open_memory().unwrap();
+        queries::get_or_create_album(&conn, "Album", Some("Artist"), None, None, 11).unwrap();
+
+        let g = group(
+            "Album",
+            GroupAction::AcceptAsIs,
+            vec![
+                track("Song", Some(1), "/in/01.flac"),
+                track("Song", Some(2), "/in/02.flac"),
+                track("Song", Some(3), "/in/03.flac"),
+                track("Song", Some(4), "/in/04.flac"),
+            ],
+        );
+        let conflicts = detect(&conn, &[g]).unwrap();
+        assert!(
+            conflicts.is_empty(),
+            "same-title tracks in a single group are legit alt-versions, not dups"
+        );
+    }
+
+    #[test]
+    fn title_pass_matches_mixed_actions_via_tag_key() {
+        // One AcceptMb group and one AcceptAsIs group, same release.
+        // DB has no album row yet (pass 1 returns None). The AcceptMb
+        // group emits a `tag:album|artist` fallback key, which aligns
+        // with the AcceptAsIs group's tag key — title pass catches.
+        let conn = db::open_memory().unwrap();
+
+        let g1 = mb_group(
+            "A",
+            vec![track("Shared", Some(1), "/in/a.flac")],
+            candidate_with_recording(1, ""),
+        );
+        // Clear the candidate's tracks so the MBID pass is a no-op —
+        // we want title pass to be the one that fires.
+        let mut g1 = g1;
+        g1.mb_candidates[0].release.tracks.clear();
+
+        let g2 = group(
+            "B",
+            GroupAction::AcceptAsIs,
+            vec![track("Shared", Some(1), "/in/b.flac")],
+        );
+        let conflicts = detect(&conn, &[g1, g2]).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].signal, DupSignal::AlbumTitle);
     }
 }
