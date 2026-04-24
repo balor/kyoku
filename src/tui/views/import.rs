@@ -62,6 +62,10 @@ pub struct ImportGroup {
     /// If non-empty, all tracks in this group will be added to this collection
     /// (created if it doesn't exist) during the Importing step.
     pub target_collection: String,
+    /// `true` while a background `fetch_release` is in flight for the
+    /// currently selected candidate. Used to avoid firing a second fetch
+    /// before the first lands. Reset in the `release_fetch_rx` drain.
+    pub full_release_fetching: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -107,6 +111,12 @@ pub struct ImportView {
     mbid_input: Option<TextInput>,
     /// Receives a fetched release from a manual MBID lookup.
     mbid_fetch_rx: Option<mpsc::Receiver<MbResult>>,
+    /// Channel for background `fetch_release` calls that populate a
+    /// selected candidate's tracklist ahead of dup detection. Separate
+    /// from `mb_rx` because the semantics differ: these results update
+    /// one existing candidate in place instead of replacing the list.
+    release_fetch_rx: Option<mpsc::Receiver<ReleaseFetchResult>>,
+    release_fetch_tx: Option<mpsc::Sender<ReleaseFetchResult>>,
     /// Per-group collection picker (during Review). When `Some`, captures input.
     collection_picker: Option<PickCollectionPopup>,
     /// Receives progress messages from the background importer.
@@ -140,6 +150,17 @@ enum ImportMessage {
     Complete(String),
 }
 
+/// Result from a background `fetch_release` whose only purpose is to
+/// populate a candidate's tracklist (so MBID-based duplicate detection
+/// has something to key on). The release MBID is echoed back so we can
+/// line up the result with the right candidate even if the user changed
+/// their selection while the fetch was in flight.
+pub(super) struct ReleaseFetchResult {
+    pub(super) group_idx: usize,
+    pub(super) release_mbid: String,
+    pub(super) release: Option<MbRelease>,
+}
+
 impl Default for ImportView {
     fn default() -> Self {
         Self {
@@ -162,6 +183,8 @@ impl Default for ImportView {
             mb_client: None,
             mbid_input: None,
             mbid_fetch_rx: None,
+            release_fetch_rx: None,
+            release_fetch_tx: None,
             collection_picker: None,
             import_rx: None,
             conflicts: Vec::new(),
@@ -190,6 +213,8 @@ impl ImportView {
         self.mb_client = None;
         self.mbid_input = None;
         self.mbid_fetch_rx = None;
+        self.release_fetch_rx = None;
+        self.release_fetch_tx = None;
         self.collection_picker = None;
         self.import_rx = None;
         self.conflicts.clear();

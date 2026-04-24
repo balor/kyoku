@@ -11,11 +11,11 @@ use rusqlite::Connection;
 
 use crate::tui::themes::Theme;
 
-use super::dup_detect::{ConflictDecision, DupOther};
+use super::dup_detect::{ConflictDecision, DupOther, DupSignal};
 use super::{GroupAction, ImportMessage, ImportStep, ImportView, MbMatchState, ScanMessage};
 
 impl ImportView {
-    pub fn tick(&mut self, _conn: &Connection) {
+    pub fn tick(&mut self, conn: &Connection) {
         // Process scan messages
         let mut scan_done = false;
         if let Some(rx) = &self.scan_rx {
@@ -47,6 +47,11 @@ impl ImportView {
         // prefetch enabled, more than one group can deliver per tick, so
         // we loop until the channel is empty. The channel itself stays
         // open for the whole review session.
+        //
+        // Auto-selected groups need a release-fetch kicked off so dup
+        // detection has recording MBIDs — collect them here and fire
+        // after the borrow ends.
+        let mut auto_selected: Vec<usize> = Vec::new();
         if let Some(rx) = &self.mb_rx {
             while let Ok(result) = rx.try_recv() {
                 if let Some(group) = self.groups.get_mut(result.group_idx) {
@@ -61,12 +66,46 @@ impl ImportView {
                             && best.score.total >= 0.85 {
                                 group.selected_candidate = Some(0);
                                 group.action = GroupAction::AcceptMb;
+                                auto_selected.push(result.group_idx);
                             }
                         group.mb_candidates = result.candidates;
                         group.mb_state = MbMatchState::Done;
                     }
                 }
             }
+        }
+        for idx in auto_selected {
+            self.ensure_full_release_for_group(idx);
+        }
+
+        // Drain release-fetch results triggered for dup detection. Match
+        // back to the candidate by MBID so a user-initiated candidate
+        // change while the fetch was in flight doesn't smash an unrelated
+        // candidate. Preserve api_score (the full-release API returns 100
+        // because it's not a search hit).
+        let mut release_fetch_landed = false;
+        if let Some(rx) = &self.release_fetch_rx {
+            while let Ok(msg) = rx.try_recv() {
+                if let Some(group) = self.groups.get_mut(msg.group_idx) {
+                    group.full_release_fetching = false;
+                    if let Some(full) = msg.release
+                        && let Some(cand) = group
+                            .mb_candidates
+                            .iter_mut()
+                            .find(|c| c.release.id == msg.release_mbid)
+                    {
+                        let preserved_api = cand.release.api_score;
+                        cand.release = full;
+                        cand.release.api_score = preserved_api;
+                        release_fetch_landed = true;
+                    }
+                }
+            }
+        }
+        // If new MBIDs arrived and the user is already parked on the
+        // summary, re-run detection so the MBID pass can see them.
+        if release_fetch_landed && self.is_in_summary() {
+            self.refresh_conflict_preview(conn);
         }
 
         // Process manual MBID fetch result
@@ -784,6 +823,10 @@ impl ImportView {
             None => Span::raw(""),
         };
         let total = self.conflicts.len();
+        let signal_text = match conflict.signal {
+            DupSignal::AlbumSlot => "  Same slot on the same album.",
+            DupSignal::Mbid => "  Same MusicBrainz recording.",
+        };
         let header_lines = vec![
             Line::from(Span::styled(
                 format!("  Conflict {} of {}", self.conflict_cursor + 1, total),
@@ -792,10 +835,7 @@ impl ImportView {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(vec![
-                Span::styled(
-                    "  Same slot on the same album.",
-                    Style::default().fg(theme.fg_dim),
-                ),
+                Span::styled(signal_text, Style::default().fg(theme.fg_dim)),
                 decision_label,
             ]),
         ];

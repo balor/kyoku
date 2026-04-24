@@ -21,7 +21,7 @@ use crate::tui::widgets::pick_collection::{PickAction, PickCollectionPopup};
 use super::worker::run_import_worker;
 use super::{
     GroupAction, ImportGroup, ImportStep, ImportView, MbCandidate, MbMatchState, MbResult,
-    ScanMessage,
+    ReleaseFetchResult, ScanMessage,
 };
 
 impl ImportView {
@@ -219,6 +219,7 @@ impl ImportView {
                         group.selected_candidate = Some(idx);
                         group.action = GroupAction::AcceptMb;
                     }
+                self.ensure_full_release_for_group(self.current_group);
             }
             // 0 deselects MB candidate (back to as-is)
             KeyCode::Char('0') => {
@@ -237,6 +238,7 @@ impl ImportView {
                             group.action = GroupAction::AcceptMb;
                         }
                     }
+                self.ensure_full_release_for_group(self.current_group);
             }
             KeyCode::Down => {
                 if let Some(group) = self.groups.get_mut(self.current_group)
@@ -248,6 +250,7 @@ impl ImportView {
                             group.action = GroupAction::AcceptMb;
                         }
                     }
+                self.ensure_full_release_for_group(self.current_group);
             }
             KeyCode::Char('c') => {
                 // Open per-group collection picker
@@ -294,7 +297,7 @@ impl ImportView {
     /// Re-run duplicate detection against the current set of groups +
     /// actions. Populates `conflicts` / `decisions` for the summary
     /// line and the resolver step. Called when entering the summary.
-    fn refresh_conflict_preview(&mut self, conn: &Connection) {
+    pub(super) fn refresh_conflict_preview(&mut self, conn: &Connection) {
         match super::dup_detect::detect(conn, &self.groups) {
             Ok(conflicts) => {
                 self.decisions = conflicts.iter().map(default_decision_for).collect();
@@ -492,6 +495,7 @@ impl ImportView {
                     selected_candidate: None,
                     mb_state: MbMatchState::NotStarted,
                     target_collection: String::new(),
+                    full_release_fetching: false,
                 })
                 .collect();
 
@@ -660,6 +664,82 @@ impl ImportView {
                 self.name_script,
             ))));
         }
+    }
+
+    /// Lazily create the release-fetch channel on first use.
+    fn ensure_release_fetch_channel(&mut self) {
+        if self.release_fetch_rx.is_none() {
+            let (tx, rx) = mpsc::channel();
+            self.release_fetch_tx = Some(tx);
+            self.release_fetch_rx = Some(rx);
+        }
+    }
+
+    /// If the group at `idx` is AcceptMb with a selected candidate whose
+    /// `release.tracks` is empty (search results don't include tracks),
+    /// spin up a background `fetch_release` so duplicate detection has
+    /// the recording MBIDs to key on. Idempotent: short-circuits if the
+    /// tracks are already populated or a fetch is already in flight.
+    pub(super) fn ensure_full_release_for_group(&mut self, idx: usize) {
+        let mbid = {
+            let Some(group) = self.groups.get(idx) else {
+                return;
+            };
+            if group.action != GroupAction::AcceptMb {
+                return;
+            }
+            if group.full_release_fetching {
+                return;
+            }
+            let Some(cand_idx) = group.selected_candidate else {
+                return;
+            };
+            let Some(cand) = group.mb_candidates.get(cand_idx) else {
+                return;
+            };
+            if !cand.release.tracks.is_empty() {
+                return;
+            }
+            cand.release.id.clone()
+        };
+        if mbid.is_empty() {
+            return;
+        }
+
+        self.ensure_mb_infra();
+        self.ensure_release_fetch_channel();
+
+        // Mark in-flight so repeated calls don't pile up parallel fetches
+        // for the same group. Cleared in the release_fetch_rx drain.
+        if let Some(group) = self.groups.get_mut(idx) {
+            group.full_release_fetching = true;
+        }
+
+        let client = self.mb_client.as_ref().unwrap().clone();
+        let tx = self.release_fetch_tx.as_ref().unwrap().clone();
+        let mbid_for_thread = mbid.clone();
+
+        std::thread::spawn(move || {
+            let release = {
+                let mut client = client.lock().unwrap();
+                match client.fetch_release(&mbid_for_thread) {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        tracing::warn!(
+                            "MB fetch_release({}) for dup-detection failed: {}",
+                            mbid_for_thread,
+                            e
+                        );
+                        None
+                    }
+                }
+            };
+            let _ = tx.send(ReleaseFetchResult {
+                group_idx: idx,
+                release_mbid: mbid_for_thread,
+                release,
+            });
+        });
     }
 
     /// Keyboard for the `ResolveDuplicates` step: 1/2 pick a side,
