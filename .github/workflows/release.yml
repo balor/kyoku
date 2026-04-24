@@ -1,0 +1,101 @@
+name: Release
+
+# Fires on two paths:
+#   - Pushing a tag like `v0.2.0` builds binaries AND attaches them to a
+#     GitHub Release (created automatically if it doesn't exist).
+#   - `workflow_dispatch` runs the same build but only uploads the binaries
+#     as workflow artifacts, so you can sanity-check the pipeline without
+#     cutting an actual release.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Let the Release step create tags/releases and upload assets.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Don't abort the matrix on a single target failure — we still want the
+      # other binaries uploaded if, say, a macOS runner hiccups.
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14          # Apple Silicon
+            os: macos
+          - target: x86_64-apple-darwin
+            runner: macos-13          # last Intel runner available
+            os: macos
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            os: linux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Caches ~/.cargo/registry, ~/.cargo/git, and target/ keyed on the
+      # target + Cargo.lock. Huge speedup on re-runs; safe to evict.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # Smoke-test: make sure the binary at least launches its --help.
+      # Skip on cross-target builds (none here, but keeps this portable if we
+      # add musl/cross later).
+      - name: Smoke test
+        run: ./target/${{ matrix.target }}/release/kyoku --help
+
+      # Produce `kyoku-<version>-<target>.tar.gz` with just the binary.
+      # The version comes from Cargo.toml so tag-less (dispatch) runs still
+      # name their artifacts meaningfully.
+      - name: Package tarball
+        id: package
+        shell: bash
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          STAGING="kyoku-${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/${STAGING}"
+          cp "target/${{ matrix.target }}/release/kyoku" "dist/${STAGING}/"
+          tar -C dist -czf "dist/${STAGING}.tar.gz" "${STAGING}"
+          # Emit both the artifact path and the bare filename so subsequent
+          # steps can reference either.
+          echo "path=dist/${STAGING}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "name=${STAGING}.tar.gz"      >> "$GITHUB_OUTPUT"
+
+      # Always upload as workflow artifacts — lets you grab binaries from
+      # manual `workflow_dispatch` runs without cutting a release.
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.path }}
+          if-no-files-found: error
+
+      # Tag builds additionally publish to a GitHub Release. softprops/action-
+      # gh-release auto-creates the release on first asset upload for the tag,
+      # and appends to it on subsequent matrix jobs — so all three tarballs
+      # land on the same release page.
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.path }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
