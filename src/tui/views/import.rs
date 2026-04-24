@@ -79,6 +79,11 @@ pub enum GroupAction {
 pub struct ImportView {
     pub step: ImportStep,
     pub source_paths: Vec<PathBuf>,
+    /// Index into `source_paths` that points at the configured `music_dir`,
+    /// if it was appended as a source. Used by the renderer to tag that row
+    /// as "(library)" so the user knows why it's being scanned — every import
+    /// pass audits the library dir for files the DB doesn't know about.
+    pub library_source_index: Option<usize>,
     pub groups: Vec<ImportGroup>,
     pub current_group: usize,
     pub scan_progress: (usize, usize),
@@ -166,6 +171,7 @@ impl Default for ImportView {
         Self {
             step: ImportStep::SelectSource,
             source_paths: Vec::new(),
+            library_source_index: None,
             groups: Vec::new(),
             current_group: 0,
             scan_progress: (0, 0),
@@ -198,6 +204,7 @@ impl ImportView {
     pub fn start(
         &mut self,
         inbox_dirs: &[PathBuf],
+        music_dir: &std::path::Path,
         _conn: &Connection,
         rate_limit_ms: u64,
         name_script: crate::config::settings::NameScriptPreference,
@@ -229,12 +236,22 @@ impl ImportView {
         self.use_custom_path = false;
         self.custom_path_error = None;
 
-        // Collect source paths from inbox
+        // Collect source paths: inbox dirs first, then music_dir (marked as
+        // "library" in the UI). Including music_dir every scan is what makes
+        // the wizard notice files that ended up in the library outside the
+        // normal import flow — e.g. manual drops, old imports, or leftovers
+        // from a cleanup script. Skip music_dir if it's already listed as an
+        // inbox so we don't double-scan identical paths.
         self.source_paths.clear();
+        self.library_source_index = None;
         for dir in inbox_dirs {
             if dir.exists() {
                 self.source_paths.push(dir.clone());
             }
+        }
+        if music_dir.exists() && !self.source_paths.iter().any(|p| p == music_dir) {
+            self.library_source_index = Some(self.source_paths.len());
+            self.source_paths.push(music_dir.to_path_buf());
         }
     }
 

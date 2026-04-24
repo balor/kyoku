@@ -311,12 +311,22 @@ fn main() -> anyhow::Result<()> {
                     if !preview.moves.is_empty() {
                         println!("Moves ({}):", preview.stats.moves_total);
                         for m in &preview.moves {
-                            println!("  {}", m.from_name);
+                            let overwrite_tag = if m.overwrites_orphan {
+                                "  ⟲ overwrites existing"
+                            } else {
+                                ""
+                            };
+                            println!("  {}{}", m.from_name, overwrite_tag);
                             println!("    from: {}", m.from_dir);
                             if m.renamed {
                                 println!("    → to: {}/{}", m.to_dir, m.to_name);
                             } else {
                                 println!("    → to: {}", m.to_dir);
+                            }
+                            if m.overwrites_orphan {
+                                println!(
+                                    "    note: replaces a file logged for cleanup during a prior dup-replace import"
+                                );
                             }
                         }
                         println!();
@@ -416,11 +426,12 @@ fn main() -> anyhow::Result<()> {
                     )?;
                     println!();
                     println!(
-                        "Done: {} moved, {} copied, {} dirs cleaned, {} orphans pruned",
+                        "Done: {} moved, {} copied, {} dirs cleaned, {} orphans pruned, {} orphan files deleted",
                         result.moved + result.covers_moved,
                         result.copied,
                         result.dirs_cleaned,
                         result.orphans_cleaned,
+                        result.file_orphans_removed,
                     );
                     if !result.errors.is_empty() {
                         println!("Errors:");

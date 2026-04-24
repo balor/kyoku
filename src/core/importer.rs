@@ -319,12 +319,19 @@ pub fn import(
     Ok(result)
 }
 
-/// Scan inbox directories for unimported audio files.
-/// Returns a list of paths that are not yet in the database.
+/// Scan inbox directories for audio files the DB doesn't yet know about.
+/// "Knows about" is broader than just `tracks.file_path`: a file is excluded
+/// if it's referenced by any track, by any `collection_tracks.collection_file_path`,
+/// or by the `orphaned_files` table. This matters when one of the scan paths
+/// is `music_dir` itself — we don't want to resurface collection copies or
+/// pending-orphan leftovers as "untracked".
 pub fn scan_inbox(
     conn: &Connection,
     inbox_dirs: &[std::path::PathBuf],
 ) -> Result<Vec<std::path::PathBuf>> {
+    // Build the exclusion set once per call — O(N) memory in library size,
+    // but a single pass per table beats a per-file query.
+    let known = queries::list_all_known_paths(conn)?;
     let mut unimported = Vec::new();
 
     for dir in inbox_dirs {
@@ -337,7 +344,7 @@ pub fn scan_inbox(
         for file_path in files {
             let abs_path = std::fs::canonicalize(&file_path).unwrap_or(file_path);
             let path_str = abs_path.display().to_string();
-            if queries::track_exists_by_path(conn, &path_str)? {
+            if known.contains(&path_str) {
                 continue;
             }
             unimported.push(abs_path);

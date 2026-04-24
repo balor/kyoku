@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
@@ -49,6 +50,25 @@ pub struct OrganizePlan {
     /// orphaned — they point at paths that have been moved/deleted/renamed
     /// outside of kyoku. `apply_organize` will delete these DB rows.
     pub missing_sources: Vec<(i64, PathBuf, String)>,
+    /// Files on disk whose DB row has already been removed (most often
+    /// because an import replaced them via duplicate resolution). The
+    /// file itself is still sitting in the music dir waiting to be
+    /// deleted; `apply_organize` unlinks each file and clears the
+    /// tracking row from `orphaned_files`.
+    pub file_orphans: Vec<FileOrphanEntry>,
+}
+
+/// One pending orphan file pulled from the `orphaned_files` table.
+/// Keeps the identifying tag snapshot so the preview can show something
+/// human-readable even though the track row is gone.
+#[derive(Debug, Clone)]
+pub struct FileOrphanEntry {
+    pub id: i64,
+    pub path: PathBuf,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album_title: Option<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Default)]
@@ -59,6 +79,9 @@ pub struct OrganizeResult {
     pub errors: Vec<(String, String)>,
     pub dirs_cleaned: u32,
     pub orphans_cleaned: u32,
+    /// Number of `orphaned_files` entries fully handled (file deleted
+    /// or already missing, tracking row cleared).
+    pub file_orphans_removed: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +103,21 @@ pub fn plan_organize(
 ) -> Result<OrganizePlan> {
     let music_dir = &settings.library.music_dir;
     let mut plan = OrganizePlan::default();
+
+    // Pending file orphans are a property of the library as a whole, not
+    // of any particular (artist/album/collection) filter — an orphan
+    // row has no album_id by the time we see it. Always include them so
+    // running any organize pass eventually cleans them up.
+    for o in queries::list_orphans(conn)? {
+        plan.file_orphans.push(FileOrphanEntry {
+            id: o.id,
+            path: PathBuf::from(o.file_path),
+            title: o.title,
+            artist: o.artist,
+            album_title: o.album_title,
+            reason: o.reason,
+        });
+    }
 
     let tracks = queries::get_all_tracks_for_organize(conn, &filter)?;
 
@@ -379,6 +417,13 @@ pub fn apply_organize(
 ) -> Result<OrganizeResult> {
     let mut result = OrganizeResult::default();
     let mut emptied_dirs: Vec<PathBuf> = Vec::new();
+    // Destination paths claimed by moves/copies/cover-moves during this
+    // apply. Used below to detect "orphan path == freshly-moved file"
+    // which happens after a dup-replace import where the new file lands
+    // at the same library location as the orphan we were about to unlink.
+    // Both literal and canonicalized forms are inserted so NFC/NFD and
+    // symlink variants on macOS don't slip past the guard.
+    let mut occupied: HashSet<String> = HashSet::new();
 
     for m in &plan.moves {
         if let Some(parent) = m.to.parent() {
@@ -430,6 +475,7 @@ pub fn apply_organize(
 
                 // Only count moves that are fully consistent (fs + every DB update).
                 result.moved += 1;
+                mark_occupied(&m.to, &mut occupied);
 
                 // Track the source directory for cleanup
                 if operation != "copy"
@@ -464,6 +510,7 @@ pub fn apply_organize(
                     continue;
                 }
                 result.copied += 1;
+                mark_occupied(&c.to, &mut occupied);
             }
             Err(e) => {
                 result.errors.push((c.from.display().to_string(), e.to_string()));
@@ -497,6 +544,7 @@ pub fn apply_organize(
                     continue;
                 }
                 result.covers_moved += 1;
+                mark_occupied(&cm.to, &mut occupied);
                 if operation != "copy"
                     && let Some(parent) = cm.from.parent()
                 {
@@ -518,6 +566,71 @@ pub fn apply_organize(
         }
     }
 
+    // Delete pending file orphans (files on disk whose track row was
+    // already removed — typically dup replacements from import). If the
+    // file is already gone, we still clear the tracking row (idempotent
+    // cleanup). Parent dirs of unlinked orphans get the same emptied-
+    // dir treatment so a stranded album directory collapses cleanly.
+    for entry in &plan.file_orphans {
+        // CRITICAL: if this orphan path was just claimed by a successful
+        // move/copy/cover-move, the file at that path is now the new
+        // live track — unlinking it here would destroy freshly-imported
+        // audio (this exact footgun caused missing files after a dup
+        // "Keep New" import + organize). The orphan is considered
+        // resolved (replaced on disk), so we still clear the tracking
+        // row, just skip the filesystem delete.
+        let orphan_literal = entry.path.display().to_string();
+        let orphan_canon = std::fs::canonicalize(&entry.path)
+            .ok()
+            .map(|p| p.display().to_string());
+        let replaced_by_move = occupied.contains(&orphan_literal)
+            || orphan_canon
+                .as_ref()
+                .map(|s| occupied.contains(s))
+                .unwrap_or(false);
+
+        let unlink_ok = if replaced_by_move {
+            tracing::info!(
+                "orphan {} was overwritten by a move in this apply — skipping unlink",
+                entry.path.display()
+            );
+            true
+        } else {
+            match std::fs::remove_file(&entry.path) {
+                Ok(()) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                Err(e) => {
+                    result.errors.push((
+                        entry.path.display().to_string(),
+                        format!("orphan unlink failed: {}", e),
+                    ));
+                    false
+                }
+            }
+        };
+        if !unlink_ok {
+            continue;
+        }
+        if let Err(e) = queries::delete_orphan(conn, entry.id) {
+            // File is gone, row couldn't be removed — surface it but
+            // don't count as removed; a re-run will try again.
+            result.errors.push((
+                entry.path.display().to_string(),
+                format!("orphan row delete failed: {}", e),
+            ));
+            continue;
+        }
+        result.file_orphans_removed += 1;
+        // Don't schedule the parent for emptied-dir cleanup when the
+        // orphan was replaced by a move — the directory is now hosting
+        // the new file, not empty.
+        if !replaced_by_move
+            && let Some(parent) = entry.path.parent()
+        {
+            emptied_dirs.push(parent.to_path_buf());
+        }
+    }
+
     // Clean up empty source directories (deepest first)
     emptied_dirs.sort();
     emptied_dirs.dedup();
@@ -527,6 +640,18 @@ pub fn apply_organize(
     }
 
     Ok(result)
+}
+
+/// Record a destination path as "now occupied by a live file". We insert
+/// both the literal path string and its canonical form so orphan
+/// comparisons below catch NFC/NFD and symlink variants — APFS normalizes
+/// filenames to NFD while tags/DB may hold NFC, and `canonicalize` has
+/// bitten us before on macOS path matching.
+fn mark_occupied(p: &Path, occupied: &mut HashSet<String>) {
+    occupied.insert(p.display().to_string());
+    if let Ok(canon) = std::fs::canonicalize(p) {
+        occupied.insert(canon.display().to_string());
+    }
 }
 
 // ── Collection deletion ──────────────────────────────────────────────

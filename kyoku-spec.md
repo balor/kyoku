@@ -202,6 +202,22 @@ CREATE TABLE IF NOT EXISTS collection_tracks (
     PRIMARY KEY (collection_id, track_id)
 );
 
+-- Files whose DB track row has been removed (most often because import-time
+-- duplicate resolution replaced them) but whose physical file still sits on
+-- disk awaiting cleanup. The next `kyoku organize` run unlinks each file and
+-- clears the tracking row. Snapshot fields preserve identifying tags so the
+-- organize preview can show a human-readable label even though the track row
+-- is gone.
+CREATE TABLE IF NOT EXISTS orphaned_files (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_path   TEXT NOT NULL UNIQUE,
+    title       TEXT,
+    artist      TEXT,
+    album_title TEXT,
+    reason      TEXT NOT NULL,          -- e.g. "replaced by duplicate during import"
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Full-text search with CJK-aware tokenization.
 -- unicode61 with remove_diacritics handles accented Latin characters (ą→a, ö→o).
 -- For CJK, we additionally store a normalized form for substring matching.
@@ -299,7 +315,7 @@ rate_limit_ms = 1100
 # Track titles are never remapped. Falls back to canonical when no alias matches.
 name_script = "native"
 
-# [acoustid] — Milestone 8 (not yet wired up)
+# [acoustid] — Milestone 9 (not yet wired up)
 # api_key = ""
 
 [ui]
@@ -344,6 +360,7 @@ Note: the files stay where they are. Their current paths are recorded in the dat
 #### 6.1.1 Scan Phase
 - Recursively walk `<path>` using `walkdir`
 - Filter by supported audio extensions: `.mp3`, `.flac`, `.ogg`, `.m4a`, `.wav`, `.wma`, `.ape`, `.opus`
+- **Always audit `music_dir` alongside the inbox.** Every import scan also walks the configured `music_dir` looking for audio files that are not referenced by any DB row (`tracks.file_path`, `collection_tracks.collection_file_path`, `orphaned_files.file_path`). Untracked files are fed into the same import flow as inbox files — if a file lives under `music_dir` but the DB doesn't know about it, it needs to be imported or deleted, and the import wizard is the right place to decide.
 - Group files into **album candidates** using heuristics:
   1. Files in the same directory = likely same album
   2. Existing album tag values (if present)
@@ -381,7 +398,23 @@ Note: the files stay where they are. Their current paths are recorded in the dat
 - Present top N candidates to user with similarity scores
 - **Multiple releases of the same album** (e.g. US vs UK vs Japan editions): show all of them as separate candidates. Do not auto-select or filter by region. Let the user choose which edition they want.
 
-#### 6.1.5 Review Phase (TUI or CLI)
+#### 6.1.5 Duplicate Resolution
+
+Before review, the wizard runs a two-pass duplicate check against the existing library and against the other groups being imported in the same batch. Duplicates are flagged *per track*, not per group, so a mixed album (two new tracks + one dup) is legal.
+
+**Pass 1 — album-slot match (DB-only, fast).** For each incoming track that has an `album_id` (either because the batch is MB-matched or because tags alone already pick an existing album in the library), look for a library track with the same `(album_id, disc_number, track_number)` triple. Matches in this pass don't need a network round-trip — they are cheap enough to run on every batch.
+
+**Pass 2 — MBID match (needs a fetched release).** For MB-matched groups whose release has actually been fetched (i.e. the tracklist is available), compare the incoming track's `recording_id` against `tracks.mbid` in the library and against other `AcceptMb` groups in the same batch. This pass is **skipped for any `(group_idx, track_idx)` pair already flagged by Pass 1** — album-slot is the stronger signal and there's no point asking the user twice. Release fetches are triggered lazily, piggy-backing on the user's MB-candidate selection: the moment a group transitions into `AcceptMb` (via keypress or auto-select) a background thread fetches its full release; the result lands via a channel and the preview refreshes. In practice the network call is rare because most album-level duplicates are caught by Pass 1.
+
+The wizard presents each detected conflict with a short reason line (`Same slot on the same album.` vs `Same MusicBrainz recording.`) and three actions:
+
+- **Keep New** — replace the library file. The existing track row is deleted; the old file is **not** removed from disk immediately — instead a row is inserted into `orphaned_files` with a snapshot of its identifying tags and `reason = "replaced by duplicate during import"`. The next `kyoku organize` run unlinks it. This two-phase cleanup gives the user a chance to back up or inspect the old file before it disappears.
+- **Keep Other** — keep the library version; skip the incoming track.
+- **Both** — import the new track anyway. The wizard does not try to auto-disambiguate paths; the organize step handles filename collisions with the usual numeric-suffix fallback.
+
+Intra-batch conflicts (two incoming tracks collide with each other rather than with the library) use the same three actions; `Keep New` drops the *other* candidate instead of deleting a library row.
+
+#### 6.1.6 Review Phase (TUI or CLI)
 - Display a **diff view** showing:
   - Current tag values (left column)
   - Proposed new values from MB (right column)
@@ -393,7 +426,7 @@ Note: the files stay where they are. Their current paths are recorded in the dat
   - **Skip** — don't import this album at all
   - **Manual search** — enter custom search query for MB
 
-#### 6.1.6 Apply Phase
+#### 6.1.7 Apply Phase
 - Write tags to files using `lofty` (if `write_tags = true` and user accepted a match)
 - Insert/update records in SQLite database (file_path points to CURRENT location)
 - Files are NOT moved or renamed — they stay exactly where they are
@@ -422,7 +455,7 @@ MusicBrainz won't have entries for a lot of music: doujin releases, Bandcamp-onl
 5. Unmatched tracks appear in all views, searches, and operations identically to matched ones
 6. Tag status shows `unmatched` or `manual` — these are informational labels, not errors
 
-#### 6.1.7 The import → organize flow
+#### 6.1.8 The import → organize flow
 
 kyoku has two phases for getting your music into the library: **import** (cataloging) and **organize** (moving files into place). They're deliberately separate so you can review before anything moves on disk.
 
@@ -443,7 +476,7 @@ If a track exists in both an album and N collections, you end up with `1 + N` ph
 
 When you delete a collection or remove a track from a collection in the TUI, you're offered an opt-in checkbox to also delete the corresponding files from disk. Files outside `music_dir` (e.g. user-relocated copies) are never touched. Tracks that would be left with no file home if you delete files are removed from the library entirely.
 
-#### 6.1.8 Future import wizard enhancements
+#### 6.1.9 Future import wizard enhancements
 Nice-to-haves deferred from milestone 3 — the typed path input in the wizard is good enough for now but these make it noticeably better:
 
 - **Path autocomplete / file picker** — a browsable directory picker in the import wizard (j/k to navigate, Enter to descend, Space to pick). Much nicer than typing absolute paths once users have a deeply-nested music staging area.
@@ -572,16 +605,17 @@ If `music_dir` does not exist when `kyoku organize --apply` is run, kyoku **asks
 #### Workflow
 1. Calculate target paths from current tags + resolved template (see priority above)
 2. For tracks in collections with templates that also belong to albums, calculate both paths
-3. Show full diff: `current path → target path(s)` for every file, labeling album vs collection copies
-4. User reviews, can exclude individual files
-5. On confirmation: move/copy files, update DB paths, delete empty source directories
-6. Files already in the correct location are skipped
+3. Collect pending rows from `orphaned_files` — these are files whose track row has already been removed (typically by dup-replace during import) and are awaiting physical cleanup. They are included regardless of any `--artist` / `--album` filter because orphans don't belong to any current album.
+4. Show full diff: `current path → target path(s)` for every file, labeling album vs collection copies, plus a dedicated "orphan files (will be deleted)" block
+5. User reviews, can exclude individual files
+6. On confirmation: move/copy files, update DB paths, unlink orphaned files and clear their tracking rows (file-not-found is treated as success so re-runs are idempotent), delete empty source directories
+7. Files already in the correct location are skipped
 
 #### TUI organize (`O` key)
 Press `O` in the library browser to organize the entire library, or in album detail to organize just that album. The TUI shows a popup with two views:
 
-- **Summary view** (default): groups of source → target directories with file counts, collection copy counts, orphan count, and "already in place" count. Press `d` to expand.
-- **Detail view**: scrollable per-file listing showing each file's source path, target path, renamed filenames (highlighted), collection associations, and orphaned tracks. Navigate with `j`/`k`, `PgUp`/`PgDn`, `Ctrl+U`/`Ctrl+D`. Press `d` to toggle back to summary.
+- **Summary view** (default): groups of source → target directories with file counts, collection copy counts, orphan-track count (rows whose file is gone), orphan-file count (files whose row is gone — will be deleted), and "already in place" count. Press `d` to expand.
+- **Detail view**: scrollable per-file listing showing each file's source path, target path, renamed filenames (highlighted), collection associations, orphaned tracks, and orphan files (labeled `Artist — Title · Album` from the tag snapshot, with the reason they were orphaned). Navigate with `j`/`k`, `PgUp`/`PgDn`, `Ctrl+U`/`Ctrl+D`. Press `d` to toggle back to summary.
 
 `Enter` applies from either view. `Esc` goes back (detail → summary → close).
 
@@ -975,7 +1009,21 @@ A single MB entity can have both a native-script primary name and one or more La
 - [x] Full tag view on track edit — every standard `lofty::ItemKey` frame, grouped by kind (Standard / MusicBrainz / ReplayGain)
 - [x] Inline tag editor (edit existing frames, clear frame to delete, multi-value preserved via `|` separator) respecting `[tagging] write_tags`; atomic file write via copy-tmp-rename
 
-### Milestone 7: Device Sync
+### Milestone 7: Import Hygiene — Duplicate Resolution & Orphan Flow
+**Goal**: Catch duplicates at import time before they pollute the library, and wire a safe two-phase cleanup for the files they replace.
+
+- [x] Two-pass duplicate detection in the import wizard:
+  - Pass 1 — album-slot: match incoming `(album_id, disc, track)` triples against the library and against other `AcceptMb` groups in the same batch (DB-only, no network)
+  - Pass 2 — MBID: compare `recording_id` against `tracks.mbid` and intra-batch peers, skipping `(group, track)` pairs Pass 1 already flagged
+- [x] Lazy full-release fetch — when a group transitions into `AcceptMb` (user keypress or auto-select), a background thread calls `fetch_release` so the MBID pass has a tracklist to compare against. Dedup-protected so each group is fetched at most once.
+- [x] Per-track Keep New / Keep Other / Both resolution — a conflict list is surfaced in the wizard with a short reason (`Same slot on the same album.` / `Same MusicBrainz recording.`)
+- [x] `orphaned_files` table: `Keep New` deletes the library track row immediately but leaves the file on disk and records a tracking row with a snapshot of identifying tags + the reason for orphaning
+- [x] `kyoku organize` integration: the plan includes pending orphan-file cleanups regardless of filter; apply unlinks each file and clears its tracking row (file-not-found is treated as success — repeated runs are idempotent). Emptied parent dirs are swept the same way as regular moves.
+- [x] Organize preview surfaces orphan files in both summary (count + "will be deleted" block) and detail view (label + path + reason)
+- [x] Notices in library, collection, and CLI organize paths report `N orphan files deleted` alongside moves/copies
+- [x] Import scan audits `music_dir` for audio files not referenced by any DB row (`tracks.file_path`, `collection_tracks.collection_file_path`, `orphaned_files.file_path`) and feeds them into the same wizard as inbox files — the user either imports them or marks them for deletion
+
+### Milestone 8: Device Sync
 **Goal**: One-shot sync your library to external devices — MP3 players, SD cards, USB drives — entirely from the TUI. No saved configuration; each sync is an interactive wizard. Device-first workflow: pick the device, not a directory.
 
 **TUI Sync Wizard flow:**
@@ -999,7 +1047,7 @@ A single MB entity can have both a native-script primary name and one or more La
 - [ ] Optional per-sync path template override
 - [ ] fatsort post-sync cycle: unmount → fatsort → remount, with clear TUI status for each step
 
-### Milestone 8: Audio Fingerprinting
+### Milestone 9: Audio Fingerprinting
 **Goal**: Identify music from its audio content when tags are missing or wrong.
 
 - [ ] Chromaprint fingerprinting (symphonia → rusty-chromaprint) — decode audio to PCM, generate fingerprint

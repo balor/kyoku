@@ -421,6 +421,223 @@ fn apply_deletes_orphan_track_rows() {
     assert_eq!(exists, 0, "orphan track row should be deleted");
 }
 
+// ── File orphans (orphaned_files table) ──────────────────────────
+
+#[test]
+fn plan_picks_up_file_orphans_from_orphaned_files_table() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    // Simulate a dup-replace leftover: file sits under music_dir with no
+    // track row, tracked only in orphaned_files.
+    let orphan_path = music.join("Artist/Album (2024)/old.mp3");
+    touch(&orphan_path);
+    queries::insert_orphan(
+        &conn,
+        &orphan_path.display().to_string(),
+        Some("Old Song"),
+        Some("Artist"),
+        Some("Album"),
+        "dup-replace",
+    )
+    .unwrap();
+
+    let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
+
+    assert_eq!(plan.file_orphans.len(), 1);
+    let e = &plan.file_orphans[0];
+    assert_eq!(e.path, orphan_path);
+    assert_eq!(e.title.as_deref(), Some("Old Song"));
+    assert_eq!(e.artist.as_deref(), Some("Artist"));
+    assert_eq!(e.album_title.as_deref(), Some("Album"));
+    assert_eq!(e.reason, "dup-replace");
+}
+
+#[test]
+fn plan_includes_file_orphans_regardless_of_filter() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    let orphan_path = music.join("leftover.mp3");
+    touch(&orphan_path);
+    queries::insert_orphan(
+        &conn,
+        &orphan_path.display().to_string(),
+        None,
+        None,
+        None,
+        "dup-replace",
+    )
+    .unwrap();
+
+    // A filter that matches no tracks — the orphan should still surface.
+    let plan = plan_organize(
+        &conn,
+        &settings_with_music_dir(&music),
+        OrganizeFilter::Artist("Nobody".into()),
+    )
+    .unwrap();
+
+    assert!(plan.moves.is_empty());
+    assert_eq!(plan.file_orphans.len(), 1);
+}
+
+#[test]
+fn apply_unlinks_orphan_file_and_clears_tracking_row() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    let orphan_path = music.join("Artist/Album (2024)/old.mp3");
+    touch(&orphan_path);
+    queries::insert_orphan(
+        &conn,
+        &orphan_path.display().to_string(),
+        Some("Old"),
+        Some("Artist"),
+        Some("Album"),
+        "dup-replace",
+    )
+    .unwrap();
+    let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
+
+    let result = apply_organize(&conn, &plan, "move", &[music.clone()]).unwrap();
+
+    assert_eq!(result.file_orphans_removed, 1);
+    assert!(result.errors.is_empty());
+    assert!(!orphan_path.exists(), "orphan file should be unlinked");
+    let remaining: i64 = conn
+        .query_row("SELECT COUNT(*) FROM orphaned_files", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(remaining, 0, "orphan tracking row should be cleared");
+}
+
+#[test]
+fn apply_treats_already_missing_orphan_as_success() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    // Row is there, but the file never made it to disk (or was removed
+    // out-of-band). Apply should still clear the tracking row — this is
+    // the idempotent path that makes repeated organize runs safe.
+    let ghost = music.join("Artist/Album (2024)/ghost.mp3");
+    queries::insert_orphan(
+        &conn,
+        &ghost.display().to_string(),
+        Some("Ghost"),
+        Some("Artist"),
+        Some("Album"),
+        "dup-replace",
+    )
+    .unwrap();
+    let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
+    assert_eq!(plan.file_orphans.len(), 1);
+
+    let result = apply_organize(&conn, &plan, "move", &[music.clone()]).unwrap();
+
+    assert_eq!(result.file_orphans_removed, 1);
+    assert!(result.errors.is_empty());
+    let remaining: i64 = conn
+        .query_row("SELECT COUNT(*) FROM orphaned_files", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(remaining, 0);
+}
+
+#[test]
+fn apply_cleans_empty_parent_directories_after_orphan_unlink() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    // Orphan is the only file in a nested album dir — after unlink both
+    // Album and Artist levels should collapse.
+    let orphan_path = music.join("Artist/Album (2024)/old.mp3");
+    touch(&orphan_path);
+    queries::insert_orphan(
+        &conn,
+        &orphan_path.display().to_string(),
+        None,
+        None,
+        None,
+        "dup-replace",
+    )
+    .unwrap();
+    let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
+
+    let result = apply_organize(&conn, &plan, "move", &[music.clone()]).unwrap();
+
+    assert_eq!(result.file_orphans_removed, 1);
+    assert!(result.dirs_cleaned >= 2, "Album + Artist should both be cleaned, got {}", result.dirs_cleaned);
+    assert!(!music.join("Artist/Album (2024)").exists());
+    assert!(!music.join("Artist").exists());
+    assert!(music.exists(), "music_dir itself must survive");
+}
+
+/// Regression test for a critical bug where a dup "Keep New" import
+/// followed by `organize` could destroy freshly-moved files. The orphan
+/// row points at the old library path, but the new import's organize
+/// destination resolves to the *same* path — the move overwrites the
+/// old file (correct), and then the orphan-unlink loop was deleting the
+/// newly-placed file (wrong). Guard: orphan paths that match a
+/// destination written during this apply should skip the unlink.
+#[test]
+fn apply_skips_orphan_unlink_when_path_was_just_occupied_by_move() {
+    let (_tmp, src, music, conn) = fresh_world();
+
+    // The new imported file (in inbox) — organize will move this.
+    let inbox_file = src.join("03 Song.mp3");
+    let track_id = add_album_track(
+        &conn,
+        inbox_file.clone(),
+        "Artist",
+        "Album",
+        3,
+        "Song",
+        Some(2024),
+    );
+
+    // Destination the template resolves to.
+    let dest = music.join("Artist/Album (2024)/03 Song.mp3");
+
+    // Seed an orphan row at exactly that destination (simulates the
+    // dup-replace: old track row deleted, file path logged for cleanup).
+    // Also put a real file there so the move's rename has something to
+    // overwrite — this mirrors the real-world race.
+    touch(&dest);
+    queries::insert_orphan(
+        &conn,
+        &dest.display().to_string(),
+        Some("Song"),
+        Some("Artist"),
+        Some("Album"),
+        "replaced by duplicate during import",
+    )
+    .unwrap();
+
+    let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
+    assert_eq!(plan.moves.len(), 1, "expected one move for the new import");
+    assert_eq!(plan.file_orphans.len(), 1, "expected one pending orphan");
+    assert_eq!(plan.moves[0].to, dest);
+
+    let result = apply_organize(&conn, &plan, "move", &[music.clone()]).unwrap();
+
+    assert_eq!(result.moved, 1);
+    assert_eq!(result.file_orphans_removed, 1);
+    assert!(
+        result.errors.is_empty(),
+        "no errors expected, got: {:?}",
+        result.errors
+    );
+    // THE key assertion: the freshly-moved file must survive. Before the
+    // fix, the orphan-unlink loop deleted this file.
+    assert!(
+        dest.exists(),
+        "newly-moved file was deleted by the orphan-unlink loop — bug regressed"
+    );
+    // DB path updated to the new location.
+    let db_path: String = conn
+        .query_row(
+            "SELECT file_path FROM tracks WHERE id = ?1",
+            [track_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(db_path, dest.display().to_string());
+    // Orphan tracking row is cleared (the move resolved it).
+    let remaining: i64 = conn
+        .query_row("SELECT COUNT(*) FROM orphaned_files", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(remaining, 0);
+}
+
 // ── plan_delete_collection / apply_delete_collection ─────────────
 
 /// Build a track sitting at a real on-disk path under `music`, in the named

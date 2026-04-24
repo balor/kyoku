@@ -33,6 +33,7 @@ impl App {
             AppView::Import => {
                 self.import.start(
                     &self.settings.library.inbox_dirs,
+                    &self.settings.library.music_dir,
                     &self.conn,
                     self.settings.musicbrainz.rate_limit_ms,
                     self.settings.musicbrainz.name_script,
@@ -146,6 +147,12 @@ impl App {
                                     parts.push(format!(
                                         "{} orphans pruned",
                                         result.orphans_cleaned
+                                    ));
+                                }
+                                if result.file_orphans_removed > 0 {
+                                    parts.push(format!(
+                                        "{} orphan files deleted",
+                                        result.file_orphans_removed
                                     ));
                                 }
                                 if !result.errors.is_empty() {
@@ -393,6 +400,12 @@ impl App {
                                         result.dirs_cleaned
                                     ));
                                 }
+                                if result.file_orphans_removed > 0 {
+                                    parts.push(format!(
+                                        "{} orphan files deleted",
+                                        result.file_orphans_removed
+                                    ));
+                                }
                                 if !result.errors.is_empty() {
                                     parts.push(format!(
                                         "{} errors",
@@ -446,6 +459,12 @@ impl App {
         // Esc is handled inside the view (clear input / exit custom mode)
         // — don't cancel the whole wizard unless the view itself decides.
         let capturing = self.import.is_capturing_input();
+        // Snapshot the step so we can tell *which* captured widget just
+        // closed in response to Esc. Only the SelectSource custom-path
+        // case wants an Esc-on-empty to also cancel the wizard; popups
+        // during Review (collection picker, MBID input) should only
+        // close the popup.
+        let step_before = self.import.step.clone();
 
         if !capturing && keys::is_back(&key) && self.import.can_cancel() {
             self.switch_view(AppView::Library);
@@ -455,8 +474,13 @@ impl App {
         self.import.handle_key(key, &self.conn);
 
         // If the view cleared its capturing state in response to Esc on an
-        // empty input, treat that as a wizard cancel.
-        if capturing && keys::is_back(&key) && !self.import.is_capturing_input() {
+        // empty custom-path input, treat that as a wizard cancel. Only
+        // applies to SelectSource — popups in Review handle their own Esc.
+        if capturing
+            && keys::is_back(&key)
+            && !self.import.is_capturing_input()
+            && step_before == crate::tui::views::import::ImportStep::SelectSource
+        {
             self.switch_view(AppView::Library);
             self.refresh_counts();
             return AppAction::None;

@@ -248,6 +248,12 @@ impl AlbumDetailView {
                             if result.dirs_cleaned > 0 {
                                 parts.push(format!("{} dirs cleaned", result.dirs_cleaned));
                             }
+                            if result.file_orphans_removed > 0 {
+                                parts.push(format!(
+                                    "{} orphan files deleted",
+                                    result.file_orphans_removed
+                                ));
+                            }
                             let had_errors = !result.errors.is_empty();
                             if had_errors {
                                 parts.push(format!("{} errors", result.errors.len()));

@@ -1,7 +1,52 @@
+use std::collections::HashSet;
+
 use rusqlite::Connection;
 
 use crate::db::models::Track;
 use crate::error::Result;
+
+/// Every file path the DB currently knows about — `tracks.file_path`, every
+/// non-null `collection_tracks.collection_file_path`, and every
+/// `orphaned_files.file_path`. Used by the import scanner to skip files that
+/// are already accounted for somewhere, including collection copies sitting
+/// inside `music_dir` and pending-orphan leftovers.
+///
+/// Each path is inserted twice: once as the DB-stored literal, and once as
+/// its canonicalized form (when canonicalize succeeds). The scanner
+/// canonicalizes the paths it finds on disk, so matching only on the literal
+/// would miss whenever the stored path has a symlink component or UTF
+/// normalization that differs from what the filesystem returns (NFD vs NFC
+/// on macOS is the usual culprit). Both forms in the set means either
+/// comparison succeeds.
+pub fn list_all_known_paths(conn: &Connection) -> Result<HashSet<String>> {
+    let mut out = HashSet::new();
+    let mut insert_both = |p: String| {
+        // Canonical form first (cheap string clone, may fail for missing files
+        // — that's fine, we still have the literal).
+        if let Ok(canon) = std::fs::canonicalize(&p) {
+            out.insert(canon.display().to_string());
+        }
+        out.insert(p);
+    };
+    // One statement per source table — UNIONing inside SQLite would also
+    // work but this keeps the borrow of `conn` straightforward.
+    let mut stmt = conn.prepare("SELECT file_path FROM tracks")?;
+    for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        insert_both(row?);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT collection_file_path FROM collection_tracks \
+         WHERE collection_file_path IS NOT NULL",
+    )?;
+    for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        insert_both(row?);
+    }
+    let mut stmt = conn.prepare("SELECT file_path FROM orphaned_files")?;
+    for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        insert_both(row?);
+    }
+    Ok(out)
+}
 
 /// Check if a track with the given file path already exists in the database.
 pub fn track_exists_by_path(conn: &Connection, path: &str) -> Result<bool> {
@@ -1068,12 +1113,8 @@ const EXISTING_TRACK_SELECT: &str = "SELECT \
 
 /// Look up an existing track by its MusicBrainz recording id. Returns the
 /// first hit if duplicate MBIDs ever slipped in (shouldn't, but the DB has
-/// no unique constraint there so we don't fail hard).
-///
-/// Unused for now — staged for the next iteration of duplicate detection,
-/// which will also key on MBID once the worker's MB release fetch moves
-/// ahead of the detection step.
-#[allow(dead_code)]
+/// no unique constraint there so we don't fail hard). Used by the MBID
+/// pass in `dup_detect::detect`.
 pub fn find_track_by_mbid(conn: &Connection, mbid: &str) -> Result<Option<ExistingTrackRef>> {
     let sql = format!("{} WHERE t.mbid = ?1 LIMIT 1", EXISTING_TRACK_SELECT);
     let row = conn
@@ -1129,13 +1170,58 @@ pub fn insert_orphan(
     Ok(())
 }
 
-/// How many orphaned files are currently awaiting cleanup.
-///
-/// Unused for now — will be read by the organize step's cleanup pass.
+/// How many orphaned files are currently awaiting cleanup. Staged for
+/// inbox / status-bar indicators; `list_orphans` returns the full details
+/// for the organize preview.
 #[allow(dead_code)]
 pub fn count_orphans(conn: &Connection) -> Result<i64> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM orphaned_files", [], |row| row.get(0))?;
     Ok(count)
+}
+
+/// Single row from the `orphaned_files` table. `id` is the tracking row
+/// id (needed to delete it after cleanup), not the (defunct) track id.
+#[derive(Debug, Clone)]
+pub struct OrphanFileRow {
+    pub id: i64,
+    pub file_path: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album_title: Option<String>,
+    pub reason: String,
+}
+
+/// List every file currently tracked as orphaned. Order is insertion
+/// order (via `id`) so the preview presents them in the order they
+/// were created.
+pub fn list_orphans(conn: &Connection) -> Result<Vec<OrphanFileRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, file_path, title, artist, album_title, reason \
+         FROM orphaned_files ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(OrphanFileRow {
+            id: row.get(0)?,
+            file_path: row.get(1)?,
+            title: row.get(2)?,
+            artist: row.get(3)?,
+            album_title: row.get(4)?,
+            reason: row.get(5)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Remove a tracking row after its file has been handled (deleted, or
+/// confirmed already missing). Idempotent — deleting a non-existent id
+/// is a no-op, not an error.
+pub fn delete_orphan(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM orphaned_files WHERE id = ?1", [id])?;
+    Ok(())
 }
 
 #[cfg(test)]
