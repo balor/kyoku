@@ -125,6 +125,7 @@ impl ImportView {
                             } else {
                                 GroupAction::AcceptAsIs
                             };
+                            group.user_decided = true;
                         }
                     }
                     self.collection_picker = None;
@@ -199,6 +200,7 @@ impl ImportView {
                 if let Some(group) = self.groups.get_mut(self.current_group) {
                     group.action = GroupAction::AcceptAsIs;
                     group.selected_candidate = None;
+                    group.user_decided = true;
                 }
                 self.next_group();
             }
@@ -212,6 +214,7 @@ impl ImportView {
                 if let Some(group) = self.groups.get_mut(self.current_group) {
                     group.action = GroupAction::Skip;
                     group.selected_candidate = None;
+                    group.user_decided = true;
                 }
                 self.next_group();
             }
@@ -219,6 +222,7 @@ impl ImportView {
                 if let Some(group) = self.groups.get_mut(self.current_group) {
                     group.action = GroupAction::Loose;
                     group.selected_candidate = None;
+                    group.user_decided = true;
                 }
                 self.next_group();
             }
@@ -229,6 +233,7 @@ impl ImportView {
                     && idx < group.mb_candidates.len() {
                         group.selected_candidate = Some(idx);
                         group.action = GroupAction::AcceptMb;
+                        group.user_decided = true;
                     }
                 self.ensure_full_release_for_group(self.current_group);
             }
@@ -237,6 +242,7 @@ impl ImportView {
                 if let Some(group) = self.groups.get_mut(self.current_group) {
                     group.selected_candidate = None;
                     group.action = GroupAction::AcceptAsIs;
+                    group.user_decided = true;
                 }
             }
             // Up/down arrows cycle through MB candidates
@@ -247,6 +253,7 @@ impl ImportView {
                         if current > 0 {
                             group.selected_candidate = Some(current - 1);
                             group.action = GroupAction::AcceptMb;
+                            group.user_decided = true;
                         }
                     }
                 self.ensure_full_release_for_group(self.current_group);
@@ -259,6 +266,7 @@ impl ImportView {
                         if current < max {
                             group.selected_candidate = Some(current + 1);
                             group.action = GroupAction::AcceptMb;
+                            group.user_decided = true;
                         }
                     }
                 self.ensure_full_release_for_group(self.current_group);
@@ -507,6 +515,7 @@ impl ImportView {
                     mb_state: MbMatchState::NotStarted,
                     target_collection: String::new(),
                     full_release_fetching: false,
+                    user_decided: false,
                 })
                 .collect();
 

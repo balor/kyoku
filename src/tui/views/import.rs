@@ -66,6 +66,11 @@ pub struct ImportGroup {
     /// currently selected candidate. Used to avoid firing a second fetch
     /// before the first lands. Reset in the `release_fetch_rx` drain.
     pub full_release_fetching: bool,
+    /// Set when the user has made an explicit decision for this group
+    /// (pressed A/S/L/0, picked a candidate with 1-9, or arrowed the
+    /// selection). Blocks the MB auto-accept in the result drain from
+    /// clobbering that decision if the search finishes afterwards.
+    pub user_decided: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]

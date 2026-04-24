@@ -61,8 +61,12 @@ impl ImportView {
                         group.mb_candidates = result.candidates;
                         group.mb_state = MbMatchState::Failed(err);
                     } else {
-                        // Auto-select top candidate if score is high enough
-                        if let Some(best) = result.candidates.first()
+                        // Auto-select top candidate if score is high enough.
+                        // Skip when the user has already made a decision for
+                        // this group — otherwise a late-arriving MB result
+                        // would clobber their Skip/Loose/explicit pick.
+                        if !group.user_decided
+                            && let Some(best) = result.candidates.first()
                             && best.score.total >= 0.85 {
                                 group.selected_candidate = Some(0);
                                 group.action = GroupAction::AcceptMb;
@@ -122,6 +126,7 @@ impl ImportView {
                         group.mb_candidates = new_candidates;
                         group.selected_candidate = Some(0);
                         group.action = GroupAction::AcceptMb;
+                        group.user_decided = true;
                         group.mb_state = MbMatchState::Done;
                     }
                 }
