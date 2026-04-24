@@ -27,18 +27,21 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            runner: macos-14          # Apple Silicon
+            runner: macos-14          # Apple Silicon (native)
             os: macos
+            can_run: true
           - target: x86_64-apple-darwin
-            runner: macos-13          # last Intel runner available
+            runner: macos-14
             os: macos
+            can_run: false
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             os: linux
+            can_run: true
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -56,9 +59,10 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       # Smoke-test: make sure the binary at least launches its --help.
-      # Skip on cross-target builds (none here, but keeps this portable if we
-      # add musl/cross later).
+      # Skipped on cross-target builds (e.g. x86_64-apple-darwin on arm64)
+      # because we can't assume the runner can execute a foreign arch.
       - name: Smoke test
+        if: matrix.can_run
         run: ./target/${{ matrix.target }}/release/kyoku --help
 
       # Produce `kyoku-<version>-<target>.tar.gz` with just the binary.
@@ -81,7 +85,7 @@ jobs:
       # Always upload as workflow artifacts — lets you grab binaries from
       # manual `workflow_dispatch` runs without cutting a release.
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ steps.package.outputs.name }}
           path: ${{ steps.package.outputs.path }}
