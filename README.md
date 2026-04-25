@@ -1,0 +1,117 @@
+# kyoku (曲)
+
+A TUI-first music library manager written in Rust.
+
+The job: turn a messy pile of audio files into a **beautifully organized directory tree** that any file-browser-based music player can navigate directly. The filesystem is the product. The SQLite database is an index, not the source of truth.
+
+kyoku reads, catalogs, and enriches metadata. You decide when and how files move. Every destructive operation has a dry-run preview and explicit confirmation.
+
+> Personal project, no stable-release plans. It's the tool I wanted for myself; it'll keep evolving as I use it.
+
+---
+
+## Why this exists
+
+[beets](https://beets.io/) is an impressive project with deep capabilities, and most people who care about music cataloging should probably just use it. I'm not a power-user music cataloguer though, and a few things consistently got in my way:
+
+1. **I want search to feel like `ripgrep`, not like SQL.** A single freeform query should work 90% of the time; structured filters stay available, but never required.
+2. **Loose collections as first-class objects.** Mixtapes, DJ sets, a folder of random MP3s, personal compilations, soundtracks with 40 different artists — I want these to live alongside the album hierarchy, not get squeezed into it.
+3. **A TUI I can drive without the docs open.** Every screen shows its keys at the bottom; browsing the library, tweaking tags, or running an import wizard should be discoverable by poking around, not by memorising a query DSL.
+4. **CJK / Unicode working everywhere.** Japanese, Korean, Chinese characters in tags, filenames, search, display, and sorting — handled as a default, not a config tweak.
+5. **Built-in library relocation.** Moving a library to a new drive should be `kyoku relocate /old /new`, not hand-written SQLite.
+
+None of these are damning critiques of beets — it's a different design point and an older, much richer tool. kyoku is just a smaller, narrower thing shaped to one person's habits.
+
+---
+
+## What kyoku isn't
+
+- Not a music player — no playback.
+- Not a streaming client.
+- Not a recommendation engine.
+- Not a web app.
+- Not a native Windows GUI (runs on Windows via WSL).
+- Not automatic — kyoku will never move or rename files without an explicit action from you.
+
+---
+
+## Features
+
+- **Import wizard** with MusicBrainz matching, manual MBID lookup, and per-group decisions (accept, skip, import-loose, assign to a collection).
+- **Duplicate detection** against the library and within the batch — surfaced as side-by-side "keep A vs. B" decisions before anything touches disk.
+- **Library browser** with album grid, cover-art previews, album detail, and theme support.
+- **Collections** — loose, non-album groupings that live alongside the album hierarchy.
+- **Tag editor** that writes both the DB and the file tags.
+- **Cover art fetch** from the Cover Art Archive.
+- **Organize** with templated paths and a dry-run preview.
+- **Relocate** to rebase library paths after a drive move.
+- **Scriptable CLI** mirroring the TUI features (`import`, `scan`, `organize`, `relocate`, `info`, `paths`, `setup`).
+- **Dry-run-by-default** for anything that touches disk.
+
+---
+
+## Keep your own backup
+
+kyoku previews and confirms every destructive operation, but it does move and rewrite files on your behalf — and like any software, it has bugs. **Always keep a separate, independent copy of your music collection** (cloud sync, an external drive, a NAS snapshot — whatever fits) before pointing kyoku at anything you can't afford to lose. Shit happens.
+
+---
+
+## Install
+
+Build from source:
+
+```sh
+cargo install --path .
+# or for a local build
+cargo build --release
+./target/release/kyoku --help
+```
+
+Requires a recent stable Rust toolchain (2024 edition). No system libraries required — rusqlite is bundled; TLS goes through rustls.
+
+### macOS binary note
+
+Tagged commits trigger a CI build that uploads tarballs to the corresponding GitHub Release, but those binaries are not Apple-notarized, so Gatekeeper will block them on first run with "Apple could not verify…". Strip the quarantine attribute after extracting:
+
+```sh
+xattr -d com.apple.quarantine ./kyoku
+```
+
+Or use System Settings → Privacy & Security → "Open Anyway".
+
+---
+
+## Quick start
+
+```sh
+kyoku setup       # interactive first-run wizard
+kyoku             # launch the TUI — everything else lives in there
+```
+
+The CLI subcommands (`import`, `scan`, `organize`, `relocate`, …) are there for scripting, but day-to-day use happens entirely in the TUI. Run `kyoku --help` if you want to see them.
+
+Config lives at `$XDG_CONFIG_HOME/kyoku/config.toml` (macOS: `~/Library/Application Support/kyoku/config.toml`). Run `kyoku paths` to see the exact locations on your machine.
+
+---
+
+## Design principles
+
+1. **TUI-first** — the TUI is the primary interface; CLI subcommands are for automation and scripting.
+2. **The filesystem is the product** — the real output is a browsable directory tree, not a database.
+3. **File operations are deliberate** — import reads and catalogs; rename / move / organize are separate, explicit actions.
+4. **Safety first** — never modify files without explicit confirmation; always show a dry-run diff.
+5. **Offline-capable** — core library management works without network; MusicBrainz lookups are optional enrichment.
+6. **Unmatched content is normal** — files without MB matches are fully functional library members.
+7. **Unicode-native** — CJK characters, diacritics, and mixed-script content work correctly throughout the pipeline.
+
+---
+
+## Tech stack
+
+Rust 2024 · ratatui + crossterm (TUI) · rusqlite bundled (SQLite) · lofty (tag I/O) · reqwest + rustls (HTTP) · strsim (fuzzy matching) · walkdir · inquire (setup prompts). Zero system dependencies; the same source compiles on macOS and Linux without conditional code.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
