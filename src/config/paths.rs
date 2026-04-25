@@ -42,3 +42,25 @@ pub fn expand_tilde(path: impl AsRef<Path>) -> PathBuf {
         }
     path.to_path_buf()
 }
+
+/// Verify that `path` is usable as the managed music library: it must
+/// exist, be a directory, and accept writes. Returns a short reason on
+/// failure. We actually try to create-and-remove a probe file because
+/// `Permissions::readonly()` misses macOS ACLs and POSIX group/other
+/// bits that apply only to our effective uid.
+pub fn validate_library_dir(path: &Path) -> std::result::Result<(), String> {
+    if !path.exists() {
+        return Err(format!("does not exist: {}", path.display()));
+    }
+    if !path.is_dir() {
+        return Err(format!("not a directory: {}", path.display()));
+    }
+    let probe = path.join(".kyoku-write-probe");
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(e) => Err(format!("not writable ({})", e)),
+    }
+}

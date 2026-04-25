@@ -33,12 +33,44 @@ pub fn run(current: Settings) -> anyhow::Result<()> {
         println!();
     }
 
-    // Music directory
+    // Music directory. Loop until we have a usable path — exists (or the
+    // user agreed to create it) and accepts writes. Bailing early here is
+    // much friendlier than importing a few hundred files and then hitting
+    // the first failed rename.
     let default_music = current.library.music_dir.display().to_string();
-    let music_dir = Text::new("Music directory:")
-        .with_default(&default_music)
-        .with_help_message("Root directory for your organized music library")
-        .prompt()?;
+    let music_dir = loop {
+        let raw = Text::new("Music directory:")
+            .with_default(&default_music)
+            .with_help_message("Root directory for your organized music library")
+            .prompt()?;
+        let expanded = config::paths::expand_tilde(&raw);
+
+        // Not existing is the only recoverable failure — offer to mkdir -p.
+        if !expanded.exists() {
+            let create = Confirm::new(&format!(
+                "{} does not exist. Create it?",
+                expanded.display()
+            ))
+            .with_default(true)
+            .prompt()?;
+            if !create {
+                println!("  → pick a different path.");
+                continue;
+            }
+            if let Err(e) = std::fs::create_dir_all(&expanded) {
+                println!("  Could not create directory: {}", e);
+                continue;
+            }
+        }
+
+        match config::paths::validate_library_dir(&expanded) {
+            Ok(()) => break raw,
+            Err(reason) => {
+                println!("  {}", reason);
+                println!("  → pick a different path.");
+            }
+        }
+    };
 
     // Database directory
     let default_db_dir = config::paths::data_dir().display().to_string();

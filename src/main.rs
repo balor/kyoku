@@ -80,6 +80,27 @@ fn main() -> anyhow::Result<()> {
                 println!();
                 println!("Run `kyoku setup` to get started.");
             } else {
+                // Bail out before opening the DB if the configured library
+                // dir is missing or unwritable — the TUI has no good way to
+                // surface that after boot, and every import/organize action
+                // would just silently fail.
+                if let Err(reason) =
+                    config::paths::validate_library_dir(&settings.library.music_dir)
+                {
+                    eprintln!(
+                        "Library directory unusable: {}",
+                        reason
+                    );
+                    eprintln!(
+                        "  configured path: {}",
+                        settings.library.music_dir.display()
+                    );
+                    eprintln!();
+                    eprintln!(
+                        "Edit the config (`kyoku paths` shows where it lives) or re-run `kyoku setup`."
+                    );
+                    std::process::exit(1);
+                }
                 let conn = db::open_database(config::paths::database_file())?;
                 tui::run(conn, settings)?;
             }
