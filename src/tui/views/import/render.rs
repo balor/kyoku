@@ -52,6 +52,7 @@ impl ImportView {
         // detection has recording MBIDs — collect them here and fire
         // after the borrow ends.
         let mut auto_selected: Vec<usize> = Vec::new();
+        let auto_threshold = self.auto_match_threshold;
         if let Some(rx) = &self.mb_rx {
             while let Ok(result) = rx.try_recv() {
                 if let Some(group) = self.groups.get_mut(result.group_idx) {
@@ -67,7 +68,7 @@ impl ImportView {
                         // would clobber their Skip/Loose/explicit pick.
                         if !group.user_decided
                             && let Some(best) = result.candidates.first()
-                            && best.score.total >= 0.85 {
+                            && best.score.total >= auto_threshold {
                                 group.selected_candidate = Some(0);
                                 group.action = GroupAction::AcceptMb;
                                 auto_selected.push(result.group_idx);

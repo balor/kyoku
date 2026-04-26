@@ -101,7 +101,7 @@ fn main() -> anyhow::Result<()> {
                     );
                     std::process::exit(1);
                 }
-                let conn = db::open_database(config::paths::database_file())?;
+                let conn = db::open_database(settings.database_file())?;
                 tui::run(conn, settings)?;
             }
         }
@@ -111,7 +111,7 @@ fn main() -> anyhow::Result<()> {
             loose,
             collection,
         }) => {
-            let conn = db::open_database(config::paths::database_file())?;
+            let conn = db::open_database(settings.database_file())?;
 
             let paths: Vec<std::path::PathBuf> = match path {
                 Some(p) => vec![p],
@@ -250,7 +250,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Paths) => {
             let config = config::paths::config_file();
-            let db = config::paths::database_file();
+            let db = settings.database_file();
             let cache = config::paths::cache_dir();
             let music = &settings.library.music_dir;
 
@@ -272,7 +272,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some(Command::Scan) => {
-            let conn = db::open_database(config::paths::database_file())?;
+            let conn = db::open_database(settings.database_file())?;
             let inbox_dirs = &settings.library.inbox_dirs;
 
             if inbox_dirs.is_empty() {
@@ -300,7 +300,7 @@ fn main() -> anyhow::Result<()> {
             path,
             collection,
         }) => {
-            let conn = db::open_database(config::paths::database_file())?;
+            let conn = db::open_database(settings.database_file())?;
             let filter = if let Some(a) = artist {
                 core::organizer::OrganizeFilter::Artist(a)
             } else if let Some(a) = album {
@@ -471,7 +471,7 @@ fn main() -> anyhow::Result<()> {
             verify,
             pretend,
         }) => {
-            let conn = db::open_database(config::paths::database_file())?;
+            let conn = db::open_database(settings.database_file())?;
 
             if verify {
                 let missing = core::relocator::verify_paths(&conn)?;

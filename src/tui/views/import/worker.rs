@@ -24,9 +24,10 @@ pub(super) fn run_import_worker(
     rate_limit_ms: u64,
     name_script: NameScriptPreference,
     write_tags: bool,
+    db_path: std::path::PathBuf,
     tx: mpsc::Sender<ImportMessage>,
 ) {
-    let conn = match crate::db::open_database(crate::config::paths::database_file()) {
+    let conn = match crate::db::open_database(&db_path) {
         Ok(c) => c,
         Err(e) => {
             let _ = tx.send(ImportMessage::Complete(format!("DB open failed: {}", e)));

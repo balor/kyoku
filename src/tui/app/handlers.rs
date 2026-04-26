@@ -38,6 +38,9 @@ impl App {
                     self.settings.musicbrainz.rate_limit_ms,
                     self.settings.musicbrainz.name_script,
                     self.settings.tagging.write_tags,
+                    self.settings.import.auto_match_threshold,
+                    self.settings.import.match_candidates,
+                    self.settings.database_file(),
                 );
             }
             AppView::Editor { track_id } => {

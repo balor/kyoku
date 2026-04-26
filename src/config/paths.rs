@@ -18,9 +18,13 @@ pub fn config_dir() -> PathBuf {
     home.join(".config").join("kyoku")
 }
 
-/// Resolve the data directory for kyoku (database lives here).
-/// Uses $XDG_DATA_HOME/kyoku or platform default.
-pub fn data_dir() -> PathBuf {
+/// Platform-default data directory for kyoku — `$XDG_DATA_HOME/kyoku` on
+/// Linux, `~/Library/Application Support/kyoku` on macOS, `%APPDATA%\kyoku`
+/// on Windows. Used as the fallback when the user hasn't set
+/// `[library] data_dir` in config.toml. Most callers should go through
+/// `Settings::data_dir()` / `Settings::database_file()` instead so the
+/// user's override wins.
+pub fn default_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("~/.local/share"))
         .join("kyoku")
@@ -38,10 +42,9 @@ pub fn config_file() -> PathBuf {
     config_dir().join("config.toml")
 }
 
-/// Path to the library database.
-pub fn database_file() -> PathBuf {
-    data_dir().join("library.db")
-}
+/// Filename of the SQLite database inside whichever directory the user (or
+/// the default) has chosen.
+pub const DATABASE_FILENAME: &str = "library.db";
 
 /// Expand `~` at the start of a path to the user's home directory.
 pub fn expand_tilde(path: impl AsRef<Path>) -> PathBuf {

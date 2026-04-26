@@ -662,6 +662,7 @@ mod tests {
             mb_state: MbMatchState::NotStarted,
             target_collection: String::new(),
             full_release_fetching: false,
+            user_decided: false,
         }
     }
 
@@ -926,6 +927,7 @@ mod tests {
             mb_state: MbMatchState::Done,
             target_collection: String::new(),
             full_release_fetching: false,
+            user_decided: false,
         }
     }
 

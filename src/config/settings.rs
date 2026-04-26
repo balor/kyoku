@@ -26,6 +26,13 @@ pub struct LibrarySettings {
     #[serde(default = "default_music_dir")]
     pub music_dir: PathBuf,
 
+    /// Directory holding `library.db`. Defaults to the platform data dir
+    /// (XDG / macOS Application Support / Windows AppData) but is freely
+    /// reconfigurable — common reason to override is keeping the DB next
+    /// to the music it indexes (e.g. on the same external drive).
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
+
     #[serde(default)]
     pub inbox_dirs: Vec<PathBuf>,
 
@@ -49,17 +56,14 @@ pub struct ImportSettings {
     #[serde(default = "default_organize_operation")]
     pub organize_operation: String,
 
+    /// Auto-accept MusicBrainz matches at or above this similarity (0.0 - 1.0).
+    /// Applied to the top candidate during the Review step.
     #[serde(default = "default_auto_match_threshold")]
     pub auto_match_threshold: f64,
 
-    #[serde(default = "default_true")]
-    pub use_fingerprint: bool,
-
+    /// Number of MusicBrainz match candidates fetched per group on search.
     #[serde(default = "default_match_candidates")]
     pub match_candidates: u32,
-
-    #[serde(default = "default_true")]
-    pub skip_duplicates: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +163,10 @@ fn default_music_dir() -> PathBuf {
         .join("Music")
 }
 
+fn default_data_dir() -> PathBuf {
+    crate::config::paths::default_data_dir()
+}
+
 fn default_path_template() -> String {
     "{album_artist}/{album} ({year})/{disc:0}-{track:02} {title}.{ext}".to_string()
 }
@@ -180,7 +188,7 @@ fn default_organize_operation() -> String {
 }
 
 fn default_auto_match_threshold() -> f64 {
-    0.95
+    0.85
 }
 
 fn default_true() -> bool {
@@ -215,12 +223,22 @@ impl Settings {
     fn default_library() -> LibrarySettings {
         LibrarySettings {
             music_dir: default_music_dir(),
+            data_dir: default_data_dir(),
             inbox_dirs: Vec::new(),
             path_template: default_path_template(),
             path_template_single_disc: default_path_template_single_disc(),
             collection_path_template: default_collection_path_template(),
             loose_path_template: default_loose_path_template(),
         }
+    }
+
+    /// Resolved path to the SQLite database file — `library.data_dir`
+    /// joined with `library.db`. Use this everywhere instead of the
+    /// platform-default helper so the user's override wins.
+    pub fn database_file(&self) -> PathBuf {
+        self.library
+            .data_dir
+            .join(crate::config::paths::DATABASE_FILENAME)
     }
 
     /// Load settings from a TOML file. Falls back to defaults if the file doesn't exist.
@@ -241,6 +259,8 @@ impl Settings {
         // Expand tilde in paths
         settings.library.music_dir =
             crate::config::paths::expand_tilde(&settings.library.music_dir);
+        settings.library.data_dir =
+            crate::config::paths::expand_tilde(&settings.library.data_dir);
         settings.library.inbox_dirs = settings
             .library
             .inbox_dirs
@@ -257,9 +277,7 @@ impl Default for ImportSettings {
         Self {
             organize_operation: default_organize_operation(),
             auto_match_threshold: default_auto_match_threshold(),
-            use_fingerprint: true,
             match_candidates: default_match_candidates(),
-            skip_duplicates: true,
         }
     }
 }
@@ -297,8 +315,8 @@ mod tests {
     fn test_default_settings() {
         let settings = Settings::default();
         assert_eq!(settings.ui.theme, "tokyo-night");
-        assert!(settings.import.skip_duplicates);
-        assert_eq!(settings.import.auto_match_threshold, 0.95);
+        assert_eq!(settings.import.auto_match_threshold, 0.85);
+        assert_eq!(settings.import.match_candidates, 5);
     }
 
     #[test]
@@ -327,9 +345,7 @@ path_template_single_disc = "{artist}/{album}/{track:02} {title}.{ext}"
 [import]
 organize_operation = "copy"
 auto_match_threshold = 0.90
-use_fingerprint = false
 match_candidates = 3
-skip_duplicates = false
 
 [tagging]
 write_tags = false
@@ -341,7 +357,7 @@ theme = "kanagawa"
         assert_eq!(settings.library.music_dir, PathBuf::from("/data/music"));
         assert_eq!(settings.library.inbox_dirs.len(), 1);
         assert_eq!(settings.import.organize_operation, "copy");
-        assert!(!settings.import.use_fingerprint);
+        assert_eq!(settings.import.match_candidates, 3);
         assert!(!settings.tagging.write_tags);
         assert_eq!(settings.ui.theme, "kanagawa");
     }

@@ -550,6 +550,7 @@ impl ImportView {
             .iter()
             .map(|(t, _)| t.duration_ms.unwrap_or(0))
             .sum();
+        let limit = self.match_candidates;
 
         self.ensure_mb_infra();
         // Clones for the worker thread.
@@ -571,7 +572,7 @@ impl ImportView {
             let mut client = client.lock().unwrap();
             let mut search_error: Option<String> = None;
             let mut candidates: Vec<MbCandidate> = match client
-                .search_releases(&artist, &album, track_count, 5)
+                .search_releases(&artist, &album, track_count, limit)
             {
                 Ok(releases) => releases
                     .into_iter()
@@ -851,6 +852,7 @@ impl ImportView {
         let rate_limit_ms = self.rate_limit_ms;
         let name_script = self.name_script;
         let write_tags = self.write_tags;
+        let db_path = self.db_path.clone();
         let (tx, rx) = mpsc::channel();
         self.import_rx = Some(rx);
 
@@ -862,6 +864,7 @@ impl ImportView {
                 rate_limit_ms,
                 name_script,
                 write_tags,
+                db_path,
                 tx,
             );
         });

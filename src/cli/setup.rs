@@ -72,12 +72,51 @@ pub fn run(current: Settings) -> anyhow::Result<()> {
         }
     };
 
-    // Database directory
-    let default_db_dir = config::paths::data_dir().display().to_string();
-    let db_dir = Text::new("Database directory:")
-        .with_default(&default_db_dir)
-        .with_help_message("Where kyoku stores library.db (leave default unless you have a reason)")
-        .prompt()?;
+    // Database directory. Same loop pattern as music_dir — the DB directory
+    // is often kept next to the music itself (so DB + files travel together
+    // on an external drive), so we have to actually validate it instead of
+    // falling back to the platform default.
+    let default_db_dir = current.library.data_dir.display().to_string();
+    let default_db_dir = if default_db_dir.is_empty() {
+        config::paths::default_data_dir().display().to_string()
+    } else {
+        default_db_dir
+    };
+    let db_dir = loop {
+        let raw = Text::new("Database directory:")
+            .with_default(&default_db_dir)
+            .with_help_message(
+                "Where kyoku stores library.db — defaults to the platform data dir, \
+                 but it's common to point this at the music drive",
+            )
+            .prompt()?;
+        let expanded = config::paths::expand_tilde(&raw);
+
+        if !expanded.exists() {
+            let create = Confirm::new(&format!(
+                "{} does not exist. Create it?",
+                expanded.display()
+            ))
+            .with_default(true)
+            .prompt()?;
+            if !create {
+                println!("  → pick a different path.");
+                continue;
+            }
+            if let Err(e) = std::fs::create_dir_all(&expanded) {
+                println!("  Could not create directory: {}", e);
+                continue;
+            }
+        }
+
+        match config::paths::validate_library_dir(&expanded) {
+            Ok(()) => break raw,
+            Err(reason) => {
+                println!("  {}", reason);
+                println!("  → pick a different path.");
+            }
+        }
+    };
 
     // Inbox directories
     println!();
@@ -193,6 +232,10 @@ pub fn run(current: Settings) -> anyhow::Result<()> {
 # Root directory for managed music files
 music_dir = "{music_dir}"
 
+# Directory holding library.db. Override the platform default to keep the
+# DB next to the music it indexes (useful for external drives).
+data_dir = "{db_dir}"
+
 # Inbox directories — kyoku scans these for new/unimported files.
 inbox_dirs = {inbox_toml}
 
@@ -204,28 +247,32 @@ path_template = "{{album_artist}}/{{album}} ({{year}})/{{disc:0}}-{{track:02}} {
 # Template for single-disc albums (disc_total == 1)
 path_template_single_disc = "{{album_artist}}/{{album}} ({{year}})/{{track:02}} {{title}}.{{ext}}"
 
+# Default template for tracks copied/linked into a collection (when the
+# collection itself doesn't override it). Available variables: same as
+# path_template, plus {{collection}}.
+collection_path_template = "Collections/{{collection}}/{{track:02}} {{album_artist}} - {{title}}.{{ext}}"
+
+# Template for "loose" tracks — files with no album / not part of a
+# collection. Kept simple on purpose so they're easy to find.
+loose_path_template = "_loose/{{artist}} - {{title}}.{{ext}}"
+
 [import]
 # Options: "move" (move to music_dir), "copy" (copy, keep originals)
 organize_operation = "move"
 
-# Auto-accept MusicBrainz matches above this similarity (0.0 - 1.0)
-auto_match_threshold = 0.95
+# Auto-accept MusicBrainz matches at or above this similarity (0.0 - 1.0).
+# Lower = more aggressive auto-selection during the Review step.
+auto_match_threshold = 0.85
 
-# Use AcoustID fingerprinting for matching (requires network)
-use_fingerprint = true
-
-# Number of MusicBrainz match candidates to display
+# Number of MusicBrainz match candidates fetched per group during search.
 match_candidates = 5
-
-# Skip files already in the library
-skip_duplicates = true
 
 [tagging]
 # Write tags back to files (if false, only updates DB)
 write_tags = true
 
 [musicbrainz]
-user_agent = "kyoku/0.1.0 (https://github.com/yourname/kyoku)"
+user_agent = "kyoku/0.1.0 (https://github.com/balor/kyoku)"
 rate_limit_ms = 1100
 # "native" keeps MB canonical names; "latin" prefers romanised alias when present.
 name_script = "{name_script}"
@@ -238,14 +285,14 @@ name_script = "{name_script}"
 #                falls back to 1200 then 500 when no original is archived
 cover_art_size = "{cover_art_size}"
 
-[acoustid]
-# Get a key at https://acoustid.org/new-application
-api_key = ""
-
 [ui]
 # Dark: "tokyo-night", "kanagawa"
 # Light: "tokyo-night-light", "kanagawa-lotus"
 theme = "{theme}"
+# Render the album cover preview in album detail. Set to false on
+# terminal/multiplexer combos that can't draw halfblock graphics
+# cleanly (some zellij + native-protocol terminals show a blank gap).
+show_cover_preview = true
 "#,
     );
 
@@ -255,9 +302,7 @@ theme = "{theme}"
     }
     std::fs::write(&config_path, config_content)?;
 
-    // Ensure data dir exists
-    let db_path = PathBuf::from(&db_dir);
-    std::fs::create_dir_all(&db_path)?;
+    let db_path = config::paths::expand_tilde(&db_dir);
 
     println!();
     println!("Config written to {}", config_path.display());

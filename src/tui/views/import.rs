@@ -107,6 +107,18 @@ pub struct ImportView {
     /// Whether the import worker should mirror MB-matched metadata to the
     /// audio file's tags. Sourced from `[tagging] write_tags` in config.
     pub write_tags: bool,
+    /// Threshold above which the top MB candidate is auto-accepted on
+    /// arrival. Sourced from `[import] auto_match_threshold`. Lives here
+    /// (rather than re-fetched from settings on each render) because the
+    /// auto-accept runs in the per-tick result drain.
+    pub auto_match_threshold: f64,
+    /// Number of MB candidates fetched per group during search. Sourced
+    /// from `[import] match_candidates`.
+    pub match_candidates: u32,
+    /// Resolved DB path threaded into the background import worker. Lives
+    /// here so the worker, which spawns its own connection on its own
+    /// thread, doesn't have to re-derive it from settings.
+    pub db_path: PathBuf,
     scan_rx: Option<mpsc::Receiver<ScanMessage>>,
     /// Persistent MB search channel. Lives across all searches so a prefetch
     /// of the *next* group can complete even after the user navigates and we
@@ -188,6 +200,9 @@ impl Default for ImportView {
             rate_limit_ms: 1100,
             name_script: crate::config::settings::NameScriptPreference::Native,
             write_tags: true,
+            auto_match_threshold: 0.85,
+            match_candidates: 5,
+            db_path: PathBuf::new(),
             scan_rx: None,
             mb_rx: None,
             mb_tx: None,
@@ -214,6 +229,9 @@ impl ImportView {
         rate_limit_ms: u64,
         name_script: crate::config::settings::NameScriptPreference,
         write_tags: bool,
+        auto_match_threshold: f64,
+        match_candidates: u32,
+        db_path: PathBuf,
     ) {
         self.step = ImportStep::SelectSource;
         self.groups.clear();
@@ -235,6 +253,9 @@ impl ImportView {
         self.rate_limit_ms = rate_limit_ms;
         self.name_script = name_script;
         self.write_tags = write_tags;
+        self.auto_match_threshold = auto_match_threshold;
+        self.match_candidates = match_candidates;
+        self.db_path = db_path;
 
         // Reset SelectSource fields
         self.custom_path = TextInput::new("~/Music/new-album").with_label(" Path: ");
