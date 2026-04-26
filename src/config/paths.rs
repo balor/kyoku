@@ -1,11 +1,21 @@
 use std::path::{Path, PathBuf};
 
-/// Resolve the config directory for kyoku.
-/// Uses $XDG_CONFIG_HOME/kyoku or platform default.
+/// Resolve the config directory for kyoku — `$XDG_CONFIG_HOME/kyoku`
+/// when set, otherwise `~/.config/kyoku` on every platform.
+///
+/// We deliberately don't follow `dirs::config_dir()` here, which would
+/// route macOS to `~/Library/Application Support/kyoku` and Windows to
+/// `%APPDATA%\kyoku`. Keeping a single XDG-style path makes config
+/// portable across machines and matches what most TUI tools (neovim,
+/// helix, fish, starship, …) do on macOS anyway.
 pub fn config_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.config"))
-        .join("kyoku")
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(xdg).join("kyoku");
+    }
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+    home.join(".config").join("kyoku")
 }
 
 /// Resolve the data directory for kyoku (database lives here).

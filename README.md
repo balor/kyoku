@@ -90,7 +90,7 @@ kyoku             # launch the TUI — everything else lives in there
 
 The CLI subcommands (`import`, `scan`, `organize`, `relocate`, …) are there for scripting, but day-to-day use happens entirely in the TUI. Run `kyoku --help` if you want to see them.
 
-Config lives at `$XDG_CONFIG_HOME/kyoku/config.toml` (macOS: `~/Library/Application Support/kyoku/config.toml`). Run `kyoku paths` to see the exact locations on your machine.
+Config lives at `$XDG_CONFIG_HOME/kyoku/config.toml`, or `~/.config/kyoku/config.toml` if that variable isn't set. Run `kyoku paths` to see the exact locations on your machine.
 
 ---
 
