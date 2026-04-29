@@ -81,6 +81,77 @@ pub enum GroupAction {
     Loose,
 }
 
+impl ImportGroup {
+    /// Tag-uniformity test for AcceptAsIs groups: does the group describe
+    /// a single coherent album, or is it a mixed bag (compilation,
+    /// hand-picked singles, collection-bound bundle)? Mirrors the worker's
+    /// `group_is_real_album` so the dup detector and the importer agree
+    /// on which groups even *have* an album-slot space to dedupe against.
+    ///
+    /// Returns `true` only when:
+    ///   1. Every track shares the same `(album, album_artist)` tuple.
+    ///   2. The album_artist isn't a "various" marker.
+    ///   3. Track-level artists aren't wildly diverse (>= 4 distinct, or
+    ///      >= 40% unique).
+    ///
+    /// Caller is responsible for excluding Loose / MB / Skip groups —
+    /// this only checks the tag shape.
+    pub fn has_consistent_album_tags(&self) -> bool {
+        let key = |td: &Option<crate::core::tagger::TagData>| -> Option<(String, Option<String>)> {
+            td.as_ref().and_then(|t| {
+                t.album.as_ref().map(|a| {
+                    (
+                        a.clone(),
+                        t.album_artist.clone().or_else(|| t.artist.clone()),
+                    )
+                })
+            })
+        };
+        let first_key = self.tracks.first().and_then(|(_, td)| key(td));
+        let consistent = first_key.is_some()
+            && self.tracks.iter().all(|(_, td)| key(td) == first_key);
+        if !consistent {
+            return false;
+        }
+
+        let album_artist_lower = first_key
+            .as_ref()
+            .and_then(|(_, aa)| aa.as_ref())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+        let is_various_marker = matches!(
+            album_artist_lower.as_str(),
+            "various"
+                | "various artists"
+                | "various artist"
+                | "va"
+                | "v.a."
+                | "compilation"
+                | "compilations"
+                | "soundtrack"
+                | "ost"
+        );
+        if is_various_marker {
+            return false;
+        }
+
+        use std::collections::HashSet;
+        let unique_artists: HashSet<String> = self
+            .tracks
+            .iter()
+            .filter_map(|(_, td)| td.as_ref().and_then(|t| t.artist.as_ref()).cloned())
+            .collect();
+        let n_tracks = self.tracks.len().max(1);
+        // The 40% rule needs enough tracks to be meaningful — for a 1-3
+        // track EP every artist is by definition a high percentage. Gate
+        // it on `n_tracks >= 4` so small legitimate releases (singles,
+        // EPs) don't get misclassified as compilations.
+        let too_diverse = unique_artists.len() >= 4
+            || (n_tracks >= 4 && (unique_artists.len() * 100 / n_tracks) >= 40);
+        !too_diverse
+    }
+}
+
 pub struct ImportView {
     pub step: ImportStep,
     pub source_paths: Vec<PathBuf>,

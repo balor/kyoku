@@ -132,73 +132,13 @@ pub(super) fn run_import_worker(
             // For "Accept as-is" mode, decide if this group is a real album
             // (all tracks share the same album+album_artist tags) or a compilation.
             // Compilations get NO per-track albums — those tracks become loose
-            // and live entirely in their assigned collection (if any).
-            //
-            // Rules for "real album":
-            // 1. All tracks share the same (album, album_artist) tuple
-            // 2. The album_artist is NOT a "various" marker
-            //    (Various, Various Artists, VA, Compilation, etc.)
-            // 3. Track-level artists are not wildly diverse
-            //    (compilations often have one unique artist per track)
-            let group_is_real_album = !loose && mb_full.is_none() && {
-                let key = |td: &Option<tagger::TagData>| -> Option<(String, Option<String>)> {
-                    td.as_ref().and_then(|t| {
-                        t.album.as_ref().map(|a| {
-                            (
-                                a.clone(),
-                                t.album_artist.clone().or_else(|| t.artist.clone()),
-                            )
-                        })
-                    })
-                };
-                let first_key = group.tracks.first().and_then(|(_, td)| key(td));
-                let consistent_album_key =
-                    first_key.is_some() && group.tracks.iter().all(|(_, td)| key(td) == first_key);
-
-                if !consistent_album_key {
-                    false
-                } else {
-                    // Check rule 2: album_artist isn't a "various" marker
-                    let album_artist_lower = first_key
-                        .as_ref()
-                        .and_then(|(_, aa)| aa.as_ref())
-                        .map(|s| s.to_lowercase())
-                        .unwrap_or_default();
-                    let is_various_marker = matches!(
-                        album_artist_lower.as_str(),
-                        "various"
-                            | "various artists"
-                            | "various artist"
-                            | "va"
-                            | "v.a."
-                            | "compilation"
-                            | "compilations"
-                            | "soundtrack"
-                            | "ost"
-                    );
-
-                    if is_various_marker {
-                        false
-                    } else {
-                        // Check rule 3: track-level artist diversity
-                        // Real albums typically have 1-3 distinct artists (main + features).
-                        // If >= 4 distinct artists OR >= 40% of tracks have unique artists,
-                        // it's a compilation.
-                        use std::collections::HashSet;
-                        let unique_artists: HashSet<String> = group
-                            .tracks
-                            .iter()
-                            .filter_map(|(_, td)| {
-                                td.as_ref().and_then(|t| t.artist.as_ref()).cloned()
-                            })
-                            .collect();
-                        let n_tracks = group.tracks.len().max(1);
-                        let too_diverse = unique_artists.len() >= 4
-                            || (unique_artists.len() * 100 / n_tracks) >= 40;
-                        !too_diverse
-                    }
-                }
-            };
+            // and live entirely in their assigned collection (if any). The
+            // tag-uniformity check itself lives on `ImportGroup` so the dup
+            // detector can use the same definition (otherwise a heterogeneous
+            // group's first-track album would be picked as a misleading proxy
+            // and produce phantom slot conflicts).
+            let group_is_real_album =
+                !loose && mb_full.is_none() && group.has_consistent_album_tags();
 
             // Precompute the as-is album once if we determined this is a real album
             let asis_album_id = if group_is_real_album {
