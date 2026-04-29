@@ -198,6 +198,7 @@ impl ImportView {
                         ("A", "as-is"),
                         ("S", "skip"),
                         ("L", "loose"),
+                        ("F", "skip rest"),
                         ("Enter/n/p", "nav"),
                         ("Esc", "cancel"),
                     ];

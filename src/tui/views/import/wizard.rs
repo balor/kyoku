@@ -301,6 +301,20 @@ impl ImportView {
             KeyCode::Char('n') => self.next_group(),
             KeyCode::Char('p') => self.prev_group(),
             KeyCode::Char('r') => self.retry_mb_for_current_group(),
+            // Bail out of a long review: mark every remaining group as
+            // Skip and jump to the summary. Decisions already made on
+            // earlier groups are preserved. From the summary the user
+            // can `p` back if they change their mind.
+            KeyCode::Char('F') => {
+                for idx in self.current_group..self.groups.len() {
+                    if let Some(g) = self.groups.get_mut(idx) {
+                        g.action = GroupAction::Skip;
+                        g.selected_candidate = None;
+                        g.user_decided = true;
+                    }
+                }
+                self.current_group = self.groups.len();
+            }
             _ => {}
         }
 
