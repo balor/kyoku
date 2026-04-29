@@ -175,6 +175,7 @@ fn help_content(theme: &Theme) -> Vec<Line<'static>> {
         binding("O", "Organize entire library (preview + apply)"),
         binding("a", "Add whole album to a collection"),
         binding("s", "Sort (cycle: artist, album, year, tracks)"),
+        binding("S", "Toggle sort direction (asc/desc)"),
         binding("d", "Delete album(s) (with file-removal opt-in)"),
         Line::from(""),
         section("Album Detail (tracks)"),

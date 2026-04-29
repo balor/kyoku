@@ -53,6 +53,7 @@ enum InputMode {
 pub struct CollectionsView {
     pub collections: Vec<CollectionRow>,
     pub selected: usize,
+    pub list_scroll_offset: usize,
     pub organize_plan: Option<crate::core::organizer::OrganizePlan>,
     pub organize_scroll: usize,
     pub organize_max_scroll: usize,
@@ -66,6 +67,7 @@ impl Default for CollectionsView {
         Self {
             collections: Vec::new(),
             selected: 0,
+            list_scroll_offset: 0,
             organize_plan: None,
             organize_scroll: 0,
             organize_max_scroll: 0,
@@ -403,8 +405,37 @@ impl CollectionsView {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        if self.collections.is_empty() {
+            let text = "No collections yet. Press 'n' to create one.";
+            let line_w = text.chars().count() as u16;
+            let y = area.y + area.height / 2;
+            let x = area.x + area.width.saturating_sub(line_w) / 2;
+            let w = line_w.min(area.width);
+            let centered = Rect::new(x, y, w, 1);
+            let msg = Paragraph::new(Span::styled(
+                text,
+                Style::default().fg(theme.fg_muted),
+            ))
+            .alignment(Alignment::Center)
+            .style(Style::default().bg(theme.bg));
+            frame.render_widget(msg, centered);
+            return;
+        }
+
+        // Inner area below the top border holds the header + rows.
+        // visible_height = inner.height - 1 (header).
+        let inner_height = area.height.saturating_sub(1) as usize; // -1 for top border
+        let visible_height = inner_height.saturating_sub(1);
+        self.list_scroll_offset = crate::tui::views::library::compute_scroll_offset(
+            self.selected,
+            self.list_scroll_offset,
+            visible_height,
+        );
+        let scroll = self.list_scroll_offset;
+
         let mut rows = Vec::new();
-        for (i, coll) in self.collections.iter().enumerate() {
+        for i in scroll..self.collections.len().min(scroll + visible_height) {
+            let coll = &self.collections[i];
             let is_selected = i == self.selected;
             let desc = coll.description.as_deref().unwrap_or("");
 
@@ -432,23 +463,6 @@ impl CollectionsView {
             };
 
             rows.push(row.style(style));
-        }
-
-        if self.collections.is_empty() {
-            let text = "No collections yet. Press 'n' to create one.";
-            let line_w = text.chars().count() as u16;
-            let y = area.y + area.height / 2;
-            let x = area.x + area.width.saturating_sub(line_w) / 2;
-            let w = line_w.min(area.width);
-            let centered = Rect::new(x, y, w, 1);
-            let msg = Paragraph::new(Span::styled(
-                text,
-                Style::default().fg(theme.fg_muted),
-            ))
-            .alignment(Alignment::Center)
-            .style(Style::default().bg(theme.bg));
-            frame.render_widget(msg, centered);
-            return;
         }
 
         let header = Row::new(vec![
@@ -998,13 +1012,12 @@ impl CollectionDetailView {
         let visible = self.filtered_indices();
         let total = visible.len();
         let visible_height = chunks[1].height.saturating_sub(1) as usize;
-        let scroll = if self.selected < self.scroll_offset {
-            self.selected
-        } else if self.selected + 1 >= self.scroll_offset + visible_height {
-            (self.selected + 2).saturating_sub(visible_height)
-        } else {
-            self.scroll_offset
-        };
+        self.scroll_offset = crate::tui::views::library::compute_scroll_offset(
+            self.selected,
+            self.scroll_offset,
+            visible_height,
+        );
+        let scroll = self.scroll_offset;
 
         let mut rows = Vec::new();
         for pos in scroll..total.min(scroll + visible_height) {

@@ -147,7 +147,7 @@ impl GlobalSearchView {
         }
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let block = Block::default()
             .title(Span::styled(
                 " Global Search ",
@@ -189,15 +189,14 @@ impl GlobalSearchView {
         self.render_results(frame, chunks[2], theme);
     }
 
-    fn render_results(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    fn render_results(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let visible_height = area.height as usize;
-        let scroll = if self.selected < self.scroll_offset {
-            self.selected
-        } else if self.selected + 1 >= self.scroll_offset + visible_height && visible_height > 0 {
-            (self.selected + 2).saturating_sub(visible_height)
-        } else {
-            self.scroll_offset
-        };
+        self.scroll_offset = crate::tui::views::library::compute_scroll_offset(
+            self.selected,
+            self.scroll_offset,
+            visible_height,
+        );
+        let scroll = self.scroll_offset;
 
         let mut lines: Vec<Line<'_>> = Vec::new();
         for pos in scroll..self.results.len().min(scroll + visible_height) {

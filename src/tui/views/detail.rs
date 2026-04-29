@@ -919,13 +919,12 @@ impl AlbumDetailView {
         let visible = self.filtered_indices();
         let total = visible.len();
         let visible_height = track_area.height.saturating_sub(1) as usize;
-        let scroll = if self.selected < self.scroll_offset {
-            self.selected
-        } else if self.selected + 1 >= self.scroll_offset + visible_height {
-            (self.selected + 2).saturating_sub(visible_height)
-        } else {
-            self.scroll_offset
-        };
+        self.scroll_offset = crate::tui::views::library::compute_scroll_offset(
+            self.selected,
+            self.scroll_offset,
+            visible_height,
+        );
+        let scroll = self.scroll_offset;
 
         let mut rows = Vec::new();
         for pos in scroll..total.min(scroll + visible_height) {

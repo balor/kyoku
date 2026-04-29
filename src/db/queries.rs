@@ -243,7 +243,7 @@ pub struct CollectionRow {
     pub total_duration_ms: i64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlbumSort {
     Artist,
     Album,
@@ -258,15 +258,6 @@ impl AlbumSort {
             Self::Album => Self::Year,
             Self::Year => Self::TrackCount,
             Self::TrackCount => Self::Artist,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Artist => "artist",
-            Self::Album => "album",
-            Self::Year => "year",
-            Self::TrackCount => "tracks",
         }
     }
 

@@ -3,7 +3,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Cell, Paragraph, Row, Table};
 use rusqlite::Connection;
 
 use unicode_width::UnicodeWidthStr;
@@ -326,6 +326,12 @@ impl LibraryView {
 
         if key.code == KeyCode::Char('s') {
             self.sort = self.sort.next();
+            self.sort_ascending = true;
+            return LibraryAction::SortChanged;
+        }
+
+        if key.code == KeyCode::Char('S') {
+            self.sort_ascending = !self.sort_ascending;
             return LibraryAction::SortChanged;
         }
 
@@ -379,14 +385,12 @@ impl LibraryView {
 
         let visible_height = area.height.saturating_sub(1) as usize; // -1 for header
 
-        // Adjust scroll offset — keep 1 extra row visible below cursor for lookahead
-        let scroll_offset = if self.selected < self.scroll_offset {
-            self.selected
-        } else if self.selected + 1 >= self.scroll_offset + visible_height {
-            (self.selected + 2).saturating_sub(visible_height)
-        } else {
-            self.scroll_offset
-        };
+        // Symmetric scrolloff = 1: keep 1 row visible above and below the
+        // cursor whenever there's content to show in those slots. Persist
+        // the result so navigation stays sticky frame-to-frame.
+        self.scroll_offset =
+            compute_scroll_offset(self.selected, self.scroll_offset, visible_height);
+        let scroll_offset = self.scroll_offset;
 
         // Build rows
         let mut rows: Vec<Row> = Vec::new();
@@ -414,7 +418,7 @@ impl LibraryView {
                     Cell::from(truncate_str(artist, 24)),
                     Cell::from(truncate_str(&album.title, 30)),
                     Cell::from(year),
-                    Cell::from(format!("{:>4}", album.track_count)),
+                    Cell::from(format!("{:>6}", album.track_count)),
                     Cell::from(fmt),
                 ])
             } else {
@@ -430,7 +434,7 @@ impl LibraryView {
                         Style::default().fg(theme.fg_muted),
                     )),
                     Cell::from(""),
-                    Cell::from(format!("{:>4}", self.loose_count)),
+                    Cell::from(format!("{:>6}", self.loose_count)),
                     Cell::from("mix"),
                 ])
             };
@@ -449,18 +453,36 @@ impl LibraryView {
             rows.push(row.style(style));
         }
 
+        // Mark the active sort column directly in its header instead of
+        // burning a screen row on a `[sort: ...]` indicator. ▲ = ascending,
+        // ▼ = descending. The "Fmt" column is not sortable.
+        let arrow = if self.sort_ascending { "▲" } else { "▼" };
+        let header_cell = |label: &str, sort_for: Option<AlbumSort>| {
+            let active = sort_for == Some(self.sort);
+            if active {
+                Cell::from(Span::styled(
+                    format!("{} {}", label, arrow),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                ))
+            } else {
+                Cell::from(Span::styled(
+                    label.to_string(),
+                    Style::default().fg(theme.accent),
+                ))
+            }
+        };
         let header = Row::new(vec![
             Cell::from(" "),
-            Cell::from(Span::styled("Artist", Style::default().fg(theme.accent))),
-            Cell::from(Span::styled("Album", Style::default().fg(theme.accent))),
-            Cell::from(Span::styled("Year", Style::default().fg(theme.accent))),
-            Cell::from(Span::styled("Tracks", Style::default().fg(theme.accent))),
-            Cell::from(Span::styled("Fmt", Style::default().fg(theme.accent))),
+            header_cell("Artist", Some(AlbumSort::Artist)),
+            header_cell("Album", Some(AlbumSort::Album)),
+            header_cell("Year", Some(AlbumSort::Year)),
+            header_cell("Tracks", Some(AlbumSort::TrackCount)),
+            header_cell("Fmt", None),
         ])
         .style(Style::default().add_modifier(Modifier::BOLD))
         .bottom_margin(0);
-
-        let sort_indicator = format!(" [sort: {}] ", self.sort.label());
 
         let table = Table::new(
             rows,
@@ -469,20 +491,11 @@ impl LibraryView {
                 ratatui::layout::Constraint::Percentage(25),
                 ratatui::layout::Constraint::Percentage(30),
                 ratatui::layout::Constraint::Length(6),
-                ratatui::layout::Constraint::Length(6),
+                ratatui::layout::Constraint::Length(8),
                 ratatui::layout::Constraint::Length(6),
             ],
         )
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border))
-                .title_bottom(Span::styled(
-                    sort_indicator,
-                    Style::default().fg(theme.fg_muted),
-                )),
-        );
+        .header(header);
 
         frame.render_widget(table, area);
 
@@ -626,6 +639,35 @@ fn build_album_confirm(plan: &pruner::DeletePlan, album_count: usize) -> Confirm
         ));
     }
     popup
+}
+
+/// Compute a viewport offset that keeps `selected` inside the visible window
+/// with a 1-row scrolloff on both sides (cursor is never on the very first or
+/// very last visible row when there is content beyond it).
+pub fn compute_scroll_offset(selected: usize, current: usize, visible_height: usize) -> usize {
+    if visible_height < 3 {
+        // Too cramped to honor scrolloff — fall back to plain clamping.
+        if selected < current {
+            return selected;
+        }
+        if selected >= current + visible_height {
+            return (selected + 1).saturating_sub(visible_height);
+        }
+        return current;
+    }
+    if selected == 0 {
+        return 0;
+    }
+    if selected <= current {
+        // Cursor at top of viewport — pull offset up so 1 row stays visible above.
+        return selected - 1;
+    }
+    if selected + 1 >= current + visible_height {
+        // Cursor at (or past) bottom of viewport — push offset down so 1 row
+        // stays visible below.
+        return (selected + 2).saturating_sub(visible_height);
+    }
+    current
 }
 
 pub fn format_duration_ms(ms: i64) -> String {

@@ -350,15 +350,15 @@ impl EditorView {
             return;
         }
 
-        // Keep the selected row inside the viewport. Simple lookahead
-        // model: scroll up when cursor precedes the offset, scroll down
-        // when it sits at or past the bottom of the visible window.
+        // Keep the selected row inside the viewport with a 1-row scrolloff
+        // on each side, so the cursor never sits flush against the top or
+        // bottom of the visible window when content extends beyond it.
         let visible = area.height.saturating_sub(1) as usize; // -1 for table header
-        if self.selected < self.scroll_offset {
-            self.scroll_offset = self.selected;
-        } else if self.selected >= self.scroll_offset + visible {
-            self.scroll_offset = self.selected + 1 - visible;
-        }
+        self.scroll_offset = crate::tui::views::library::compute_scroll_offset(
+            self.selected,
+            self.scroll_offset,
+            visible,
+        );
 
         let mut rows: Vec<Row> = Vec::new();
         let mut last_group: Option<FrameGroup> = None;

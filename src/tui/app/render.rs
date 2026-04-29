@@ -39,7 +39,7 @@ impl App {
         }
     }
 
-    fn render_global_search(&self, frame: &mut Frame, area: Rect) {
+    fn render_global_search(&mut self, frame: &mut Frame, area: Rect) {
         // Centered overlay: ~70% width, 60% height
         let height = (area.height * 6 / 10).max(10).min(area.height);
         let width = (area.width * 7 / 10).max(40).min(area.width);
