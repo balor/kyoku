@@ -559,6 +559,19 @@ impl ImportView {
                     theme.red
                 };
 
+                // Tiny visual cue so the user doesn't have to eyeball
+                // the local track count at the top of the screen against
+                // each candidate's count at the bottom: `✓` (green) when
+                // the candidate's track total matches the group's, blank
+                // otherwise. Single character keeps the row uncluttered.
+                let count_match = candidate.release.track_count as usize == group.tracks.len();
+                let count_marker = if count_match { " ✓" } else { "" };
+                let count_marker_style = if count_match {
+                    Style::default().fg(theme.green).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+
                 mb_lines.push(Line::from(vec![
                     Span::styled(
                         format!(" {} {} ", marker, i + 1),
@@ -576,6 +589,7 @@ impl ImportView {
                         format!(" {} {} trk", country, candidate.release.track_count),
                         Style::default().fg(theme.fg_muted),
                     ),
+                    Span::styled(count_marker, count_marker_style),
                 ]));
             }
             let p = Paragraph::new(mb_lines);
