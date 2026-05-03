@@ -65,7 +65,7 @@ pub fn is_toggle_select(key: &KeyEvent) -> bool {
 }
 
 pub fn is_delete(key: &KeyEvent) -> bool {
-    key.code == KeyCode::Char('d')
+    key.code == KeyCode::Char('d') && key.modifiers.is_empty()
 }
 
 /// "C" — fetch cover art from MusicBrainz / Cover Art Archive for the
