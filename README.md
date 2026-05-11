@@ -39,14 +39,14 @@ None of these are damning critiques of beets — it's a different design point a
 
 - **Import wizard** with MusicBrainz matching, manual MBID lookup, and per-group decisions (accept, skip, import-loose, assign to a collection).
 - **Duplicate detection** against the library and within the batch — surfaced as side-by-side "keep A vs. B" decisions before anything touches disk.
-- **Library browser** with album grid, cover-art previews, album detail, and theme support.
+- **Library browser** with sortable album list, cover-art previews, album detail, and theme support.
 - **Collections** — loose, non-album groupings that live alongside the album hierarchy.
 - **Tag editor** that writes both the DB and the file tags.
 - **Cover art fetch** from the Cover Art Archive.
 - **Organize** with templated paths and a dry-run preview.
 - **Relocate** to rebase library paths after a drive move.
-- **Scriptable CLI** mirroring the TUI features (`import`, `scan`, `organize`, `relocate`, `info`, `paths`, `setup`).
-- **Dry-run-by-default** for anything that touches disk.
+- **Scriptable CLI** for common automation (`import`, `scan`, `organize`, `relocate`, `info`, `paths`, `setup`).
+- **Preview-first file operations** for moving, copying, deleting, and reorganizing music.
 
 ---
 
@@ -88,9 +88,9 @@ kyoku setup       # interactive first-run wizard
 kyoku             # launch the TUI — everything else lives in there
 ```
 
-The CLI subcommands (`import`, `scan`, `organize`, `relocate`, …) are there for scripting, but day-to-day use happens entirely in the TUI. Run `kyoku --help` if you want to see them.
+The CLI subcommands (`import`, `scan`, `organize`, `relocate`, …) are there for scripting, but day-to-day use happens mostly in the TUI. MusicBrainz review/matching currently lives in the TUI import wizard; CLI import is a simpler as-is cataloging path. Run `kyoku --help` if you want to see the commands.
 
-Config lives at `$XDG_CONFIG_HOME/kyoku/config.toml`, or `~/.config/kyoku/config.toml` if that variable isn't set. Run `kyoku paths` to see the exact locations on your machine.
+Config lives at `$XDG_CONFIG_HOME/kyoku/config.toml`, or `~/.config/kyoku/config.toml` if that variable isn't set. The database location is configurable during setup. Run `kyoku paths` to see the exact locations on your machine.
 
 ---
 
