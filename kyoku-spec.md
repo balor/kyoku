@@ -3,6 +3,8 @@
 > A TUI-first music library manager written in Rust.
 > Curates a beautiful, browsable filesystem that any music player can navigate — because the file tree IS the product.
 
+> **Status note:** this spec is a living design/roadmap document. The README and source code describe the currently shipped behavior; sections marked future/roadmap are intentional plans, not implemented features.
+
 ---
 
 ## 1. Vision & Goals
@@ -28,7 +30,7 @@ The library state is persisted in SQLite, and **all file operations (rename, mov
 - **Linux** — full support (native)
 - **Windows** — supported via WSL (Windows Subsystem for Linux)
 
-The pure Rust stack (ratatui/crossterm, rusqlite bundled, symphonia, rusty-chromaprint) has zero system dependencies and compiles on all three platforms without conditional code. Crossterm handles terminal abstraction across platforms. Filesystem paths use `std::path::Path` throughout (never hardcoded separators).
+The current Rust stack (`ratatui`/`crossterm`, `rusqlite` bundled, `lofty`, `reqwest` + rustls) has zero required system libraries and compiles on macOS and Linux. Crossterm handles terminal abstraction. Filesystem paths use `std::path::Path` throughout (never hardcoded separators).
 
 ### Problems with Beets (Why This Exists)
 
@@ -80,8 +82,8 @@ These are the specific frustrations this project aims to solve:
 │  │  Library DB │ │ Tag I/O  │ │  External    │           │
 │  │  (SQLite)   │ │ (lofty)  │ │  Services    │           │
 │  └────────────┘ └──────────┘ │  - MusicBrainz│           │
-│                               │  - AcoustID   │           │
-│                               │  - (future AI)│           │
+│                               │  - Cover Art  │           │
+│                               │  - future APIs│           │
 │                               └──────────────┘           │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -94,27 +96,28 @@ These are the specific frustrations this project aims to solve:
 
 | Crate | Purpose | Version / Notes |
 |-------|---------|-----------------|
-| `ratatui` | TUI framework + terminal backend | Latest stable; uses built-in `crossterm` feature (default) for cross-platform terminal I/O |
+| `ratatui` / `crossterm` | TUI framework + terminal backend | Interactive UI and keyboard/event loop |
+| `ratatui-image` / `image` | Cover previews | TUI album-art rendering without requiring system `libchafa` |
 | `clap` | CLI argument parsing | v4, derive API |
-| `lofty` | Audio metadata read/write | Multi-format: MP3/FLAC/OGG/M4A/WAV/WMA/APE |
-| `musicbrainz_rs` | MusicBrainz API client | v0.9+, async with built-in rate limiter |
-| `rusty-chromaprint` | Audio fingerprinting | Pure Rust, no C deps |
+| `lofty` | Audio metadata read/write | Multi-format tag I/O |
 | `rusqlite` | SQLite database | With `bundled` feature for zero system deps |
-| `tokio` | Async runtime | For network I/O (MB, AcoustID) |
+| `reqwest` / `serde_json` | HTTP + JSON | Blocking client with rustls for MusicBrainz and Cover Art Archive |
 | `serde` / `toml` | Configuration parsing | TOML config files |
 | `thiserror` / `anyhow` | Error handling | `thiserror` for library errors, `anyhow` in main/CLI |
+| `strsim` | Match scoring | Jaro-Winkler similarity for MusicBrainz candidate ranking |
 | `walkdir` | Recursive directory scanning | Fast filesystem traversal |
-| `dirs` | XDG directory resolution | Config/data/cache paths |
+| `dirs` | Directory resolution | Config/data/cache paths |
 | `inquire` | Interactive CLI prompts | Setup wizard |
-| `fuzzy-matcher` | Fuzzy search | For library search/filtering |
-| `symphonia` | Audio decoding | Decode audio for fingerprinting (pure Rust) |
+| `unicode-width` | TUI display widths | Correct table/layout widths for CJK and mixed-width text |
+| `tracing` / `tracing-subscriber` | Logging | CLI/TUI-safe progress and diagnostics |
 
 ### Why These Choices
 
 - **lofty over id3**: `lofty` handles all major audio formats with a unified API. `id3` is MP3-only. A music library manager must handle FLAC, OGG, M4A, etc.
 - **rusqlite over sqlx**: Simpler setup, no need for compile-time query checking for this use case, `bundled` feature means zero external deps.
-- **symphonia for decoding**: Pure Rust audio decoder needed to feed PCM samples to `rusty-chromaprint`. No FFmpeg dependency.
-- **ratatui**: The dominant, actively maintained Rust TUI framework. Its built-in crossterm backend provides cross-platform terminal support (Windows, macOS, Linux) — no separate crossterm dependency needed.
+- **reqwest blocking client**: keeps network integration simple; MusicBrainz calls run from worker threads where needed so the TUI stays responsive.
+- **ratatui + crossterm**: the dominant, actively maintained Rust TUI stack with portable terminal input/output.
+- **ratatui-image without `chafa-dyn`**: avoids a system libchafa dependency while still supporting common terminal image protocols / fallbacks.
 
 ---
 
@@ -246,15 +249,16 @@ CREATE INDEX IF NOT EXISTS idx_collection_tracks_track ON collection_tracks(trac
 ## 5. Configuration
 
 ### Location
-Following XDG Base Directory spec (via `dirs` crate, which resolves platform-appropriate paths):
+
+Config deliberately uses an XDG-style path on every platform:
 
 | | Linux / WSL | macOS |
 |---|---|---|
-| Config | `~/.config/kyoku/config.toml` | `~/Library/Application Support/kyoku/config.toml` |
-| Database | `~/.local/share/kyoku/library.db` | `~/Library/Application Support/kyoku/library.db` |
+| Config | `~/.config/kyoku/config.toml` | `~/.config/kyoku/config.toml` |
+| Database default | `~/.local/share/kyoku/library.db` | `~/Library/Application Support/kyoku/library.db` |
 | Cache | `~/.cache/kyoku/` | `~/Library/Caches/kyoku/` |
 
-All paths are overridable via `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`, `$XDG_CACHE_HOME` environment variables on any platform. The `dirs` crate handles this automatically.
+`$XDG_CONFIG_HOME` overrides the config root. The database location is controlled by `[library] data_dir`; its default comes from the platform data directory. Cache uses the platform cache directory.
 
 ### config.toml
 
@@ -263,49 +267,47 @@ All paths are overridable via `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`, `$XDG_CACHE_
 # Root directory for managed music files
 music_dir = "~/Music"
 
+# Directory holding library.db. Override this to keep DB + music together
+# on an external drive.
+data_dir = "~/.local/share/kyoku"
+
 # Inbox directories — kyoku scans these for new/unimported files.
-# Shown in the TUI as "Inbox" with a count of pending items.
-# `kyoku scan` also checks these paths.
 inbox_dirs = [
     "~/Downloads",
     "~/Music/Incoming",
 ]
 
-# Path template for organizing files (used by `kyoku organize`)
-# Available variables: {artist}, {album_artist}, {album}, {year}, {track}, 
-#                      {title}, {disc}, {genre}, {ext}, {artist_sort}
-# Use {track:02} for zero-padded track numbers
+# Path template for organizing album files (used by `kyoku organize`).
+# Available variables: {artist}, {album_artist}, {album}, {year}, {track},
+#                      {title}, {disc}, {genre}, {label}, {ext}
+# Use {track:02} for zero-padded track numbers.
 path_template = "{album_artist}/{album} ({year})/{disc:0}-{track:02} {title}.{ext}"
 
 # Template for single-disc albums (disc_total == 1)
 path_template_single_disc = "{album_artist}/{album} ({year})/{track:02} {title}.{ext}"
 
+# Default template for collection copies. Same variables as above, plus {collection}.
+collection_path_template = "Collections/{collection}/{track:02} {album_artist} - {title}.{ext}"
+
+# Template for loose tracks with no album and no collection.
+loose_path_template = "_loose/{artist} - {title}.{ext}"
+
 [import]
-# Import behavior: import READS and CATALOGS files into the database.
-# It does NOT move or rename files by default. Use `kyoku organize` for that.
-# This setting controls what happens when you explicitly organize:
+# This controls what happens when you explicitly organize:
 # Options: "move" (move to music_dir), "copy" (copy, keep originals)
 organize_operation = "move"
 
-# Automatically accept matches with similarity above this threshold (0.0 - 1.0)
-auto_match_threshold = 0.95
+# Automatically accept MusicBrainz matches at or above this threshold (0.0 - 1.0)
+auto_match_threshold = 0.85
 
-# Use AcoustID fingerprinting for matching (requires network)
-use_fingerprint = true
-
-# Number of MusicBrainz match candidates to display
+# Number of MusicBrainz match candidates fetched per group
 match_candidates = 5
-
-# Skip files already in the library (by path or fingerprint)
-skip_duplicates = true
 
 [tagging]
 # Write tags back to files (if false, only updates DB)
 write_tags = true
 
 [musicbrainz]
-# User agent is hardcoded from CARGO_PKG_VERSION — not a config field.
-
 # Rate limiting (MB requires max 1 req/sec)
 rate_limit_ms = 1100
 
@@ -315,14 +317,18 @@ rate_limit_ms = 1100
 # Track titles are never remapped. Falls back to canonical when no alias matches.
 name_script = "native"
 
-# [acoustid] — Milestone 9 (not yet wired up)
-# api_key = ""
+# Cover Art Archive download size for the `C` fetch in album detail.
+# Options: "250", "500", "1200", "original"
+cover_art_size = "500"
 
 [ui]
 # TUI color scheme. 4 built-in themes.
 # Dark:  "tokyo-night", "kanagawa"
 # Light: "tokyo-night-light", "kanagawa-lotus"
 theme = "tokyo-night"
+
+# Render album cover previews in album detail.
+show_cover_preview = true
 
 # [ai]  # Future v2
 # enabled = false
@@ -350,12 +356,12 @@ kyoku ships with 4 built-in themes — 2 dark, 2 light. Each theme defines a con
 
 Import **reads and catalogs** files into the database. It does NOT move, rename, or reorganize files. Moving files to your library structure is a separate deliberate action via `kyoku organize`.
 
-The import pipeline:
+The TUI import wizard pipeline:
 ```
-Scan → Read Tags → Fingerprint (optional) → Match (MB) → Review → Write Tags → Update DB
+Scan → Read Tags → Match (MusicBrainz) → Review → Duplicate Resolution → Write Tags → Update DB
 ```
 
-Note: the files stay where they are. Their current paths are recorded in the database.
+The CLI import path is intentionally simpler today: scan/read tags and import as-is, with optional loose/collection handling. Note: files stay where they are. Their current paths are recorded in the database until `kyoku organize` moves/copies them.
 
 #### 6.1.1 Scan Phase
 - Recursively walk `<path>` using `walkdir`
@@ -377,18 +383,17 @@ Note: the files stay where they are. Their current paths are recorded in the dat
   - `少女綺想曲.flac` → title: `少女綺想曲`
 - Store as `ImportCandidate` structs
 
-#### 6.1.3 Fingerprint Phase (optional, network required)
-- Decode audio using `symphonia` → PCM samples
-- Generate chromaprint via `rusty-chromaprint`
-- Query AcoustID API with fingerprint + duration → get MusicBrainz recording IDs
-- Cache fingerprints locally in the database for future dedup
+#### 6.1.3 Fingerprint Phase (future / Milestone 9)
+- Audio fingerprinting is not currently implemented.
+- Planned flow: decode audio, generate Chromaprint, query AcoustID, and cache fingerprints locally for future matching/dedup.
+- The schema already has `acoustid` / `chromaprint` columns reserved for this future work.
 
 #### 6.1.4 Match Phase
-- For each album candidate, query MusicBrainz for matching releases
-- Matching strategies (in order of preference):
-  1. **MBID match**: If files already have MusicBrainz IDs in tags, fetch directly
-  2. **AcoustID match**: Use fingerprint results to find release
-  3. **Text search**: Search MB by artist + album + track count + duration
+- For each album candidate, query MusicBrainz for matching releases.
+- Current matching strategies:
+  1. **Manual MBID lookup**: user can paste a release MBID/URL in the TUI wizard.
+  2. **Text search**: search MB by artist + album + track count, with follow-up full-release fetches for tracklists.
+- Future matching strategy: **AcoustID match** once fingerprinting lands.
 - Score matches by similarity (weighted combination of):
   - Artist name similarity (fuzzy string matching)
   - Album title similarity
@@ -414,7 +419,7 @@ The wizard presents each detected conflict with a short reason line (`Same slot 
 
 Intra-batch conflicts (two incoming tracks collide with each other rather than with the library) use the same three actions; `Keep New` drops the *other* candidate instead of deleting a library row.
 
-#### 6.1.6 Review Phase (TUI or CLI)
+#### 6.1.6 Review Phase (TUI wizard)
 - Display a **diff view** showing:
   - Current tag values (left column)
   - Proposed new values from MB (right column)
@@ -437,12 +442,11 @@ Intra-batch conflicts (two incoming tracks collide with each other rather than w
 kyoku import [path]
     (no path)               Import from all configured inbox_dirs
     --pretend / -p          Dry run: show what would happen without modifying anything
-    --auto / -a             Auto-accept matches above threshold, skip below
-    --no-fingerprint        Skip AcoustID fingerprinting
-    --no-match              Skip MusicBrainz matching entirely (import as-is with existing tags)
     --collection <name>     Add all imported tracks to a collection (creates it if needed)
     --loose                 Treat all files as individual tracks, don't try to group into albums
 ```
+
+MusicBrainz review/matching currently lives in the TUI import wizard rather than the scriptable CLI path.
 
 #### Handling Niche / Unmatched Content
 
@@ -450,7 +454,7 @@ MusicBrainz won't have entries for a lot of music: doujin releases, Bandcamp-onl
 
 1. **No match found** → offer "Import as-is" as the default action (not "skip")
 2. **Low-confidence matches** → show them but don't pre-select; clearly label confidence
-3. **`--no-match` flag** → skip MB entirely; useful for bulk-importing known-niche content
+3. **CLI import** → imports as-is without MusicBrainz; useful for bulk-importing known-niche content
 4. **`--loose` flag** → don't try to infer album structure; each file is independent
 5. Unmatched tracks appear in all views, searches, and operations identically to matched ones
 6. Tag status shows `unmatched` or `manual` — these are informational labels, not errors
@@ -534,18 +538,18 @@ If no template is set, the collection is purely organizational (a virtual groupi
 # Quick and dirty — skip MB, no album grouping, just catalog into collection
 kyoku import ~/Downloads/random-mp3s/ --loose --collection "Unsorted"
 
-# Best of both worlds — match MB for good tags, but organize into collection folder
-kyoku import ~/東方/ --collection "Touhou"
+# TUI wizard version: match MB for good tags, then assign the group to a collection
+kyoku  # launch TUI → Import → assign collection during review
 ```
 
-**Tagging and organization are independent.** The `--collection` flag controls *where files end up* on disk (via the collection's path template during `kyoku organize`). MB matching controls *what the tags say*. You can combine them freely:
+**Tagging and organization are independent.** The `--collection` flag controls *where files end up* on disk (via the collection's path template during `kyoku organize`). MusicBrainz matching in the TUI controls *what the tags say*. CLI imports are as-is today:
 
-| Command | Tags | Filesystem layout |
-|---------|------|-------------------|
-| `kyoku import ~/東方/` | MB-matched | Global template (`Artist/Album/...`) |
-| `kyoku import ~/東方/ --collection "Touhou"` | MB-matched | Collection template (`Collections/Touhou/...`) |
+| Flow | Tags | Filesystem layout |
+|------|------|-------------------|
+| TUI import wizard, accept MB candidate | MB-matched | Global template (`Artist/Album/...`) |
+| TUI import wizard, accept MB + assign collection | MB-matched | Collection template (`Collections/Touhou/...`) |
+| `kyoku import ~/東方/ --collection "Touhou"` | As-is from files | Collection template (`Collections/Touhou/...`) |
 | `kyoku import ~/東方/ --loose --collection "Touhou"` | As-is from files | Collection template (`Collections/Touhou/...`) |
-| `kyoku import ~/東方/ --no-match` | As-is from files | Global template (`Artist/Album/...`) |
 
 ### 6.5 Tag Editing (TUI only)
 
@@ -849,7 +853,6 @@ A collection can also have its own per-collection `path_template` (in the `colle
 |----------|-------------|---------|
 | `{artist}` | Track artist | `Radiohead` |
 | `{album_artist}` | Album artist (falls back to track artist) | `Radiohead` |
-| `{artist_sort}` | Sort name (e.g. "Radiohead, The" → "Radiohead") | `Radiohead` |
 | `{album}` | Album title | `OK Computer` |
 | `{year}` | Release year | `1997` |
 | `{title}` | Track title | `Paranoid Android` |
@@ -870,7 +873,7 @@ A collection can also have its own per-collection `path_template` (in the `colle
 
 1. Replace `/`, `\`, `:`, `*`, `?`, `"`, `<`, `>`, `|` with `_`
 2. Trim leading/trailing whitespace and dots
-3. Collapse multiple consecutive spaces/underscores
+3. Collapse multiple consecutive underscores
 4. Truncate to OS filename limit (255 bytes) with hash suffix if needed
 5. Handle Unicode correctly (no ASCII folding)
 
@@ -888,21 +891,20 @@ This is a first-class concern, not an afterthought. Every layer of the applicati
 
 ### Filesystem
 - Use `OsString`/`OsStr` for filesystem operations, convert to/from UTF-8 only at display boundaries.
-- macOS uses NFD normalization for filenames; Linux typically uses NFC. Normalize to NFC when comparing paths, preserve original form when operating.
-- Use the `unicode-normalization` crate for NFC/NFD conversion.
-- Japanese filenames may contain fullwidth characters (Ａ vs A) — normalize to halfwidth for path operations, preserve in tags.
+- macOS uses NFD normalization for filenames; Linux typically uses NFC. Preserve original path bytes/strings when operating; add explicit NFC/NFD normalization only if comparison bugs surface.
+- Japanese filenames may contain fullwidth characters (Ａ vs A); preserve them in tags and filenames unless a future normalization feature is explicitly added.
 - **WSL note**: When music files live on a Windows NTFS mount (`/mnt/c/...`), filenames are case-insensitive and certain characters (`:`, `*`, `?`, etc.) are forbidden. The sanitization rules in the path template engine (Section 7) already handle this. The agent should test path operations against both native Linux paths and `/mnt/c/` paths.
 - Test filenames with characters from: Japanese (hiragana/katakana/kanji), Chinese (simplified/traditional), Korean (hangul), Polish (ą, ć, ę, ł, ń, ó, ś, ź, ż), Nordic (å, ä, ö, ø), and mixed scripts.
 
 ### Search
 - FTS5 `unicode61` tokenizer handles CJK by tokenizing each character individually, which works for substring-style search. `remove_diacritics 2` maps accented characters (ą→a) while keeping the original indexed too.
 - Search for `初音` should match `初音ミク`. Search for `bjork` should match `Björk`.
-- Fuzzy matching (used in TUI search bar) must be Unicode-aware. The `fuzzy-matcher` crate handles this. Do not assume ASCII or byte-level matching.
+- TUI/global search helpers must remain Unicode-aware. Do not assume ASCII or byte-level matching.
 
 ### TUI Display
 - Use `unicode-width` crate to calculate display widths. CJK characters are typically 2 columns wide. Table column alignment must account for this.
 - Never truncate in the middle of a multi-byte character or grapheme cluster.
-- Use `unicode-segmentation` crate for grapheme-cluster-aware truncation.
+- Consider `unicode-segmentation` for grapheme-cluster-aware truncation if simple char-boundary truncation proves insufficient.
 - Test TUI rendering with mixed Latin + CJK content in the same table row.
 
 ### Script preference for MB-derived names
@@ -913,13 +915,13 @@ A single MB entity can have both a native-script primary name and one or more La
 - Consider the `icu_collator` crate or simpler approaches like lowercasing with `str::to_lowercase()` (which handles Unicode case folding correctly in Rust).
 - Sort names: respect sort-order tag fields from files (e.g. `ARTISTSORT = "ハツネミク"` for kana-based sorting of Japanese content).
 
-### Crate Dependencies for Unicode
+### Unicode dependencies / candidates
 
-| Crate | Purpose |
-|-------|---------|
-| `unicode-normalization` | NFC/NFD normalization for path comparison |
-| `unicode-width` | Display width calculation (CJK = 2 columns) |
-| `unicode-segmentation` | Grapheme-cluster-aware string operations |
+| Crate | Status | Purpose |
+|-------|--------|---------|
+| `unicode-width` | current | Display width calculation (CJK = 2 columns) |
+| `unicode-normalization` | future candidate | NFC/NFD normalization for path comparison if needed |
+| `unicode-segmentation` | future candidate | Grapheme-cluster-aware truncation/editing if current char-boundary handling proves insufficient |
 
 ---
 
@@ -952,7 +954,7 @@ A single MB entity can have both a native-script primary name and one or more La
 
 - [x] Import files into SQLite (scan → read tags → insert, files stay in place)
 - [x] `kyoku import <path>` (local-only, no MB matching yet)
-- [x] `kyoku import --loose` and `--no-match` modes
+- [x] `kyoku import --loose` mode
 - [x] `kyoku scan` — inbox directory scanner (checks configured inbox_dirs)
 - [x] Search with FTS5 (freeform + filters) — TUI only
 - [x] Collections (create, add, list, show, remove, delete) — TUI only
@@ -1050,11 +1052,11 @@ A single MB entity can have both a native-script primary name and one or more La
 ### Milestone 9: Audio Fingerprinting
 **Goal**: Identify music from its audio content when tags are missing or wrong.
 
-- [ ] Chromaprint fingerprinting (symphonia → rusty-chromaprint) — decode audio to PCM, generate fingerprint
+- [ ] Choose fingerprinting stack (likely audio decode → Chromaprint-compatible fingerprint)
 - [ ] AcoustID lookup integration — query acoustid.org with fingerprint + duration, get MB recording IDs
 - [ ] Import wizard integration: optional fingerprint-based matching alongside text search
 - [ ] AcoustID API key in config (`[acoustid] api_key`)
-- [ ] `--no-fingerprint` flag to skip fingerprinting
+- [ ] CLI/config toggle to skip fingerprinting when this feature exists
 
 ### Future (v2): AI Integration
 **Goal**: Optional AI-powered features via OpenAI-compatible API.
