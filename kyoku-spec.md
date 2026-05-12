@@ -180,14 +180,15 @@ CREATE TABLE IF NOT EXISTS tracks (
 -- Collections: user-defined groupings that exist alongside the album hierarchy.
 -- A collection is NOT an album — it's a loose bag: a folder of random MP3s, a DJ set,
 -- a personal mixtape, "stuff I need to sort later." Tracks can be in zero, one, or many
--- collections AND also belong to an album. Collections don't affect tags or filenames.
+-- collections AND also belong to an album. Collections don't affect tags;
+-- they can affect collection-copy filenames via path templates and position.
 CREATE TABLE IF NOT EXISTS collections (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL,
     description TEXT,
-    -- Path template override (optional). If set, tracks in this collection
-    -- use this template instead of the global one when organized.
-    -- e.g. "Collections/{collection}/{track:02} {artist} - {title}.{ext}"
+    -- Path template override (optional). If unset, tracks in this collection
+    -- use [library].collection_path_template when organized.
+    -- e.g. "Collections/{collection}/{position:02} {artist} - {title}.{ext}"
     path_template TEXT,
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now'))
@@ -196,7 +197,7 @@ CREATE TABLE IF NOT EXISTS collections (
 CREATE TABLE IF NOT EXISTS collection_tracks (
     collection_id INTEGER REFERENCES collections(id) ON DELETE CASCADE,
     track_id      INTEGER REFERENCES tracks(id) ON DELETE CASCADE,
-    position      INTEGER,             -- Optional ordering within collection
+    position      INTEGER,             -- Durable ordering within collection
     -- When the collection has a path_template, organize creates a physical copy
     -- of the file in the collection folder. This field tracks that copy's path.
     -- NULL if collection has no template or file hasn't been organized yet.
@@ -286,8 +287,10 @@ path_template = "{album_artist}/{album} ({year})/{disc:0}-{track:02} {title}.{ex
 # Template for single-disc albums (disc_total == 1)
 path_template_single_disc = "{album_artist}/{album} ({year})/{track:02} {title}.{ext}"
 
-# Default template for collection copies. Same variables as above, plus {collection}.
-collection_path_template = "Collections/{collection}/{track:02} {album_artist} - {title}.{ext}"
+# Default template for collection copies. Same variables as album templates,
+# plus {collection} and {position}. In collection templates, prefer {position}
+# for numbering; {track} always means the file's track-number tag.
+collection_path_template = "Collections/{collection}/{position:02} {album_artist} - {title}.{ext}"
 
 # Template for loose tracks with no album and no collection.
 loose_path_template = "_loose/{artist} - {title}.{ext}"
@@ -531,7 +534,19 @@ Collections are user-defined groupings that exist alongside (not instead of) the
 
 A collection can optionally have a custom path template. When `kyoku organize` runs, tracks in this collection stay grouped together in their own folder instead of being scattered across the artist hierarchy. This is the key feature for managing compilations, loose folders, doujin collections, DJ sets, and anything that doesn't fit the standard `Artist/Album/Track` structure.
 
-If no template is set, the collection is purely organizational (a virtual grouping in the DB) and its tracks use the global template when organized.
+If no per-collection template is set, kyoku uses the global `[library].collection_path_template`.
+
+#### Collection order
+
+A collection has its own order, independent of album track numbers. Once `collection_tracks.position` is set, that position is the single source of truth for display order and for `{position}` in collection path templates. `{track}` remains strictly the track-number tag from the audio metadata.
+
+New collection memberships should always be assigned positions by appending to the collection while preserving the caller's intended order:
+
+1. MusicBrainz-accepted imports use the matched release track order.
+2. Album-like/cohesive metadata uses `(disc_number, track_number)` order.
+3. Missing, duplicated, or scrambled track numbers fall back to scan/import/add order — never title order.
+
+Legacy rows with `NULL` positions are interpreted with the same fallback policy at read/organize time: coherent metadata first, then `added_at`/`track_id` as a deterministic approximation of add order. Future manual reordering should update `collection_tracks.position` directly.
 
 **Import directly to collection:**
 ```bash
@@ -542,7 +557,7 @@ kyoku import ~/Downloads/random-mp3s/ --loose --collection "Unsorted"
 kyoku  # launch TUI → Import → assign collection during review
 ```
 
-**Tagging and organization are independent.** The `--collection` flag controls *where files end up* on disk (via the collection's path template during `kyoku organize`). MusicBrainz matching in the TUI controls *what the tags say*. CLI imports are as-is today:
+**Tagging and organization are independent.** The `--collection` flag controls *where files end up* on disk (via the collection's path template during `kyoku organize`) and the order they appear in that collection. MusicBrainz matching in the TUI controls *what the tags say*. CLI imports are as-is today:
 
 | Flow | Tags | Filesystem layout |
 |------|------|-------------------|
@@ -559,7 +574,7 @@ Tag editing is done through the TUI tag editor view. Select a track or album, op
 
 The deliberate "make my filesystem beautiful" command. This is where files actually move.
 
-`kyoku organize` applies the `path_template` to move/copy files into the target structure under `music_dir`. It always shows a preview first and requires explicit confirmation.
+`kyoku organize` applies album, collection, and loose-track templates to move/copy files into the target structure under `music_dir`. It always shows a preview first and requires explicit confirmation.
 
 ```bash
 kyoku organize                       # Preview what the entire library would look like
@@ -573,31 +588,32 @@ kyoku organize --pretend             # Alias for preview (default behavior witho
 
 #### Template Resolution Order
 
-When calculating the target path for a file, kyoku checks templates in this order:
+When calculating target paths, kyoku applies templates by file role:
 
-1. **Single-disc album template** (`path_template_single_disc`) — if the track is in an album with `disc_total == 1`
-2. **Global template** (`path_template`) — the default for album tracks and loose tracks
+1. **Album copy** — `path_template_single_disc` for single-disc albums, otherwise `path_template`.
+2. **Collection copy** — the collection's custom `path_template` if set, otherwise `[library].collection_path_template`. `{position}` is the collection order; `{track}` is still the track-number tag.
+3. **Loose non-collection copy** — `[library].loose_path_template`.
 
 #### Collection + Album: Dual-File Behavior
 
 **A track can exist in both an album and a collection with a template.** When this happens, `kyoku organize` creates **two physical copies** of the file:
 
 1. The **album copy** goes to the album hierarchy via the global template: `~/Music/DJ Shadow/Endtroducing..... (1996)/01 Best Foot Forward.mp3`
-2. The **collection copy** goes to the collection folder via its template: `~/Music/Collections/Touhou/IOSYS - Marisa Stole the Precious Thing.mp3`
+2. The **collection copy** goes to the collection folder via its template: `~/Music/Collections/Touhou/01 IOSYS - Marisa Stole the Precious Thing.mp3`
 
 Both copies are tracked in the database. The collection copy is created via filesystem copy (not move). This means the user's collection folders are real, self-contained directories that a file-browser music player can browse independently from the album hierarchy.
 
 For tracks that belong **only** to a collection (loose tracks with no album), there is only one copy — in the collection folder.
 
-For tracks in collections **without** a custom template, the collection is purely virtual (a DB grouping). No extra copies are created; the track lives in whatever location the global template dictates.
+For tracks in collections **without** a custom template, kyoku uses `[library].collection_path_template`.
 
-If a track belongs to multiple collections with templates, it gets a copy in each collection folder.
+If a track belongs to multiple collections, it gets a copy in each collection folder. Each collection has its own independent `position` sequence.
 
 The organize preview shows all copies that will be created:
 ```
 ~/Downloads/東方/IOSYS - Marisa Stole the Precious Thing.mp3
   → ~/Music/IOSYS/Marisa Stole the Precious Thing.mp3            (album)
-  → ~/Music/Collections/Touhou/IOSYS - Marisa Stole the Precious Thing.mp3  (collection: Touhou)
+  → ~/Music/Collections/Touhou/01 IOSYS - Marisa Stole the Precious Thing.mp3  (collection: Touhou)
 ```
 
 #### Empty Directory Cleanup
@@ -842,10 +858,10 @@ There are four templates in `[library]`, each used in a different situation by `
 |---------|----------|---------|
 | `path_template` | Multi-disc album tracks (album hierarchy) | `{album_artist}/{album} ({year})/{disc:0}-{track:02} {title}.{ext}` |
 | `path_template_single_disc` | Single-disc album tracks (album hierarchy) | `{album_artist}/{album} ({year})/{track:02} {title}.{ext}` |
-| `collection_path_template` | Collection copies (one per collection a track is in) | `Collections/{collection}/{track:02} {album_artist} - {title}.{ext}` |
+| `collection_path_template` | Collection copies (one per collection a track is in) | `Collections/{collection}/{position:02} {album_artist} - {title}.{ext}` |
 | `loose_path_template` | Loose tracks with no album and no collection | `_loose/{artist} - {title}.{ext}` |
 
-A collection can also have its own per-collection `path_template` (in the `collections` table) that overrides `collection_path_template` for that collection only.
+A collection can also have its own per-collection `path_template` (in the `collections` table) that overrides `collection_path_template` for that collection only. Collection templates should use `{position}` for collection order; `{track}` always means the file's own track-number tag.
 
 ### Variables
 
@@ -856,8 +872,9 @@ A collection can also have its own per-collection `path_template` (in the `colle
 | `{album}` | Album title | `OK Computer` |
 | `{year}` | Release year | `1997` |
 | `{title}` | Track title | `Paranoid Android` |
-| `{track}` | Track number | `2` |
+| `{track}` | Track-number tag from the file / album metadata | `2` |
 | `{disc}` | Disc number | `1` |
+| `{position}` | Collection position (collection templates only) | `7` |
 | `{genre}` | Primary genre | `Alternative Rock` |
 | `{ext}` | File extension (lowercase, no dot) | `flac` |
 | `{label}` | Record label | `Parlophone` |
@@ -865,7 +882,8 @@ A collection can also have its own per-collection `path_template` (in the `colle
 
 ### Format Specifiers
 
-- `{track:02}` → `02` (zero-padded to 2 digits)
+- `{track:02}` → `02` (zero-padded track-number tag)
+- `{position:02}` → `07` (zero-padded collection position)
 - `{disc:0}` → `1` (no padding, just the number, omitted for single-disc)
 - `{year:4}` → `1997`
 
@@ -999,6 +1017,7 @@ A single MB entity can have both a native-script primary name and one or more La
 - [x] Clean up empty directories after moves (recursive parent cleanup)
 - [x] `kyoku organize` TUI integration (`O` key — library: organize all, album detail: organize album; summary/detail views with scrollable per-file listing)
 - [x] Filesystem output honours `[musicbrainz] name_script` — artist dirs and album-title segments follow the Latin/native preference resolved at MB-fetch time (see Milestone 4)
+- [ ] Collection order polish — populate `collection_tracks.position` on every add/import path, use it as collection order source of truth, add `{position}` for collection templates, and fall back sensibly for legacy NULL positions
 
 ### Milestone 6: Deletion, Cover Art, Full Tag Editing
 **Goal**: Round out the core library-management surface.
