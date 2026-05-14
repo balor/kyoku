@@ -355,22 +355,48 @@ pub fn list_albums(
     Ok(result)
 }
 
-/// Count loose tracks (tracks with no album).
+/// Count truly loose tracks (tracks with no album and no collection).
 pub fn count_loose_tracks(conn: &Connection) -> Result<i64> {
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM tracks WHERE album_id IS NULL",
+        "SELECT COUNT(*) FROM tracks t
+         WHERE t.album_id IS NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM collection_tracks ct WHERE ct.track_id = t.id
+           )",
         [],
         |row| row.get(0),
     )?;
     Ok(count)
 }
 
-/// List loose tracks with pagination.
+/// List truly loose track ids.
+pub fn list_loose_track_ids(conn: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM tracks t
+         WHERE t.album_id IS NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM collection_tracks ct WHERE ct.track_id = t.id
+           )
+         ORDER BY title COLLATE NOCASE",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
+/// List truly loose tracks with pagination.
 pub fn list_loose_tracks(conn: &Connection, offset: usize, limit: usize) -> Result<Vec<TrackRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, title, artist, track_number, disc_number, duration_ms,
                 tag_status, bitrate, file_format, file_path
-         FROM tracks WHERE album_id IS NULL
+         FROM tracks t
+         WHERE t.album_id IS NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM collection_tracks ct WHERE ct.track_id = t.id
+           )
          ORDER BY title COLLATE NOCASE
          LIMIT ?1 OFFSET ?2",
     )?;
@@ -812,7 +838,7 @@ pub struct CollectionTrackHomes {
 }
 
 /// For each track in a collection, return its file paths and how many other
-/// "homes" it has (an album, or other collections-with-files).
+/// "homes" it has (an album, or other collection memberships).
 pub fn get_collection_tracks_with_other_homes(
     conn: &Connection,
     collection_id: i64,
@@ -824,8 +850,7 @@ pub fn get_collection_tracks_with_other_homes(
             ct.collection_file_path,
             (t.album_id IS NOT NULL) as has_album,
             (SELECT COUNT(*) FROM collection_tracks ct2
-             WHERE ct2.track_id = t.id AND ct2.collection_id != ?1
-                AND ct2.collection_file_path IS NOT NULL) as other_collection_count
+             WHERE ct2.track_id = t.id AND ct2.collection_id != ?1) as other_collection_count
          FROM collection_tracks ct
          JOIN tracks t ON t.id = ct.track_id
          WHERE ct.collection_id = ?1",
@@ -861,6 +886,15 @@ pub fn delete_album(conn: &Connection, album_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Clear a track's album membership without deleting the track.
+pub fn clear_track_album(conn: &Connection, track_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE tracks SET album_id = NULL, modified_date = datetime('now') WHERE id = ?1",
+        [track_id],
+    )?;
+    Ok(())
+}
+
 /// Info about a track needed when computing a delete plan — the primary file
 /// path, album (if any), and every collection-copy path the track owns.
 #[derive(Debug, Clone)]
@@ -868,6 +902,7 @@ pub struct TrackDeleteInfo {
     pub track_id: i64,
     pub file_path: String,
     pub album_id: Option<i64>,
+    pub collection_count: u32,
     /// Every `collection_tracks.collection_file_path` this track has set.
     pub collection_copies: Vec<String>,
 }
@@ -882,7 +917,9 @@ pub fn get_tracks_delete_info(
     }
     let placeholders = track_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
-        "SELECT id, file_path, album_id FROM tracks WHERE id IN ({})",
+        "SELECT id, file_path, album_id,
+                (SELECT COUNT(*) FROM collection_tracks ct WHERE ct.track_id = tracks.id)
+         FROM tracks WHERE id IN ({})",
         placeholders
     );
     let params: Vec<&dyn rusqlite::ToSql> = track_ids
@@ -896,6 +933,7 @@ pub fn get_tracks_delete_info(
             track_id: row.get(0)?,
             file_path: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
             album_id: row.get(2)?,
+            collection_count: row.get::<_, i64>(3)? as u32,
             collection_copies: Vec::new(),
         })
     })?;

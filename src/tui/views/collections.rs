@@ -111,8 +111,9 @@ impl CollectionsView {
         &mut self,
         key: KeyEvent,
         conn: &Connection,
-        music_dir: &Path,
+        settings: &Settings,
     ) -> CollectionsAction {
+        let file_delete_roots = organizer::file_delete_roots(settings);
         // Organize popup captures input
         if self.organize_plan.is_some() {
             if keys::is_confirm(&key) {
@@ -197,8 +198,13 @@ impl CollectionsView {
                         return CollectionsAction::None;
                     }
                     ConfirmAction::Confirm { delete_files } => {
-                        organizer::apply_delete_collection(conn, plan, delete_files, music_dir)
-                            .ok();
+                        organizer::apply_delete_collection_with_roots(
+                            conn,
+                            plan,
+                            delete_files,
+                            &file_delete_roots,
+                        )
+                        .ok();
                         self.mode = InputMode::Normal;
                         self.selection.clear();
                         return CollectionsAction::Refresh;
@@ -215,8 +221,13 @@ impl CollectionsView {
                     }
                     ConfirmAction::Confirm { delete_files } => {
                         for plan in plans.iter() {
-                            organizer::apply_delete_collection(conn, plan, delete_files, music_dir)
-                                .ok();
+                            organizer::apply_delete_collection_with_roots(
+                                conn,
+                                plan,
+                                delete_files,
+                                &file_delete_roots,
+                            )
+                            .ok();
                         }
                         self.mode = InputMode::Normal;
                         self.selection.clear();
@@ -304,7 +315,9 @@ impl CollectionsView {
 
             if ids.len() == 1 {
                 // Single-collection delete — preserve the existing rich popup.
-                if let Ok(plan) = organizer::plan_delete_collection(conn, ids[0], music_dir) {
+                if let Ok(plan) =
+                    organizer::plan_delete_collection_with_roots(conn, ids[0], &file_delete_roots)
+                {
                     let mut widget = ConfirmDelete::new(
                         "Confirm Delete",
                         format!("Delete collection '{}'?", plan.collection_name),
@@ -312,23 +325,26 @@ impl CollectionsView {
                     let total_files = plan.files_to_delete.len();
                     if total_files > 0 {
                         widget = widget.with_summary(format!(
-                            "{} file(s) under {}",
-                            total_files,
-                            music_dir.display()
+                            "{} file(s) inside the music directory",
+                            total_files
                         ));
                     } else {
                         widget = widget.without_checkbox();
                     }
                     if !plan.orphaned_track_ids.is_empty() {
+                        let suffix = if total_files > 0 {
+                            "; check the box to also delete files"
+                        } else {
+                            ""
+                        };
                         widget = widget.with_warning(format!(
-                            "{} track(s) only exist in this collection — they'll be \
-                             removed entirely if you delete files",
-                            plan.orphaned_track_ids.len()
+                            "{} track(s) only exist in this collection — they'll be removed from the library{}",
+                            plan.orphaned_track_ids.len(), suffix
                         ));
                     }
-                    if !plan.files_outside_music_dir.is_empty() {
-                        widget = widget.with_warning(format!(
-                            "{} file(s) outside music_dir will NOT be touched",
+                    if total_files > 0 && !plan.files_outside_music_dir.is_empty() {
+                        widget = widget.with_detail(format!(
+                            "{} file(s) outside the music directory will be left on disk",
                             plan.files_outside_music_dir.len()
                         ));
                     }
@@ -338,7 +354,9 @@ impl CollectionsView {
                 // Batch — plan every collection and summarise.
                 let mut plans = Vec::with_capacity(ids.len());
                 for id in &ids {
-                    if let Ok(plan) = organizer::plan_delete_collection(conn, *id, music_dir) {
+                    if let Ok(plan) =
+                        organizer::plan_delete_collection_with_roots(conn, *id, &file_delete_roots)
+                    {
                         plans.push(plan);
                     }
                 }
@@ -356,9 +374,8 @@ impl CollectionsView {
                 );
                 if total_files > 0 {
                     widget = widget.with_summary(format!(
-                        "{} file(s) under {}",
-                        total_files,
-                        music_dir.display()
+                        "{} file(s) inside the music directory",
+                        total_files
                     ));
                 } else {
                     widget = widget.without_checkbox();
@@ -378,15 +395,19 @@ impl CollectionsView {
                     ));
                 }
                 if total_orphans > 0 {
+                    let suffix = if total_files > 0 {
+                        "; check the box to also delete files"
+                    } else {
+                        ""
+                    };
                     widget = widget.with_warning(format!(
-                        "{} track(s) only exist in these collections — they'll be \
-                         removed entirely if you delete files",
-                        total_orphans
+                        "{} track(s) only exist in these collections — they'll be removed from the library{}",
+                        total_orphans, suffix
                     ));
                 }
-                if total_outside > 0 {
-                    widget = widget.with_warning(format!(
-                        "{} file(s) outside music_dir will NOT be touched",
+                if total_files > 0 && total_outside > 0 {
+                    widget = widget.with_detail(format!(
+                        "{} file(s) outside the music directory will be left on disk",
                         total_outside
                     ));
                 }
@@ -395,7 +416,6 @@ impl CollectionsView {
             return CollectionsAction::None;
         }
 
-        let _ = music_dir;
         CollectionsAction::None
     }
 
@@ -672,7 +692,7 @@ impl CollectionDetailView {
         conn: &Connection,
         settings: &Settings,
     ) -> CollectionDetailAction {
-        let music_dir = settings.library.music_dir.as_path();
+        let file_delete_roots = organizer::file_delete_roots(settings);
         // Delete-confirm popup captures input (batch track delete).
         if let Some((plan, popup)) = &mut self.pending_delete {
             match popup.handle_key(key) {
@@ -682,10 +702,11 @@ impl CollectionDetailView {
                     return CollectionDetailAction::None;
                 }
                 ConfirmAction::Confirm { delete_files } => {
-                    let cleanup = organizer::cleanup_roots(settings);
+                    let file_delete_roots = organizer::file_delete_roots(settings);
                     let plan = plan.clone();
                     self.pending_delete = None;
-                    let _ = pruner::apply_delete_plan(conn, &plan, delete_files, &cleanup);
+                    let _ =
+                        pruner::apply_delete_plan(conn, &plan, delete_files, &file_delete_roots);
                     self.selection.clear();
                     self.reload_tracks(conn);
                     return CollectionDetailAction::Deleted;
@@ -785,22 +806,22 @@ impl CollectionDetailView {
                         let coll_id = coll.id;
                         queries::remove_track_from_collection(conn, coll_id, track_id).ok();
 
-                        if delete_files {
-                            if let Some(p) = &file_path
-                                && p.exists()
-                                && p.starts_with(music_dir)
-                            {
-                                let _ = std::fs::remove_file(p);
-                                if let Some(parent) = p.parent() {
-                                    let roots = [music_dir.to_path_buf()];
-                                    let _ = remove_empty_parents(parent, &roots);
-                                }
+                        if delete_files
+                            && let Some(p) = &file_path
+                            && p.exists()
+                            && path_is_in_roots(p, &file_delete_roots)
+                        {
+                            let _ = std::fs::remove_file(p);
+                            if let Some(parent) = p.parent() {
+                                let _ = remove_empty_parents(parent, &file_delete_roots);
                             }
-                            // If removing this would leave the track with no
-                            // file home, delete the track entirely.
-                            if will_orphan {
-                                queries::delete_track(conn, track_id).ok();
-                            }
+                        }
+
+                        // If removing this collection membership would leave
+                        // the track homeless, remove it from the library by
+                        // default instead of creating an accidental loose row.
+                        if will_orphan {
+                            queries::delete_track(conn, track_id).ok();
                         }
 
                         self.reload_tracks(conn);
@@ -860,8 +881,8 @@ impl CollectionDetailView {
             if ids.is_empty() {
                 return CollectionDetailAction::None;
             }
-            let cleanup = organizer::cleanup_roots(settings);
-            match pruner::plan_delete_tracks(conn, &ids, &cleanup) {
+            let file_delete_roots = organizer::file_delete_roots(settings);
+            match pruner::plan_delete_tracks(conn, &ids, &file_delete_roots) {
                 Ok(plan) => {
                     if plan.is_empty() {
                         return CollectionDetailAction::None;
@@ -889,19 +910,26 @@ impl CollectionDetailView {
                 let homes = queries::get_collection_tracks_with_other_homes(conn, coll.id)
                     .unwrap_or_default();
                 let info = homes.iter().find(|h| h.track_id == track.id);
-                let file_path = info
-                    .and_then(|i| i.collection_file_path.clone())
-                    .map(PathBuf::from);
                 let will_orphan = info
                     .map(|i| !i.has_album && i.other_collection_count == 0)
                     .unwrap_or(false);
+                let file_path = info
+                    .and_then(|i| {
+                        i.collection_file_path
+                            .clone()
+                            .or_else(|| will_orphan.then(|| i.track_file_path.clone()))
+                    })
+                    .map(PathBuf::from);
+                let can_delete_file = file_path
+                    .as_ref()
+                    .is_some_and(|p| path_is_in_roots(p, &file_delete_roots));
 
                 let mut widget = ConfirmDelete::new(
                     "Confirm Remove",
                     format!("Remove '{}' from collection '{}'?", track.title, coll.name),
                 );
                 if let Some(p) = &file_path {
-                    if p.starts_with(music_dir) {
+                    if can_delete_file {
                         widget = widget.with_summary(format!("File: {}", p.display()));
                     } else {
                         widget = widget.without_checkbox();
@@ -910,10 +938,15 @@ impl CollectionDetailView {
                     widget = widget.without_checkbox();
                 }
                 if will_orphan {
-                    widget = widget.with_warning(
-                        "This is the only place this track lives — \
-                             checking the box will remove it from the library entirely",
-                    );
+                    let suffix = if can_delete_file {
+                        "; check the box to also delete its file"
+                    } else {
+                        "; no file is eligible for deletion"
+                    };
+                    widget = widget.with_warning(format!(
+                        "This is the only place this track lives — it will be removed from the library{}",
+                        suffix
+                    ));
                 }
 
                 self.confirm_remove = Some(RemoveTrackConfirm {
@@ -1172,6 +1205,12 @@ impl CollectionDetailView {
     }
 }
 
+fn path_is_in_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .any(|root| path.starts_with(root) && path != root.as_path())
+}
+
 fn build_collection_track_confirm(plan: &pruner::DeletePlan) -> ConfirmDelete {
     let n = plan.track_ids.len();
     let primary = if n == 1 {
@@ -1193,9 +1232,9 @@ fn build_collection_track_confirm(plan: &pruner::DeletePlan) -> ConfirmDelete {
             plan.collection_copies_to_delete.len()
         ));
     }
-    if !plan.files_outside_managed.is_empty() {
-        popup = popup.with_warning(format!(
-            "{} file(s) outside managed roots will NOT be deleted",
+    if plan.deletable_file_count() > 0 && !plan.files_outside_managed.is_empty() {
+        popup = popup.with_detail(format!(
+            "{} file(s) outside the music directory will be left on disk",
             plan.files_outside_managed.len()
         ));
     }

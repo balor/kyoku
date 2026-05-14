@@ -55,12 +55,7 @@ fn add_album_track(
     queries::insert_track(conn, &track, Some(album_id), None).unwrap()
 }
 
-fn add_loose_track(
-    conn: &Connection,
-    src_path: PathBuf,
-    artist: &str,
-    title: &str,
-) -> i64 {
+fn add_loose_track(conn: &Connection, src_path: PathBuf, artist: &str, title: &str) -> i64 {
     touch(&src_path);
     let track = make_track_struct(src_path, None, title, artist, 1);
     queries::insert_track(conn, &track, None, None).unwrap()
@@ -100,7 +95,10 @@ fn plan_delete_tracks_collects_collection_copies() {
     let plan = plan_delete_tracks(&conn, &[tid], &[music.clone()]).unwrap();
 
     assert_eq!(plan.track_ids, vec![tid]);
-    assert!(plan.album_ids.is_empty(), "plan_delete_tracks never removes albums");
+    assert!(
+        plan.album_ids.is_empty(),
+        "plan_delete_tracks never removes albums"
+    );
     assert_eq!(plan.files_to_delete, vec![primary]);
     let mut copies = plan.collection_copies_to_delete.clone();
     copies.sort();
@@ -118,7 +116,9 @@ fn plan_delete_album_lists_tracks_and_album_row() {
     let t2 = add_album_track(&conn, p2.clone(), "Artist", "Album", 2, "Two", None);
     // Resolve the album_id shared by these tracks.
     let aid: i64 = conn
-        .query_row("SELECT album_id FROM tracks WHERE id = ?1", [t1], |r| r.get(0))
+        .query_row("SELECT album_id FROM tracks WHERE id = ?1", [t1], |r| {
+            r.get(0)
+        })
         .unwrap();
 
     let plan = plan_delete_albums(&conn, &[aid], &[music.clone()]).unwrap();
@@ -137,6 +137,109 @@ fn plan_delete_album_lists_tracks_and_album_row() {
 }
 
 #[test]
+fn collection_only_tracks_are_not_loose() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    let p = music.join("Collections/Mix/song.mp3");
+    let tid = add_loose_track(&conn, p.clone(), "Artist", "Song");
+    assert_eq!(queries::count_loose_tracks(&conn).unwrap(), 1);
+
+    let (coll_id, _) = queries::get_or_create_collection(&conn, "Mix").unwrap();
+    queries::add_track_to_collection(&conn, coll_id, tid).unwrap();
+
+    assert_eq!(queries::count_loose_tracks(&conn).unwrap(), 0);
+    assert!(queries::list_loose_track_ids(&conn).unwrap().is_empty());
+}
+
+#[test]
+fn delete_album_preserves_tracks_that_belong_to_collections() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    let primary = music.join("Artist/Album/song.mp3");
+    let tid = add_album_track(&conn, primary.clone(), "Artist", "Album", 1, "Song", None);
+    let aid: i64 = conn
+        .query_row("SELECT album_id FROM tracks WHERE id = ?1", [tid], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let (coll_id, _) = queries::get_or_create_collection(&conn, "Mix").unwrap();
+    queries::add_track_to_collection(&conn, coll_id, tid).unwrap();
+    let copy = music.join("Collections/Mix/song.mp3");
+    touch(&copy);
+    queries::update_collection_track_path(&conn, coll_id, tid, &copy.display().to_string())
+        .unwrap();
+
+    let plan = plan_delete_albums(&conn, &[aid], &[music.clone()]).unwrap();
+    assert!(
+        plan.track_ids.is_empty(),
+        "collection tracks should survive album deletion"
+    );
+    assert_eq!(plan.album_survivor_track_ids, vec![tid]);
+    assert_eq!(plan.promote_paths, vec![(tid, copy.display().to_string())]);
+    assert_eq!(plan.files_to_delete, vec![primary.clone()]);
+
+    let report = apply_delete_plan(&conn, &plan, true, &[music.clone()]).unwrap();
+
+    assert_eq!(report.albums_deleted, 1);
+    assert_eq!(report.tracks_deleted, 0);
+    assert_eq!(report.files_deleted, 1);
+    assert!(!primary.exists());
+    let (album_id, file_path): (Option<i64>, String) = conn
+        .query_row(
+            "SELECT album_id, file_path FROM tracks WHERE id = ?1",
+            [tid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(album_id, None);
+    assert_eq!(file_path, copy.display().to_string());
+    let membership_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM collection_tracks WHERE collection_id = ?1 AND track_id = ?2",
+            rusqlite::params![coll_id, tid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(membership_count, 1);
+}
+
+#[test]
+fn delete_album_keeps_primary_file_for_collection_track_without_copy() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    let primary = music.join("Artist/Album/song.mp3");
+    let tid = add_album_track(&conn, primary.clone(), "Artist", "Album", 1, "Song", None);
+    let aid: i64 = conn
+        .query_row("SELECT album_id FROM tracks WHERE id = ?1", [tid], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let (coll_id, _) = queries::get_or_create_collection(&conn, "Mix").unwrap();
+    queries::add_track_to_collection(&conn, coll_id, tid).unwrap();
+
+    let plan = plan_delete_albums(&conn, &[aid], std::slice::from_ref(&music)).unwrap();
+    assert!(plan.track_ids.is_empty());
+    assert_eq!(plan.album_survivor_track_ids, vec![tid]);
+    assert!(plan.promote_paths.is_empty());
+    assert!(
+        plan.files_to_delete.is_empty(),
+        "do not delete a surviving collection track's only physical file"
+    );
+
+    let report = apply_delete_plan(&conn, &plan, true, std::slice::from_ref(&music)).unwrap();
+
+    assert_eq!(report.albums_deleted, 1);
+    assert_eq!(report.files_deleted, 0);
+    assert!(primary.exists());
+    let (album_id, file_path): (Option<i64>, String) = conn
+        .query_row(
+            "SELECT album_id, file_path FROM tracks WHERE id = ?1",
+            [tid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(album_id, None);
+    assert_eq!(file_path, primary.display().to_string());
+}
+
+#[test]
 fn apply_delete_plan_keeps_files_when_flag_false() {
     let (_tmp, _src, music, conn) = fresh_world();
     let p = music.join("Artist/Album/song.mp3");
@@ -146,10 +249,15 @@ fn apply_delete_plan_keeps_files_when_flag_false() {
     let report = apply_delete_plan(&conn, &plan, false, &[music.clone()]).unwrap();
 
     assert_eq!(report.tracks_deleted, 1);
-    assert_eq!(report.files_deleted, 0, "delete_files=false leaves physical files alone");
+    assert_eq!(
+        report.files_deleted, 0,
+        "delete_files=false leaves physical files alone"
+    );
     assert!(p.exists(), "file should survive");
     let remaining: i64 = conn
-        .query_row("SELECT COUNT(*) FROM tracks WHERE id = ?1", [tid], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM tracks WHERE id = ?1", [tid], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(remaining, 0, "track row should still be removed");
 }
@@ -167,7 +275,10 @@ fn apply_delete_plan_removes_files_and_empty_parents() {
     assert_eq!(report.tracks_deleted, 1);
     assert!(!p.exists(), "file should be deleted");
     // Empty album + artist dirs swept up; music_dir itself preserved.
-    assert!(!music.join("Artist/Album").exists(), "empty album dir cleaned");
+    assert!(
+        !music.join("Artist/Album").exists(),
+        "empty album dir cleaned"
+    );
     assert!(!music.join("Artist").exists(), "empty artist dir cleaned");
     assert!(music.exists(), "music_dir root preserved");
     assert!(report.dirs_cleaned >= 2);

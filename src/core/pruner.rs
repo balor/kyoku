@@ -28,8 +28,12 @@ pub struct DeletePlan {
     /// Track DB rows that will be removed. Includes everything in
     /// `album_ids`' track lists when planning an album delete.
     pub track_ids: Vec<i64>,
-    /// Album DB rows that will be removed after the tracks go.
+    /// Album DB rows that will be removed after their surviving tracks are detached.
     pub album_ids: Vec<i64>,
+    /// Tracks that survive album deletion because they also belong to one or more collections.
+    pub album_survivor_track_ids: Vec<i64>,
+    /// Surviving tracks whose primary path will be promoted to a collection copy before deletion.
+    pub promote_paths: Vec<(i64, String)>,
     /// Primary files (tracks.file_path) eligible for deletion.
     pub files_to_delete: Vec<PathBuf>,
     /// Collection-copy paths (collection_tracks.collection_file_path) that
@@ -113,7 +117,12 @@ pub fn plan_delete_tracks(
     for info in &infos {
         plan.track_ids.push(info.track_id);
         if !info.file_path.is_empty() {
-            classify_file(&mut plan, PathBuf::from(&info.file_path), managed_roots, false);
+            classify_file(
+                &mut plan,
+                PathBuf::from(&info.file_path),
+                managed_roots,
+                false,
+            );
         }
         for copy in &info.collection_copies {
             classify_file(&mut plan, PathBuf::from(copy), managed_roots, true);
@@ -147,12 +156,40 @@ pub fn plan_delete_albums(
     let mut album_counts: BTreeMap<i64, u32> = BTreeMap::new();
 
     for info in &infos {
-        plan.track_ids.push(info.track_id);
-        if !info.file_path.is_empty() {
-            classify_file(&mut plan, PathBuf::from(&info.file_path), managed_roots, false);
-        }
-        for copy in &info.collection_copies {
-            classify_file(&mut plan, PathBuf::from(copy), managed_roots, true);
+        if info.collection_count > 0 {
+            // The album is only one of this track's homes. Keep the DB row,
+            // detach it from the album during apply, and preserve collection
+            // memberships. If an organized collection copy exists, promote it
+            // before optionally deleting the album primary file.
+            plan.album_survivor_track_ids.push(info.track_id);
+            if let Some(copy) = info
+                .collection_copies
+                .iter()
+                .find(|copy| Path::new(copy.as_str()).exists())
+            {
+                plan.promote_paths.push((info.track_id, copy.clone()));
+                if !info.file_path.is_empty() && info.file_path != *copy {
+                    classify_file(
+                        &mut plan,
+                        PathBuf::from(&info.file_path),
+                        managed_roots,
+                        false,
+                    );
+                }
+            }
+        } else {
+            // Album-only: deleting the album would make this track homeless.
+            // Remove it from the library by default; file deletion remains an
+            // explicit checkbox in the confirmation UI.
+            plan.track_ids.push(info.track_id);
+            if !info.file_path.is_empty() {
+                classify_file(
+                    &mut plan,
+                    PathBuf::from(&info.file_path),
+                    managed_roots,
+                    false,
+                );
+            }
         }
         if let Some(aid) = info.album_id {
             *album_counts.entry(aid).or_insert(0) += 1;
@@ -233,6 +270,18 @@ pub fn apply_delete_plan(
         }
     }
 
+    // Promote surviving collection tracks before detaching/deleting album rows.
+    // This prevents a surviving track from pointing at an album file that the
+    // user opted to delete when an organized collection copy already exists.
+    for (track_id, new_path) in &plan.promote_paths {
+        let _ = queries::update_track_path(conn, *track_id, new_path);
+    }
+
+    // Detach tracks that survive album deletion through collection membership.
+    for &tid in &plan.album_survivor_track_ids {
+        let _ = queries::clear_track_album(conn, tid);
+    }
+
     // Delete track rows (cascades collection_tracks via FK).
     for &tid in &plan.track_ids {
         if queries::delete_track(conn, tid).is_ok() {
@@ -240,8 +289,7 @@ pub fn apply_delete_plan(
         }
     }
 
-    // Delete album rows after their tracks. With FK=ON, this would error if
-    // tracks were still pointing at the album — but we just deleted them.
+    // Delete album rows after their tracks have either been deleted or detached.
     for &aid in &plan.album_ids {
         if queries::delete_album(conn, aid).is_ok() {
             report.albums_deleted += 1;

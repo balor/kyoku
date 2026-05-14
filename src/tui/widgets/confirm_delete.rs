@@ -90,37 +90,49 @@ impl ConfirmDelete {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let mut content = vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                self.primary.clone(),
-                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
-            )),
-        ];
+        let popup_width = (area.width as u32 * 70 / 100).max(1) as usize;
+        let text_width = popup_width.saturating_sub(4).max(20);
+        let mut content = vec![Line::from("")];
+        push_wrapped_styled(
+            &mut content,
+            "",
+            &self.primary,
+            text_width,
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        );
 
         if let Some(summary) = &self.summary {
             content.push(Line::from(""));
-            content.push(Line::from(Span::styled(
-                summary.clone(),
+            push_wrapped_styled(
+                &mut content,
+                "",
+                summary,
+                text_width,
                 Style::default().fg(theme.fg_dim),
-            )));
+            );
         }
 
         if !self.details.is_empty() {
             content.push(Line::from(""));
             for line in &self.details {
-                content.push(Line::from(Span::styled(
-                    format!("  • {}", line),
+                push_wrapped_styled(
+                    &mut content,
+                    "  • ",
+                    line,
+                    text_width,
                     Style::default().fg(theme.fg_dim),
-                )));
+                );
             }
         }
 
         for warning in &self.warnings {
-            content.push(Line::from(Span::styled(
-                format!("⚠ {}", warning),
+            push_wrapped_styled(
+                &mut content,
+                "⚠ ",
+                warning,
+                text_width,
                 Style::default().fg(theme.yellow),
-            )));
+            );
         }
 
         if self.show_checkbox {
@@ -155,5 +167,49 @@ impl ConfirmDelete {
         // Calculate height: count of lines + 2 for borders
         let height = (content.len() as u16 + 2).min(area.height.saturating_sub(2));
         popup::render_popup(frame, area, theme, &self.title, &content, 70, height);
+    }
+}
+
+fn push_wrapped_styled(
+    content: &mut Vec<Line<'static>>,
+    prefix: &str,
+    text: &str,
+    width: usize,
+    style: Style,
+) {
+    let prefix_width = prefix.chars().count();
+    let continuation_prefix = " ".repeat(prefix_width);
+    let available = width.saturating_sub(prefix_width).max(10);
+    let mut line = String::new();
+    let mut is_first_line = true;
+
+    let push_line = |content: &mut Vec<Line<'static>>, line: &str, is_first_line: bool| {
+        let line_prefix = if is_first_line {
+            prefix
+        } else {
+            &continuation_prefix
+        };
+        content.push(Line::from(Span::styled(
+            format!("{}{}", line_prefix, line),
+            style,
+        )));
+    };
+
+    for word in text.split_whitespace() {
+        let sep = usize::from(!line.is_empty());
+        if line.chars().count() + sep + word.chars().count() > available && !line.is_empty() {
+            push_line(content, &line, is_first_line);
+            is_first_line = false;
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if line.is_empty() {
+        push_line(content, "", is_first_line);
+    } else {
+        push_line(content, &line, is_first_line);
     }
 }

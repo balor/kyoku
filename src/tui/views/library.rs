@@ -128,10 +128,10 @@ impl LibraryView {
                     return LibraryAction::None;
                 }
                 ConfirmAction::Confirm { delete_files } => {
-                    let cleanup = organizer::cleanup_roots(settings);
+                    let file_delete_roots = organizer::file_delete_roots(settings);
                     let plan = plan.clone();
                     self.pending_delete = None;
-                    match pruner::apply_delete_plan(conn, &plan, delete_files, &cleanup) {
+                    match pruner::apply_delete_plan(conn, &plan, delete_files, &file_delete_roots) {
                         Ok(report) => {
                             let mut parts = Vec::new();
                             if report.albums_deleted > 0 {
@@ -281,6 +281,26 @@ impl LibraryView {
         }
 
         if keys::is_delete(&key) {
+            if self.selection.is_empty() && self.selected >= self.albums.len() {
+                match queries::list_loose_track_ids(conn).and_then(|ids| {
+                    let file_delete_roots = organizer::file_delete_roots(settings);
+                    pruner::plan_delete_tracks(conn, &ids, &file_delete_roots)
+                }) {
+                    Ok(plan) => {
+                        if plan.is_empty() {
+                            self.notice = Some("Nothing to delete".to_string());
+                            return LibraryAction::None;
+                        }
+                        let popup = build_loose_confirm(&plan);
+                        self.pending_delete = Some((plan, popup));
+                    }
+                    Err(e) => {
+                        self.notice = Some(format!("Delete plan failed: {}", e));
+                    }
+                }
+                return LibraryAction::None;
+            }
+
             let ids: Vec<i64> = if self.selection.is_empty() {
                 if self.selected < self.albums.len() {
                     vec![self.albums[self.selected].id]
@@ -293,8 +313,8 @@ impl LibraryView {
             if ids.is_empty() {
                 return LibraryAction::None;
             }
-            let cleanup = organizer::cleanup_roots(settings);
-            match pruner::plan_delete_albums(conn, &ids, &cleanup) {
+            let file_delete_roots = organizer::file_delete_roots(settings);
+            match pruner::plan_delete_albums(conn, &ids, &file_delete_roots) {
                 Ok(plan) => {
                     if plan.is_empty() {
                         self.notice = Some("Nothing to delete".to_string());
@@ -560,6 +580,24 @@ fn abbreviate_formats(formats: &str) -> String {
     }
 }
 
+fn build_loose_confirm(plan: &pruner::DeletePlan) -> ConfirmDelete {
+    let primary = format!("Delete {} loose track(s)?", plan.track_ids.len());
+    let summary = format!(
+        "{} file(s) on disk",
+        plan.files_to_delete.len() + plan.collection_copies_to_delete.len()
+    );
+    let mut popup = ConfirmDelete::new("Confirm delete", primary).with_summary(summary);
+    if plan.deletable_file_count() == 0 {
+        popup = popup.without_checkbox();
+    } else {
+        popup = popup.with_checkbox_label(format!(
+            "Also delete {} file(s) from disk",
+            plan.deletable_file_count()
+        ));
+    }
+    popup
+}
+
 fn build_album_confirm(plan: &pruner::DeletePlan, album_count: usize) -> ConfirmDelete {
     let primary = if album_count == 1 {
         "Delete 1 album?".to_string()
@@ -572,15 +610,32 @@ fn build_album_confirm(plan: &pruner::DeletePlan, album_count: usize) -> Confirm
         plan.deletable_file_count(),
     );
     let mut popup = ConfirmDelete::new("Confirm delete", primary).with_summary(summary);
+    if !plan.track_ids.is_empty() {
+        let suffix = if plan.deletable_file_count() > 0 {
+            "; check the box to also delete files"
+        } else {
+            ""
+        };
+        popup = popup.with_warning(format!(
+            "{} track(s) only belong to the selected album(s) and will be removed from the library{}",
+            plan.track_ids.len(), suffix
+        ));
+    }
+    if !plan.album_survivor_track_ids.is_empty() {
+        popup = popup.with_detail(format!(
+            "{} track(s) also in collection(s) will be kept",
+            plan.album_survivor_track_ids.len()
+        ));
+    }
     for line in &plan.album_summary_lines {
         popup = popup.with_detail(line.clone());
     }
     if plan.additional_albums > 0 {
         popup = popup.with_detail(format!("…and {} more album(s)", plan.additional_albums));
     }
-    if !plan.files_outside_managed.is_empty() {
-        popup = popup.with_warning(format!(
-            "{} file(s) outside managed roots will NOT be deleted",
+    if plan.deletable_file_count() > 0 && !plan.files_outside_managed.is_empty() {
+        popup = popup.with_detail(format!(
+            "{} file(s) outside the music directory will be left on disk",
             plan.files_outside_managed.len()
         ));
     }

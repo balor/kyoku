@@ -907,8 +907,8 @@ fn apply_delete_with_files_false_keeps_files_but_cleans_db() {
         "files=false should leave files alone"
     );
     assert_eq!(
-        result.tracks_orphaned_removed, 0,
-        "files=false should not delete orphan tracks"
+        result.tracks_orphaned_removed, 1,
+        "orphan tracks should be removed from the library even when files remain"
     );
     assert!(abs.exists(), "physical file should remain");
     // Collection still gone
@@ -920,13 +920,13 @@ fn apply_delete_with_files_false_keeps_files_but_cleans_db() {
         )
         .unwrap();
     assert_eq!(coll_count, 0);
-    // Track row still present (even though it's now orphaned)
+    // Track row is gone, so deleting a collection does not silently create loose tracks.
     let track_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM tracks WHERE id = ?1", [tid], |r| {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(track_count, 1);
+    assert_eq!(track_count, 0);
 }
 
 // ── remove_empty_parents safety floor ────────────────────────────

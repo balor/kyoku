@@ -192,10 +192,10 @@ impl AlbumDetailView {
                     return DetailAction::None;
                 }
                 ConfirmAction::Confirm { delete_files } => {
-                    let cleanup = organizer::cleanup_roots(settings);
+                    let file_delete_roots = organizer::file_delete_roots(settings);
                     let plan = plan.clone();
                     self.pending_delete = None;
-                    match pruner::apply_delete_plan(conn, &plan, delete_files, &cleanup) {
+                    match pruner::apply_delete_plan(conn, &plan, delete_files, &file_delete_roots) {
                         Ok(report) => {
                             let mut parts = Vec::new();
                             if report.tracks_deleted > 0 {
@@ -407,8 +407,8 @@ impl AlbumDetailView {
             if ids.is_empty() {
                 return DetailAction::None;
             }
-            let cleanup = organizer::cleanup_roots(settings);
-            match pruner::plan_delete_tracks(conn, &ids, &cleanup) {
+            let file_delete_roots = organizer::file_delete_roots(settings);
+            match pruner::plan_delete_tracks(conn, &ids, &file_delete_roots) {
                 Ok(plan) => {
                     if plan.is_empty() {
                         self.notice =
@@ -1130,9 +1130,9 @@ fn build_track_confirm(plan: &pruner::DeletePlan) -> ConfirmDelete {
             plan.collection_copies_to_delete.len()
         ));
     }
-    if !plan.files_outside_managed.is_empty() {
-        popup = popup.with_warning(format!(
-            "{} file(s) outside managed roots will NOT be deleted",
+    if plan.deletable_file_count() > 0 && !plan.files_outside_managed.is_empty() {
+        popup = popup.with_detail(format!(
+            "{} file(s) outside the music directory will be left on disk",
             plan.files_outside_managed.len()
         ));
     }

@@ -687,10 +687,19 @@ pub struct DeleteCollectionResult {
 
 /// Plan a collection deletion. Classifies files (inside/outside music_dir)
 /// and identifies tracks that would be orphaned (no other home).
+#[allow(dead_code)]
 pub fn plan_delete_collection(
     conn: &Connection,
     collection_id: i64,
     music_dir: &Path,
+) -> Result<DeleteCollectionPlan> {
+    plan_delete_collection_with_roots(conn, collection_id, &[music_dir.to_path_buf()])
+}
+
+pub fn plan_delete_collection_with_roots(
+    conn: &Connection,
+    collection_id: i64,
+    managed_roots: &[PathBuf],
 ) -> Result<DeleteCollectionPlan> {
     let homes = queries::get_collection_tracks_with_other_homes(conn, collection_id)?;
     let collection_name: String = conn
@@ -710,17 +719,30 @@ pub fn plan_delete_collection(
         // Classify the collection file path (if any)
         if let Some(coll_path) = &h.collection_file_path {
             let p = PathBuf::from(coll_path);
-            if p.starts_with(music_dir) {
+            if path_is_in_roots(&p, managed_roots) {
                 files_to_delete.push(p);
             } else {
                 files_outside_music_dir.push(p);
             }
         }
 
-        // Determine if this track has any other home
+        // Determine if this track has any other home. If not, deleting the
+        // collection removes the track from the library by default; optional
+        // file deletion should include its primary file too, even when no
+        // organized collection copy exists yet.
         let has_other_home = h.has_album || h.other_collection_count > 0;
         if !has_other_home {
             orphaned_track_ids.push(h.track_id);
+            if !h.track_file_path.is_empty()
+                && h.collection_file_path.as_deref() != Some(h.track_file_path.as_str())
+            {
+                let p = PathBuf::from(&h.track_file_path);
+                if path_is_in_roots(&p, managed_roots) {
+                    files_to_delete.push(p);
+                } else {
+                    files_outside_music_dir.push(p);
+                }
+            }
             continue;
         }
 
@@ -769,13 +791,24 @@ fn find_other_collection_path(
     Ok(path)
 }
 
-/// Execute a collection deletion plan. If `delete_files` is true, also removes
-/// the physical files inside `music_dir` and any orphaned track DB rows.
+/// Execute a collection deletion plan. Orphaned tracks are removed from the
+/// library by default so deleting a collection never silently creates loose
+/// tracks. If `delete_files` is true, also removes eligible physical files.
+#[allow(dead_code)]
 pub fn apply_delete_collection(
     conn: &Connection,
     plan: &DeleteCollectionPlan,
     delete_files: bool,
     music_dir: &Path,
+) -> Result<DeleteCollectionResult> {
+    apply_delete_collection_with_roots(conn, plan, delete_files, &[music_dir.to_path_buf()])
+}
+
+pub fn apply_delete_collection_with_roots(
+    conn: &Connection,
+    plan: &DeleteCollectionPlan,
+    delete_files: bool,
+    cleanup_roots: &[PathBuf],
 ) -> Result<DeleteCollectionResult> {
     let mut result = DeleteCollectionResult::default();
     let mut emptied_dirs: Vec<PathBuf> = Vec::new();
@@ -784,6 +817,9 @@ pub fn apply_delete_collection(
         // Delete physical files (only those inside music_dir)
         for p in &plan.files_to_delete {
             if !p.exists() {
+                continue;
+            }
+            if !path_is_in_roots(p, cleanup_roots) {
                 continue;
             }
             match std::fs::remove_file(p) {
@@ -806,12 +842,10 @@ pub fn apply_delete_collection(
         queries::update_track_path(conn, *track_id, new_path)?;
     }
 
-    // Delete orphaned tracks entirely if user opted in.
-    if delete_files {
-        for &track_id in &plan.orphaned_track_ids {
-            queries::delete_track(conn, track_id)?;
-            result.tracks_orphaned_removed += 1;
-        }
+    // Delete orphaned tracks entirely so they do not silently become loose.
+    for &track_id in &plan.orphaned_track_ids {
+        queries::delete_track(conn, track_id)?;
+        result.tracks_orphaned_removed += 1;
     }
 
     // Finally, drop the collection (cascade removes collection_tracks rows)
@@ -822,19 +856,31 @@ pub fn apply_delete_collection(
         emptied_dirs.sort();
         emptied_dirs.dedup();
         emptied_dirs.reverse();
-        let roots = [music_dir.to_path_buf()];
         for dir in &emptied_dirs {
-            result.dirs_cleaned += remove_empty_parents(dir, &roots);
+            result.dirs_cleaned += remove_empty_parents(dir, cleanup_roots);
         }
     }
 
     Ok(result)
 }
 
+fn path_is_in_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .any(|root| path.starts_with(root) && path != root.as_path())
+}
+
+/// Directory roots where Kyoku may delete tracked music files on explicit
+/// user confirmation. This is intentionally narrower than `cleanup_roots`:
+/// import/inbox folders are staging areas and should not make files outside
+/// the library eligible for the destructive "delete from disk" option.
+pub fn file_delete_roots(settings: &Settings) -> Vec<PathBuf> {
+    vec![settings.library.music_dir.clone()]
+}
+
 /// Managed directory roots for directory-cleanup safety: music_dir plus any
-/// configured inbox dirs. `apply_organize` / `apply_delete_collection` use
-/// these as a whitelist when sweeping empty parents — nothing outside this
-/// set is ever touched.
+/// configured inbox dirs. `apply_organize` uses these as a whitelist when
+/// sweeping empty parents — nothing outside this set is ever touched.
 pub fn cleanup_roots(settings: &Settings) -> Vec<PathBuf> {
     let mut roots = Vec::with_capacity(1 + settings.library.inbox_dirs.len());
     roots.push(settings.library.music_dir.clone());

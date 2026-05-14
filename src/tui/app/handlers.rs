@@ -202,9 +202,7 @@ impl App {
             self.switch_view(AppView::Library);
             return AppAction::None;
         }
-        let action =
-            self.collections
-                .handle_key(key, &self.conn, &self.settings.library.music_dir);
+        let action = self.collections.handle_key(key, &self.conn, &self.settings);
         match action {
             crate::tui::views::collections::CollectionsAction::None => AppAction::None,
             crate::tui::views::collections::CollectionsAction::OpenCollection(id) => {
