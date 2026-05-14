@@ -143,12 +143,7 @@ impl ImportView {
             if keys::is_confirm(&key) {
                 let raw = input.value.trim().to_string();
                 // Accept a full URL or just the UUID
-                let mbid = raw
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&raw)
-                    .trim()
-                    .to_string();
+                let mbid = raw.rsplit('/').next().unwrap_or(&raw).trim().to_string();
                 if !mbid.is_empty() {
                     self.fetch_mbid(mbid);
                 }
@@ -230,11 +225,12 @@ impl ImportView {
             KeyCode::Char(c @ '1'..='9') => {
                 let idx = (c as u8 - b'1') as usize;
                 if let Some(group) = self.groups.get_mut(self.current_group)
-                    && idx < group.mb_candidates.len() {
-                        group.selected_candidate = Some(idx);
-                        group.action = GroupAction::AcceptMb;
-                        group.user_decided = true;
-                    }
+                    && idx < group.mb_candidates.len()
+                {
+                    group.selected_candidate = Some(idx);
+                    group.action = GroupAction::AcceptMb;
+                    group.user_decided = true;
+                }
                 self.ensure_full_release_for_group(self.current_group);
             }
             // 0 deselects MB candidate (back to as-is)
@@ -248,27 +244,29 @@ impl ImportView {
             // Up/down arrows cycle through MB candidates
             KeyCode::Up => {
                 if let Some(group) = self.groups.get_mut(self.current_group)
-                    && !group.mb_candidates.is_empty() {
-                        let current = group.selected_candidate.unwrap_or(0);
-                        if current > 0 {
-                            group.selected_candidate = Some(current - 1);
-                            group.action = GroupAction::AcceptMb;
-                            group.user_decided = true;
-                        }
+                    && !group.mb_candidates.is_empty()
+                {
+                    let current = group.selected_candidate.unwrap_or(0);
+                    if current > 0 {
+                        group.selected_candidate = Some(current - 1);
+                        group.action = GroupAction::AcceptMb;
+                        group.user_decided = true;
                     }
+                }
                 self.ensure_full_release_for_group(self.current_group);
             }
             KeyCode::Down => {
                 if let Some(group) = self.groups.get_mut(self.current_group)
-                    && !group.mb_candidates.is_empty() {
-                        let current = group.selected_candidate.unwrap_or(0);
-                        let max = group.mb_candidates.len() - 1;
-                        if current < max {
-                            group.selected_candidate = Some(current + 1);
-                            group.action = GroupAction::AcceptMb;
-                            group.user_decided = true;
-                        }
+                    && !group.mb_candidates.is_empty()
+                {
+                    let current = group.selected_candidate.unwrap_or(0);
+                    let max = group.mb_candidates.len() - 1;
+                    if current < max {
+                        group.selected_candidate = Some(current + 1);
+                        group.action = GroupAction::AcceptMb;
+                        group.user_decided = true;
                     }
+                }
                 self.ensure_full_release_for_group(self.current_group);
             }
             KeyCode::Char('c') => {
@@ -291,10 +289,8 @@ impl ImportView {
             }
             KeyCode::Char('m') => {
                 // Open manual MBID input
-                let mut input = TextInput::new(
-                    "Paste release MBID or URL...",
-                )
-                .with_label(" MBID: ");
+                let mut input =
+                    TextInput::new("Paste release MBID or URL...").with_label(" MBID: ");
                 input.focused = true;
                 self.mbid_input = Some(input);
             }
@@ -370,30 +366,30 @@ impl ImportView {
         let idx = self.current_group;
 
         // Get local data for scoring
-        let (artist, album, year, track_count, titles, total_ms) =
-            if let Some(group) = self.groups.get(idx) {
-                let first_tag = group.tracks.first().and_then(|(_, td)| td.as_ref());
-                let artist = first_tag
-                    .and_then(|td| td.album_artist.as_deref().or(td.artist.as_deref()))
-                    .unwrap_or("")
-                    .to_string();
-                let album = first_tag
-                    .and_then(|td| td.album.as_deref())
-                    .unwrap_or(&group.name)
-                    .to_string();
-                let year = first_tag.and_then(|td| td.year.map(|y| y as i32));
-                let tc = group.tracks.len() as u32;
-                let titles: Vec<String> =
-                    group.tracks.iter().map(|(t, _)| t.title.clone()).collect();
-                let ms: u64 = group
-                    .tracks
-                    .iter()
-                    .map(|(t, _)| t.duration_ms.unwrap_or(0))
-                    .sum();
-                (artist, album, year, tc, titles, ms)
-            } else {
-                return;
-            };
+        let (artist, album, year, track_count, titles, total_ms) = if let Some(group) =
+            self.groups.get(idx)
+        {
+            let first_tag = group.tracks.first().and_then(|(_, td)| td.as_ref());
+            let artist = first_tag
+                .and_then(|td| td.album_artist.as_deref().or(td.artist.as_deref()))
+                .unwrap_or("")
+                .to_string();
+            let album = first_tag
+                .and_then(|td| td.album.as_deref())
+                .unwrap_or(&group.name)
+                .to_string();
+            let year = first_tag.and_then(|td| td.year.map(|y| y as i32));
+            let tc = group.tracks.len() as u32;
+            let titles: Vec<String> = group.tracks.iter().map(|(t, _)| t.title.clone()).collect();
+            let ms: u64 = group
+                .tracks
+                .iter()
+                .map(|(t, _)| t.duration_ms.unwrap_or(0))
+                .sum();
+            (artist, album, year, tc, titles, ms)
+        } else {
+            return;
+        };
 
         let (tx, rx) = mpsc::channel();
         self.mbid_fetch_rx = Some(rx);
@@ -488,8 +484,11 @@ impl ImportView {
         std::thread::spawn(move || {
             let all_files = unimported;
             let total = all_files.len();
-            let mut groups: std::collections::HashMap<String, Vec<(crate::db::models::Track, Option<tagger::TagData>)>> =
-                std::collections::HashMap::new();
+            let mut groups: std::collections::HashMap<
+                String,
+                Vec<(crate::db::models::Track, Option<tagger::TagData>)>,
+            > = std::collections::HashMap::new();
+            let mut group_order: Vec<String> = Vec::new();
 
             for (i, file_path) in all_files.iter().enumerate() {
                 let _ = tx.send(ScanMessage::Progress(i + 1, total));
@@ -497,39 +496,38 @@ impl ImportView {
                 let abs_path =
                     std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.clone());
 
-                match tagger::read_track(&abs_path) {
-                    Ok(mut track) => {
-                        track.file_path = abs_path;
-                        let tag_data = tagger::read_tags(file_path).ok();
+                if let Ok(mut track) = tagger::read_track(&abs_path) {
+                    track.file_path = abs_path;
+                    let tag_data = tagger::read_tags(file_path).ok();
 
-                        // Group by source directory
-                        let group_key = track
-                            .source_dir
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|| "Unknown".to_string());
+                    // Group by source directory
+                    let group_key = track
+                        .source_dir
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "Unknown".to_string());
 
-                        groups
-                            .entry(group_key)
-                            .or_default()
-                            .push((track, tag_data));
+                    if !groups.contains_key(&group_key) {
+                        group_order.push(group_key.clone());
                     }
-                    Err(_) => {} // skip errors during scan
+                    groups.entry(group_key).or_default().push((track, tag_data));
                 }
             }
 
-            let import_groups: Vec<ImportGroup> = groups
+            let import_groups: Vec<ImportGroup> = group_order
                 .into_iter()
-                .map(|(name, tracks)| ImportGroup {
-                    name,
-                    tracks,
-                    action: GroupAction::AcceptAsIs,
-                    mb_candidates: Vec::new(),
-                    selected_candidate: None,
-                    mb_state: MbMatchState::NotStarted,
-                    target_collection: String::new(),
-                    full_release_fetching: false,
-                    user_decided: false,
+                .filter_map(|name| {
+                    groups.remove(&name).map(|tracks| ImportGroup {
+                        name,
+                        tracks,
+                        action: GroupAction::AcceptAsIs,
+                        mb_candidates: Vec::new(),
+                        selected_candidate: None,
+                        mb_state: MbMatchState::NotStarted,
+                        target_collection: String::new(),
+                        full_release_fetching: false,
+                        user_decided: false,
+                    })
                 })
                 .collect();
 
@@ -585,35 +583,34 @@ impl ImportView {
             // the client's throttler serializes requests across prefetches.
             let mut client = client.lock().unwrap();
             let mut search_error: Option<String> = None;
-            let mut candidates: Vec<MbCandidate> = match client
-                .search_releases(&artist, &album, track_count, limit)
-            {
-                Ok(releases) => releases
-                    .into_iter()
-                    .map(|r| {
-                        let score = matching::score_release(
-                            &artist,
-                            &album,
-                            year,
-                            track_count,
-                            &titles,
-                            total_ms,
-                            &r,
+            let mut candidates: Vec<MbCandidate> =
+                match client.search_releases(&artist, &album, track_count, limit) {
+                    Ok(releases) => releases
+                        .into_iter()
+                        .map(|r| {
+                            let score = matching::score_release(
+                                &artist,
+                                &album,
+                                year,
+                                track_count,
+                                &titles,
+                                total_ms,
+                                &r,
+                            );
+                            MbCandidate { release: r, score }
+                        })
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!(
+                            "MB search_releases(artist={:?}, album={:?}) failed: {}",
+                            artist,
+                            album,
+                            e
                         );
-                        MbCandidate { release: r, score }
-                    })
-                    .collect(),
-                Err(e) => {
-                    tracing::warn!(
-                        "MB search_releases(artist={:?}, album={:?}) failed: {}",
-                        artist,
-                        album,
-                        e
-                    );
-                    search_error = Some(short_mb_error(&e.to_string()));
-                    Vec::new()
-                }
-            };
+                        search_error = Some(short_mb_error(&e.to_string()));
+                        Vec::new()
+                    }
+                };
 
             // Initial sort by coarse score
             candidates.sort_by(|a, b| {
@@ -634,8 +631,7 @@ impl ImportView {
             // threshold) or a large gap to #2. Saves ~1.1s per refetch.
             let leader_score = candidates.first().map(|c| c.score.total).unwrap_or(0.0);
             let runner_up = candidates.get(1).map(|c| c.score.total).unwrap_or(0.0);
-            let leader_is_obvious =
-                leader_score >= 0.85 || (leader_score - runner_up) >= 0.15;
+            let leader_is_obvious = leader_score >= 0.85 || (leader_score - runner_up) >= 0.15;
 
             if !leader_is_obvious {
                 let tied_count = candidates
@@ -889,7 +885,9 @@ impl ImportView {
 /// conflicts default to "keep what's already there" (no destructive op);
 /// intra-batch conflicts default to "keep the first" (the later one is
 /// dropped). User can override with 1/2/S before confirming.
-fn default_decision_for(conflict: &super::dup_detect::Conflict) -> super::dup_detect::ConflictDecision {
+fn default_decision_for(
+    conflict: &super::dup_detect::Conflict,
+) -> super::dup_detect::ConflictDecision {
     use super::dup_detect::{ConflictDecision, DupOther};
     match conflict.other {
         DupOther::Library(_) => ConflictDecision::KeepOther,

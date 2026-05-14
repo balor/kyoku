@@ -29,13 +29,8 @@ pub enum PopupAction {
 }
 
 impl AddToCollectionPopup {
-    pub fn open(
-        track_ids: Vec<i64>,
-        display_name: String,
-        conn: &Connection,
-    ) -> Self {
-        let mut input =
-            TextInput::new("Collection name (new or existing)...").with_label(" + ");
+    pub fn open(track_ids: Vec<i64>, display_name: String, conn: &Connection) -> Self {
+        let mut input = TextInput::new("Collection name (new or existing)...").with_label(" + ");
         input.focused = true;
         Self {
             input,
@@ -95,15 +90,9 @@ impl AddToCollectionPopup {
             }
         };
 
-        let mut added = 0u32;
-        let mut skipped = 0u32;
-        for track_id in &self.track_ids {
-            match queries::add_track_to_collection(conn, coll_id, *track_id) {
-                Ok(true) => added += 1,
-                Ok(false) => skipped += 1,
-                Err(_) => {}
-            }
-        }
+        let added =
+            queries::add_tracks_to_collection_ordered(conn, coll_id, &self.track_ids).unwrap_or(0);
+        let skipped = self.track_ids.len().saturating_sub(added as usize) as u32;
 
         if self.track_ids.len() == 1 {
             if added > 0 {
@@ -159,7 +148,10 @@ impl AddToCollectionPopup {
                 " Enter to create new collection".to_string()
             }
         } else {
-            format!(" {} match(es) — j/k to select, Enter to add", filtered.len())
+            format!(
+                " {} match(es) — j/k to select, Enter to add",
+                filtered.len()
+            )
         };
         let p = Paragraph::new(Span::styled(hint, Style::default().fg(theme.fg_muted)));
         frame.render_widget(p, chunks[1]);

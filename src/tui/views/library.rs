@@ -3,10 +3,8 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
-use ratatui::widgets::{Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use rusqlite::Connection;
-
-use unicode_width::UnicodeWidthStr;
 
 use crate::config::Settings;
 use crate::core::{organizer, pruner};
@@ -17,6 +15,7 @@ use crate::tui::selection::Selection;
 use crate::tui::themes::Theme;
 use crate::tui::widgets::add_to_collection::{AddToCollectionPopup, PopupAction};
 use crate::tui::widgets::confirm_delete::{ConfirmAction, ConfirmDelete};
+use crate::tui::widgets::track_table;
 
 pub enum LibraryAction {
     None,
@@ -79,13 +78,14 @@ impl LibraryView {
         self.selection.clear();
         self.pending_delete = None;
         if let Some(query) = search
-            && !query.is_empty() {
-                self.albums = queries::search_albums(conn, query, 500)?;
-                self.total_albums = self.albums.len();
-                self.loose_count = 0;
-                self.clamp_selection();
-                return Ok(());
-            }
+            && !query.is_empty()
+        {
+            self.albums = queries::search_albums(conn, query, 500)?;
+            self.total_albums = self.albums.len();
+            self.loose_count = 0;
+            self.clamp_selection();
+            return Ok(());
+        }
         self.albums = queries::list_albums(conn, self.sort, self.sort_ascending, 0, 500)?;
         self.total_albums = self.albums.len();
         self.loose_count = queries::count_loose_tracks(conn)?;
@@ -95,11 +95,7 @@ impl LibraryView {
 
     fn item_count(&self) -> usize {
         let base = self.albums.len();
-        if self.loose_count > 0 {
-            base + 1
-        } else {
-            base
-        }
+        if self.loose_count > 0 { base + 1 } else { base }
     }
 
     fn clamp_selection(&mut self) {
@@ -217,9 +213,10 @@ impl LibraryView {
                 PopupAction::Closed(notice) => {
                     self.add_to_collection = None;
                     if let Some(n) = notice
-                        && !n.is_empty() {
-                            self.notice = Some(n);
-                        }
+                        && !n.is_empty()
+                    {
+                        self.notice = Some(n);
+                    }
                 }
             }
             return LibraryAction::None;
@@ -351,13 +348,12 @@ impl LibraryView {
             if self.selected < self.albums.len() {
                 let album = &self.albums[self.selected];
                 if let Ok(tracks) = queries::get_album_tracks(conn, album.id)
-                    && !tracks.is_empty() {
-                        let ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
-                        let display =
-                            format!("{} ({} tracks)", album.title, tracks.len());
-                        self.add_to_collection =
-                            Some(AddToCollectionPopup::open(ids, display, conn));
-                    }
+                    && !tracks.is_empty()
+                {
+                    let ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
+                    let display = format!("{} ({} tracks)", album.title, tracks.len());
+                    self.add_to_collection = Some(AddToCollectionPopup::open(ids, display, conn));
+                }
             }
             return LibraryAction::None;
         }
@@ -373,17 +369,15 @@ impl LibraryView {
             let x = area.x + area.width.saturating_sub(line_w) / 2;
             let w = line_w.min(area.width);
             let centered = Rect::new(x, y, w, 1);
-            let msg = Paragraph::new(Span::styled(
-                text,
-                Style::default().fg(theme.fg_muted),
-            ))
-            .alignment(Alignment::Center)
-            .style(Style::default().bg(theme.bg));
+            let msg = Paragraph::new(Span::styled(text, Style::default().fg(theme.fg_muted)))
+                .alignment(Alignment::Center)
+                .style(Style::default().bg(theme.bg));
             frame.render_widget(msg, centered);
             return;
         }
 
-        let visible_height = area.height.saturating_sub(1) as usize; // -1 for header
+        // Top border separates the search bar from the table header.
+        let visible_height = area.height.saturating_sub(2) as usize; // -1 border, -1 header
 
         // Symmetric scrolloff = 1: keep 1 row visible above and below the
         // cursor whenever there's content to show in those slots. Persist
@@ -402,10 +396,7 @@ impl LibraryView {
             let row = if i < self.albums.len() {
                 let album = &self.albums[i];
                 let artist = album.album_artist.as_deref().unwrap_or("(unknown)");
-                let year = album
-                    .year
-                    .map(|y| y.to_string())
-                    .unwrap_or_default();
+                let year = album.year.map(|y| y.to_string()).unwrap_or_default();
                 let fmt = abbreviate_formats(&album.formats);
                 let gutter_span = if self.selection.contains(album.id) {
                     Span::styled("▎", Style::default().fg(theme.accent))
@@ -415,42 +406,28 @@ impl LibraryView {
 
                 Row::new(vec![
                     Cell::from(gutter_span),
-                    Cell::from(truncate_str(artist, 24)),
-                    Cell::from(truncate_str(&album.title, 30)),
-                    Cell::from(year),
-                    Cell::from(format!("{:>6}", album.track_count)),
+                    Cell::from(artist.to_string()),
+                    Cell::from(album.title.clone()),
+                    track_table::year_cell(year),
+                    track_table::count_cell(album.track_count),
                     Cell::from(fmt),
                 ])
             } else {
                 // [loose] entry
                 Row::new(vec![
                     Cell::from(" "),
-                    Cell::from(Span::styled(
-                        "[loose]",
-                        Style::default().fg(theme.fg_muted),
-                    )),
+                    Cell::from(Span::styled("[loose]", Style::default().fg(theme.fg_muted))),
                     Cell::from(Span::styled(
                         format!("{} unalbumed tracks", self.loose_count),
                         Style::default().fg(theme.fg_muted),
                     )),
-                    Cell::from(""),
-                    Cell::from(format!("{:>6}", self.loose_count)),
+                    track_table::year_cell(""),
+                    track_table::count_cell(self.loose_count),
                     Cell::from("mix"),
                 ])
             };
 
-            let style = if is_selected {
-                Style::default()
-                    .bg(theme.bg_selected)
-                    .fg(theme.fg)
-                    .add_modifier(Modifier::BOLD)
-            } else if i % 2 == 0 {
-                Style::default().bg(theme.bg).fg(theme.fg)
-            } else {
-                Style::default().bg(theme.bg_alt).fg(theme.fg)
-            };
-
-            rows.push(row.style(style));
+            rows.push(row.style(track_table::row_style(theme, i, is_selected)));
         }
 
         // Mark the active sort column directly in its header instead of
@@ -459,19 +436,24 @@ impl LibraryView {
         let arrow = if self.sort_ascending { "▲" } else { "▼" };
         let header_cell = |label: &str, sort_for: Option<AlbumSort>| {
             let active = sort_for == Some(self.sort);
-            if active {
-                Cell::from(Span::styled(
-                    format!("{} {}", label, arrow),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                ))
+            let text = if active {
+                format!("{} {}", label, arrow)
             } else {
-                Cell::from(Span::styled(
-                    label.to_string(),
-                    Style::default().fg(theme.accent),
-                ))
-            }
+                label.to_string()
+            };
+            let text = match sort_for {
+                Some(AlbumSort::Year) => format!("{:>6}", text),
+                Some(AlbumSort::TrackCount) => format!("{:>8}", text),
+                _ => text,
+            };
+            let style = if active {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(theme.accent)
+            };
+            Cell::from(Span::styled(text, style))
         };
         let header = Row::new(vec![
             Cell::from(" "),
@@ -484,18 +466,13 @@ impl LibraryView {
         .style(Style::default().add_modifier(Modifier::BOLD))
         .bottom_margin(0);
 
-        let table = Table::new(
-            rows,
-            [
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Percentage(25),
-                ratatui::layout::Constraint::Percentage(30),
-                ratatui::layout::Constraint::Length(6),
-                ratatui::layout::Constraint::Length(8),
-                ratatui::layout::Constraint::Length(6),
-            ],
-        )
-        .header(header);
+        let table = Table::new(rows, track_table::album_list_widths())
+            .header(header)
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(theme.border)),
+            );
 
         frame.render_widget(table, area);
 
@@ -554,10 +531,7 @@ impl LibraryView {
         if self.selected < self.albums.len() {
             let album = &self.albums[self.selected];
             let artist = album.album_artist.as_deref().unwrap_or("(unknown)");
-            let year = album
-                .year
-                .map(|y| format!(" ({})", y))
-                .unwrap_or_default();
+            let year = album.year.map(|y| format!(" ({})", y)).unwrap_or_default();
             let fmt = abbreviate_formats(&album.formats);
             let duration = format_duration_ms(album.total_duration_ms);
 
@@ -574,26 +548,6 @@ impl LibraryView {
                 .style(Style::default().bg(theme.bg_alt));
             frame.render_widget(p, area);
         }
-    }
-}
-
-fn truncate_str(s: &str, max_width: usize) -> String {
-    let width = s.width();
-    if width <= max_width {
-        s.to_string()
-    } else {
-        let mut result = String::new();
-        let mut w = 0;
-        for c in s.chars() {
-            let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-            if w + cw > max_width.saturating_sub(1) {
-                result.push('…');
-                break;
-            }
-            result.push(c);
-            w += cw;
-        }
-        result
     }
 }
 

@@ -65,12 +65,7 @@ fn add_album_track(
 }
 
 /// Insert a loose track at `src_path` (touched on disk). No album row.
-fn add_loose_track(
-    conn: &Connection,
-    src_path: PathBuf,
-    artist: &str,
-    title: &str,
-) -> i64 {
+fn add_loose_track(conn: &Connection, src_path: PathBuf, artist: &str, title: &str) -> i64 {
     touch(&src_path);
     let track = make_track_struct(src_path, None, title, artist, 1);
     queries::insert_track(conn, &track, None, None).unwrap()
@@ -106,7 +101,15 @@ fn fresh_world() -> (TempDir, PathBuf, PathBuf, Connection) {
 #[test]
 fn plan_album_track_uses_single_disc_template_when_disc_total_is_1() {
     let (_tmp, src, music, conn) = fresh_world();
-    add_album_track(&conn, src.join("song.mp3"), "Artist", "Album", 3, "Song", Some(2024));
+    add_album_track(
+        &conn,
+        src.join("song.mp3"),
+        "Artist",
+        "Album",
+        3,
+        "Song",
+        Some(2024),
+    );
 
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
@@ -132,7 +135,11 @@ fn plan_album_track_uses_multi_disc_template_when_disc_total_gt_1() {
     );
     // Mark the album as multi-disc (track stays on disc 1, see make_track_struct)
     let album_id: i64 = conn
-        .query_row("SELECT album_id FROM tracks WHERE id = ?1", [track_id], |r| r.get(0))
+        .query_row(
+            "SELECT album_id FROM tracks WHERE id = ?1",
+            [track_id],
+            |r| r.get(0),
+        )
         .unwrap();
     set_album_disc_total(&conn, album_id, 2);
 
@@ -149,7 +156,15 @@ fn plan_album_track_uses_multi_disc_template_when_disc_total_gt_1() {
 #[test]
 fn plan_album_track_in_one_collection_emits_one_copy() {
     let (_tmp, src, music, conn) = fresh_world();
-    let tid = add_album_track(&conn, src.join("song.mp3"), "Artist", "Album", 1, "Song", Some(2024));
+    let tid = add_album_track(
+        &conn,
+        src.join("song.mp3"),
+        "Artist",
+        "Album",
+        1,
+        "Song",
+        Some(2024),
+    );
     ensure_collection(&conn, "Mix", tid);
 
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
@@ -158,16 +173,61 @@ fn plan_album_track_in_one_collection_emits_one_copy() {
     assert_eq!(plan.copies.len(), 1, "one collection copy expected");
     assert_eq!(plan.copies[0].collection_name, "Mix");
     assert!(
-        plan.copies[0].to.starts_with(music.join("Collections/Mix/")),
+        plan.copies[0]
+            .to
+            .starts_with(music.join("Collections/Mix/")),
         "copy target should land under Collections/Mix/, got {:?}",
         plan.copies[0].to
     );
 }
 
 #[test]
+fn plan_collection_copy_uses_collection_position_not_track_number() {
+    let (_tmp, src, music, conn) = fresh_world();
+    let late = add_album_track(
+        &conn,
+        src.join("late.mp3"),
+        "Artist",
+        "Album",
+        7,
+        "Late",
+        Some(2024),
+    );
+    let early = add_album_track(
+        &conn,
+        src.join("early.mp3"),
+        "Artist",
+        "Album",
+        2,
+        "Early",
+        Some(2024),
+    );
+    let (coll_id, _) = queries::get_or_create_collection(&conn, "Mix").unwrap();
+    queries::add_tracks_to_collection_ordered(&conn, coll_id, &[late, early]).unwrap();
+
+    let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
+
+    let targets: Vec<PathBuf> = plan.copies.iter().map(|c| c.to.clone()).collect();
+    assert!(
+        targets.contains(&music.join("Collections/Mix/01 Artist - Late.mp3")),
+        "collection templates should use collection position; got {:?}",
+        targets,
+    );
+    assert!(targets.contains(&music.join("Collections/Mix/02 Artist - Early.mp3")));
+}
+
+#[test]
 fn plan_album_track_in_two_collections_emits_two_copies() {
     let (_tmp, src, music, conn) = fresh_world();
-    let tid = add_album_track(&conn, src.join("song.mp3"), "Artist", "Album", 1, "Song", Some(2024));
+    let tid = add_album_track(
+        &conn,
+        src.join("song.mp3"),
+        "Artist",
+        "Album",
+        1,
+        "Song",
+        Some(2024),
+    );
     ensure_collection(&conn, "Mix", tid);
     ensure_collection(&conn, "Workout", tid);
 
@@ -175,7 +235,11 @@ fn plan_album_track_in_two_collections_emits_two_copies() {
 
     assert_eq!(plan.moves.len(), 1);
     assert_eq!(plan.copies.len(), 2);
-    let mut names: Vec<&str> = plan.copies.iter().map(|c| c.collection_name.as_str()).collect();
+    let mut names: Vec<&str> = plan
+        .copies
+        .iter()
+        .map(|c| c.collection_name.as_str())
+        .collect();
     names.sort();
     assert_eq!(names, vec!["Mix", "Workout"]);
 }
@@ -202,7 +266,11 @@ fn plan_loose_track_in_one_collection_moves_to_collection_folder() {
 
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    assert_eq!(plan.moves.len(), 1, "loose-in-one-collection moves, doesn't copy");
+    assert_eq!(
+        plan.moves.len(),
+        1,
+        "loose-in-one-collection moves, doesn't copy"
+    );
     assert!(plan.copies.is_empty());
     assert!(plan.moves[0].to.starts_with(music.join("Collections/Mix/")));
     assert_eq!(
@@ -249,8 +317,24 @@ fn plan_disambiguates_filename_collision_with_numeric_suffix() {
     let (_tmp, src, music, conn) = fresh_world();
     // Two distinct tracks rendering to the same target path: same artist, same
     // album, same track number, same title — different source files.
-    add_album_track(&conn, src.join("a/song.mp3"), "Artist", "Album", 1, "Song", Some(2024));
-    add_album_track(&conn, src.join("b/song.mp3"), "Artist", "Album", 1, "Song", Some(2024));
+    add_album_track(
+        &conn,
+        src.join("a/song.mp3"),
+        "Artist",
+        "Album",
+        1,
+        "Song",
+        Some(2024),
+    );
+    add_album_track(
+        &conn,
+        src.join("b/song.mp3"),
+        "Artist",
+        "Album",
+        1,
+        "Song",
+        Some(2024),
+    );
 
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
@@ -308,10 +392,15 @@ fn apply_move_relocates_file_and_updates_db_path() {
     assert!(result.errors.is_empty());
     let target = music.join("Artist/Album (2024)/01 Song.mp3");
     assert!(target.exists(), "target file should exist after move");
-    assert!(!src.join("song.mp3").exists(), "source should be gone after move");
+    assert!(
+        !src.join("song.mp3").exists(),
+        "source should be gone after move"
+    );
 
     let new_path: String = conn
-        .query_row("SELECT file_path FROM tracks WHERE id = ?1", [tid], |r| r.get(0))
+        .query_row("SELECT file_path FROM tracks WHERE id = ?1", [tid], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(PathBuf::from(new_path), target);
 }
@@ -343,7 +432,10 @@ fn apply_copy_creates_collection_file_and_updates_collection_tracks_path() {
         )
         .unwrap();
     let coll_path = coll_path.expect("collection_file_path should be set after copy");
-    assert!(PathBuf::from(&coll_path).exists(), "collection copy should exist on disk");
+    assert!(
+        PathBuf::from(&coll_path).exists(),
+        "collection copy should exist on disk"
+    );
     assert!(coll_path.contains("Collections/Mix/"));
 }
 
@@ -357,10 +449,15 @@ fn apply_move_with_also_collection_updates_both_tracks_and_collection_tracks() {
 
     let result = apply_organize(&conn, &plan, "move", &[music.clone(), src.clone()]).unwrap();
     assert_eq!(result.moved, 1);
-    assert_eq!(result.copied, 0, "no separate copy expected — the move is the copy");
+    assert_eq!(
+        result.copied, 0,
+        "no separate copy expected — the move is the copy"
+    );
 
     let track_path: String = conn
-        .query_row("SELECT file_path FROM tracks WHERE id = ?1", [tid], |r| r.get(0))
+        .query_row("SELECT file_path FROM tracks WHERE id = ?1", [tid], |r| {
+            r.get(0)
+        })
         .unwrap();
     let coll_path: String = conn
         .query_row(
@@ -370,7 +467,10 @@ fn apply_move_with_also_collection_updates_both_tracks_and_collection_tracks() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(track_path, coll_path, "both rows must point at the same file");
+    assert_eq!(
+        track_path, coll_path,
+        "both rows must point at the same file"
+    );
     assert!(PathBuf::from(&track_path).exists());
 }
 
@@ -391,9 +491,19 @@ fn apply_move_cleans_empty_source_directories_walking_up() {
 
     let result = apply_organize(&conn, &plan, "move", &[music.clone(), src.clone()]).unwrap();
     assert_eq!(result.moved, 1);
-    assert!(result.dirs_cleaned >= 2, "deep + nested should both be cleaned, got {}", result.dirs_cleaned);
-    assert!(!src.join("nested/deep").exists(), "deepest dir should be gone");
-    assert!(!src.join("nested").exists(), "intermediate empty dir should be gone");
+    assert!(
+        result.dirs_cleaned >= 2,
+        "deep + nested should both be cleaned, got {}",
+        result.dirs_cleaned
+    );
+    assert!(
+        !src.join("nested/deep").exists(),
+        "deepest dir should be gone"
+    );
+    assert!(
+        !src.join("nested").exists(),
+        "intermediate empty dir should be gone"
+    );
 }
 
 #[test]
@@ -416,7 +526,9 @@ fn apply_deletes_orphan_track_rows() {
 
     assert_eq!(result.orphans_cleaned, 1);
     let exists: i64 = conn
-        .query_row("SELECT COUNT(*) FROM tracks WHERE id = ?1", [tid], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM tracks WHERE id = ?1", [tid], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(exists, 0, "orphan track row should be deleted");
 }
@@ -555,7 +667,11 @@ fn apply_cleans_empty_parent_directories_after_orphan_unlink() {
     let result = apply_organize(&conn, &plan, "move", &[music.clone()]).unwrap();
 
     assert_eq!(result.file_orphans_removed, 1);
-    assert!(result.dirs_cleaned >= 2, "Album + Artist should both be cleaned, got {}", result.dirs_cleaned);
+    assert!(
+        result.dirs_cleaned >= 2,
+        "Album + Artist should both be cleaned, got {}",
+        result.dirs_cleaned
+    );
     assert!(!music.join("Artist/Album (2024)").exists());
     assert!(!music.join("Artist").exists());
     assert!(music.exists(), "music_dir itself must survive");
@@ -660,8 +776,14 @@ fn seed_collection_file(
 #[test]
 fn plan_delete_classifies_files_inside_music_dir_for_deletion() {
     let (_tmp, _src, music, conn) = fresh_world();
-    let (_tid, coll_id, abs) =
-        seed_collection_file(&conn, &music, "Mix", "Collections/Mix/song.mp3", "Artist", "Song");
+    let (_tid, coll_id, abs) = seed_collection_file(
+        &conn,
+        &music,
+        "Mix",
+        "Collections/Mix/song.mp3",
+        "Artist",
+        "Song",
+    );
 
     let plan = plan_delete_collection(&conn, coll_id, &music).unwrap();
 
@@ -676,7 +798,8 @@ fn plan_delete_classifies_files_outside_music_dir_as_skipped() {
     let outside = tmp.path().join("elsewhere/song.mp3");
     let tid = add_loose_track(&conn, outside.clone(), "Artist", "Song");
     let coll_id = ensure_collection(&conn, "Mix", tid);
-    queries::update_collection_track_path(&conn, coll_id, tid, &outside.display().to_string()).unwrap();
+    queries::update_collection_track_path(&conn, coll_id, tid, &outside.display().to_string())
+        .unwrap();
 
     let plan = plan_delete_collection(&conn, coll_id, &music).unwrap();
 
@@ -687,8 +810,14 @@ fn plan_delete_classifies_files_outside_music_dir_as_skipped() {
 #[test]
 fn plan_delete_marks_track_orphaned_when_no_album_and_no_other_collection() {
     let (_tmp, _src, music, conn) = fresh_world();
-    let (tid, coll_id, _) =
-        seed_collection_file(&conn, &music, "Mix", "Collections/Mix/song.mp3", "Artist", "Song");
+    let (tid, coll_id, _) = seed_collection_file(
+        &conn,
+        &music,
+        "Mix",
+        "Collections/Mix/song.mp3",
+        "Artist",
+        "Song",
+    );
 
     let plan = plan_delete_collection(&conn, coll_id, &music).unwrap();
 
@@ -705,13 +834,18 @@ fn plan_delete_promotes_alternate_collection_path_when_track_has_other_home() {
     let (coll_b, _) = queries::get_or_create_collection(&conn, "B").unwrap();
     queries::add_track_to_collection(&conn, coll_a, tid).unwrap();
     queries::add_track_to_collection(&conn, coll_b, tid).unwrap();
-    queries::update_collection_track_path(&conn, coll_a, tid, &abs_a.display().to_string()).unwrap();
+    queries::update_collection_track_path(&conn, coll_a, tid, &abs_a.display().to_string())
+        .unwrap();
     let abs_b = music.join("Collections/B/song.mp3");
-    queries::update_collection_track_path(&conn, coll_b, tid, &abs_b.display().to_string()).unwrap();
+    queries::update_collection_track_path(&conn, coll_b, tid, &abs_b.display().to_string())
+        .unwrap();
 
     let plan = plan_delete_collection(&conn, coll_a, &music).unwrap();
 
-    assert!(plan.orphaned_track_ids.is_empty(), "track has another home, not orphaned");
+    assert!(
+        plan.orphaned_track_ids.is_empty(),
+        "track has another home, not orphaned"
+    );
     assert_eq!(
         plan.promote_paths,
         vec![(tid, abs_b.display().to_string())],
@@ -722,8 +856,14 @@ fn plan_delete_promotes_alternate_collection_path_when_track_has_other_home() {
 #[test]
 fn apply_delete_with_files_true_removes_files_and_orphan_track_rows() {
     let (_tmp, _src, music, conn) = fresh_world();
-    let (tid, coll_id, abs) =
-        seed_collection_file(&conn, &music, "Mix", "Collections/Mix/song.mp3", "Artist", "Song");
+    let (tid, coll_id, abs) = seed_collection_file(
+        &conn,
+        &music,
+        "Mix",
+        "Collections/Mix/song.mp3",
+        "Artist",
+        "Song",
+    );
     let plan = plan_delete_collection(&conn, coll_id, &music).unwrap();
 
     let result = apply_delete_collection(&conn, &plan, true, &music).unwrap();
@@ -732,11 +872,17 @@ fn apply_delete_with_files_true_removes_files_and_orphan_track_rows() {
     assert_eq!(result.tracks_orphaned_removed, 1);
     assert!(!abs.exists(), "physical file should be deleted");
     let track_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM tracks WHERE id = ?1", [tid], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM tracks WHERE id = ?1", [tid], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(track_count, 0, "orphaned track row should be deleted");
     let coll_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM collections WHERE id = ?1", [coll_id], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM collections WHERE id = ?1",
+            [coll_id],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(coll_count, 0, "collection row should be gone");
 }
@@ -744,23 +890,41 @@ fn apply_delete_with_files_true_removes_files_and_orphan_track_rows() {
 #[test]
 fn apply_delete_with_files_false_keeps_files_but_cleans_db() {
     let (_tmp, _src, music, conn) = fresh_world();
-    let (tid, coll_id, abs) =
-        seed_collection_file(&conn, &music, "Mix", "Collections/Mix/song.mp3", "Artist", "Song");
+    let (tid, coll_id, abs) = seed_collection_file(
+        &conn,
+        &music,
+        "Mix",
+        "Collections/Mix/song.mp3",
+        "Artist",
+        "Song",
+    );
     let plan = plan_delete_collection(&conn, coll_id, &music).unwrap();
 
     let result = apply_delete_collection(&conn, &plan, false, &music).unwrap();
 
-    assert_eq!(result.files_deleted, 0, "files=false should leave files alone");
-    assert_eq!(result.tracks_orphaned_removed, 0, "files=false should not delete orphan tracks");
+    assert_eq!(
+        result.files_deleted, 0,
+        "files=false should leave files alone"
+    );
+    assert_eq!(
+        result.tracks_orphaned_removed, 0,
+        "files=false should not delete orphan tracks"
+    );
     assert!(abs.exists(), "physical file should remain");
     // Collection still gone
     let coll_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM collections WHERE id = ?1", [coll_id], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM collections WHERE id = ?1",
+            [coll_id],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(coll_count, 0);
     // Track row still present (even though it's now orphaned)
     let track_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM tracks WHERE id = ?1", [tid], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM tracks WHERE id = ?1", [tid], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(track_count, 1);
 }
@@ -778,7 +942,10 @@ fn remove_empty_parents_refuses_to_touch_path_outside_roots() {
     let cleaned = remove_empty_parents(&unmanaged, &[fake_root]);
 
     assert_eq!(cleaned, 0);
-    assert!(unmanaged.exists(), "dir outside any root must not be deleted");
+    assert!(
+        unmanaged.exists(),
+        "dir outside any root must not be deleted"
+    );
 }
 
 #[test]

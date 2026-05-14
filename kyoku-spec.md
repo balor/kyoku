@@ -1017,7 +1017,7 @@ A single MB entity can have both a native-script primary name and one or more La
 - [x] Clean up empty directories after moves (recursive parent cleanup)
 - [x] `kyoku organize` TUI integration (`O` key — library: organize all, album detail: organize album; summary/detail views with scrollable per-file listing)
 - [x] Filesystem output honours `[musicbrainz] name_script` — artist dirs and album-title segments follow the Latin/native preference resolved at MB-fetch time (see Milestone 4)
-- [ ] Collection order polish — populate `collection_tracks.position` on every add/import path, use it as collection order source of truth, add `{position}` for collection templates, and fall back sensibly for legacy NULL positions
+- [x] Collection order polish — populate `collection_tracks.position` on every add/import path, use it as collection order source of truth, add `{position}` for collection templates, and fall back sensibly for legacy NULL positions
 
 ### Milestone 6: Deletion, Cover Art, Full Tag Editing
 **Goal**: Round out the core library-management surface.

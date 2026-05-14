@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 use walkdir::WalkDir;
 
+use crate::core::collection_order::{self, CollectionOrderItem};
 use crate::core::tagger;
 use crate::db::models::{SUPPORTED_EXTENSIONS, Track};
 use crate::db::queries;
@@ -11,9 +12,7 @@ use crate::error::Result;
 
 /// Basenames we accept for sibling cover art (matched case-insensitively,
 /// extension-less). First hit wins — order matters.
-const COVER_BASENAMES: &[&str] = &[
-    "cover", "folder", "front", "artwork", "album", "albumart",
-];
+const COVER_BASENAMES: &[&str] = &["cover", "folder", "front", "artwork", "album", "albumart"];
 
 /// Allowed cover-image extensions (matched case-insensitively).
 const COVER_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp"];
@@ -121,6 +120,44 @@ fn group_into_albums(tracks: &[Track], loose: bool) -> HashMap<String, Vec<usize
     }
 
     groups
+}
+
+fn ordered_group_indices(
+    indices: &[usize],
+    tracks: &[Track],
+    tag_data_map: &[Option<tagger::TagData>],
+) -> Vec<usize> {
+    let items: Vec<CollectionOrderItem> = indices
+        .iter()
+        .enumerate()
+        .map(|(order, &idx)| {
+            let tag = tag_data_map.get(idx).and_then(|td| td.as_ref());
+            let album_key = tag.and_then(|td| {
+                td.album.as_ref().map(|album| {
+                    format!(
+                        "{}\u{0}{}",
+                        td.album_artist
+                            .as_deref()
+                            .or(td.artist.as_deref())
+                            .unwrap_or(""),
+                        album
+                    )
+                })
+            });
+            CollectionOrderItem {
+                index: idx,
+                track_id: idx as i64,
+                explicit_position: None,
+                disc_number: tracks[idx].disc_number,
+                track_number: tracks[idx].track_number,
+                album_id: None,
+                album_key,
+                added_order: order,
+                title: tracks[idx].title.clone(),
+            }
+        })
+        .collect();
+    collection_order::ordered_indices(&items)
 }
 
 /// Import audio files from a path into the database.
@@ -250,13 +287,20 @@ pub fn import(
         return Ok(result);
     }
 
-    // Insert into database
+    // Insert into database. HashMap iteration is intentionally avoided here:
+    // collection positions should follow scan/group order, not a randomized
+    // map order.
     let tx = conn.unchecked_transaction()?;
+    let mut ordered_groups: Vec<&Vec<usize>> = groups.values().collect();
+    ordered_groups.sort_by_key(|indices| indices.first().copied().unwrap_or(usize::MAX));
 
-    for indices in groups.values() {
+    for indices in ordered_groups {
+        let ordered_indices = ordered_group_indices(indices, &tracks, &tag_data_map);
+
         // Create album if not loose and we have album info
         let album_id = if !loose {
-            let first_tag = tag_data_map.get(indices[0]).and_then(|td| td.as_ref());
+            let first_idx = ordered_indices.first().copied().unwrap_or(indices[0]);
+            let first_tag = tag_data_map.get(first_idx).and_then(|td| td.as_ref());
 
             if let Some(tag_data) = first_tag {
                 if let Some(album_title) = &tag_data.album {
@@ -276,14 +320,10 @@ pub fn import(
                     // Sibling-cover detection: scan the album source dir for a
                     // cover file and record its path. Only stamps when a file
                     // is found; organizer will later move it alongside audio.
-                    if let Some(source_dir) = tracks[indices[0]].source_dir.as_deref() {
-                        if let Some(cover) = detect_sibling_cover(source_dir) {
-                            queries::set_album_cover_path(
-                                &tx,
-                                id,
-                                &cover.display().to_string(),
-                            )?;
-                        }
+                    if let Some(source_dir) = tracks[first_idx].source_dir.as_deref()
+                        && let Some(cover) = detect_sibling_cover(source_dir)
+                    {
+                        queries::set_album_cover_path(&tx, id, &cover.display().to_string())?;
                     }
                     Some(id)
                 } else {
@@ -296,21 +336,24 @@ pub fn import(
             None
         };
 
-        for &i in indices {
+        let mut inserted_ids = Vec::new();
+        for i in ordered_indices {
             let track = &tracks[i];
             let file_size = std::fs::metadata(&track.file_path)
                 .map(|m| m.len() as i64)
                 .ok();
 
             let track_id = queries::insert_track(&tx, track, album_id, file_size)?;
+            inserted_ids.push(track_id);
             result.imported += 1;
 
-            // Add to collection if requested
-            if let Some(coll_id) = collection_id {
-                queries::add_track_to_collection(&tx, coll_id, track_id)?;
-            }
-
             tracing::info!("imported: {}", track.title);
+        }
+
+        // Add to collection if requested, preserving the ordered import/group
+        // sequence as collection positions.
+        if let Some(coll_id) = collection_id {
+            queries::add_tracks_to_collection_ordered(&tx, coll_id, &inserted_ids)?;
         }
     }
 

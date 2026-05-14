@@ -1,3 +1,4 @@
+pub mod collection_order;
 pub mod importer;
 pub mod organize_preview;
 pub mod organizer;

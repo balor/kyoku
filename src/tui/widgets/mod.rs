@@ -6,3 +6,4 @@ pub mod organize_popup;
 pub mod pick_collection;
 pub mod popup;
 pub mod status_bar;
+pub mod track_table;

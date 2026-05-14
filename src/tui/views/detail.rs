@@ -18,6 +18,7 @@ use crate::error::Result;
 use crate::tui::keybindings as keys;
 use crate::tui::selection::Selection;
 use crate::tui::themes::Theme;
+use crate::tui::widgets::track_table;
 use crate::tui::views::library::format_duration_ms;
 use crate::tui::widgets::add_to_collection::{AddToCollectionPopup, PopupAction};
 use crate::tui::widgets::confirm_delete::{ConfirmAction, ConfirmDelete};
@@ -927,15 +928,19 @@ impl AlbumDetailView {
         let scroll = self.scroll_offset;
 
         let mut rows = Vec::new();
-        for pos in scroll..total.min(scroll + visible_height) {
-            let i = visible[pos];
+        for (pos, &i) in visible
+            .iter()
+            .enumerate()
+            .take(total.min(scroll + visible_height))
+            .skip(scroll)
+        {
             let track = &self.tracks[i];
             let is_selected = pos == self.selected;
 
             let num = track
                 .track_number
-                .map(|n| format!("{:>2}", n))
-                .unwrap_or_else(|| "  ".to_string());
+                .map(track_table::numeric_cell)
+                .unwrap_or_else(track_table::blank_numeric_cell);
             let duration = track
                 .duration_ms
                 .map(|ms| {
@@ -962,49 +967,27 @@ impl AlbumDetailView {
             };
             let row = Row::new(vec![
                 Cell::from(gutter_span),
-                Cell::from(num),
+                num,
                 Cell::from(track.title.clone()),
                 Cell::from(duration),
                 Cell::from(Span::styled(track.tag_status.clone(), status_style)),
                 Cell::from(bitrate),
             ]);
 
-            let style = if is_selected {
-                Style::default()
-                    .bg(theme.bg_selected)
-                    .fg(theme.fg)
-                    .add_modifier(Modifier::BOLD)
-            } else if pos % 2 == 0 {
-                Style::default().bg(theme.bg).fg(theme.fg)
-            } else {
-                Style::default().bg(theme.bg_alt).fg(theme.fg)
-            };
-
-            rows.push(row.style(style));
+            rows.push(row.style(track_table::row_style(theme, pos, is_selected)));
         }
 
         let header = Row::new(vec![
             Cell::from(" "),
-            Cell::from(Span::styled("#", Style::default().fg(theme.accent))),
-            Cell::from(Span::styled("Title", Style::default().fg(theme.accent))),
-            Cell::from(Span::styled("Duration", Style::default().fg(theme.accent))),
-            Cell::from(Span::styled("Status", Style::default().fg(theme.accent))),
-            Cell::from(Span::styled("Bitrate", Style::default().fg(theme.accent))),
+            track_table::numeric_header_cell("#", theme),
+            track_table::header_cell("Title", theme),
+            track_table::header_cell("Duration", theme),
+            track_table::header_cell("Status", theme),
+            track_table::header_cell("Bitrate", theme),
         ])
         .style(Style::default().add_modifier(Modifier::BOLD));
 
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Length(1),
-                Constraint::Length(4),
-                Constraint::Percentage(45),
-                Constraint::Length(8),
-                Constraint::Length(10),
-                Constraint::Length(10),
-            ],
-        )
-        .header(header);
+        let table = Table::new(rows, track_table::album_detail_widths()).header(header);
 
         frame.render_widget(table, track_area);
 

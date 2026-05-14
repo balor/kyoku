@@ -6,6 +6,7 @@ use std::sync::mpsc;
 use lofty::tag::ItemKey;
 
 use crate::config::settings::NameScriptPreference;
+use crate::core::collection_order::{self, CollectionOrderItem};
 use crate::core::importer::detect_sibling_cover;
 use crate::core::tagger::{self, TagChanges, TagData, TagValue};
 use crate::db::models::Track;
@@ -177,6 +178,8 @@ pub(super) fn run_import_worker(
             } else {
                 Vec::new()
             };
+            let collection_order = collection_order_for_group(group, &mb_pairing);
+            let mut inserted_track_ids: Vec<Option<i64>> = vec![None; group.tracks.len()];
 
             for (i, (track, _tag_data)) in group.tracks.iter().enumerate() {
                 let path_str = track.file_path.display().to_string();
@@ -244,7 +247,9 @@ pub(super) fn run_import_worker(
                     None
                 } else if let Some(id) = mb_album_id {
                     Some(id)
-                } else { asis_album_id.map(|id| id) };
+                } else {
+                    asis_album_id.map(|id| id)
+                };
 
                 let file_size = std::fs::metadata(&track.file_path)
                     .map(|m| m.len() as i64)
@@ -277,9 +282,7 @@ pub(super) fn run_import_worker(
                                 // library is portable to other tools.
                                 if write_tags {
                                     let changes = build_mb_tag_changes(mb, mbt);
-                                    if let Err(e) =
-                                        tagger::write_tags(&track.file_path, &changes)
-                                    {
+                                    if let Err(e) = tagger::write_tags(&track.file_path, &changes) {
                                         tracing::warn!(
                                             "tag write failed for {}: {}",
                                             track.file_path.display(),
@@ -289,23 +292,28 @@ pub(super) fn run_import_worker(
                                 }
                             } else {
                                 // No positional match — still mark as matched at album level
-                                queries::set_track_tag_status(conn, track_id, "matched")
-                                    .ok();
+                                queries::set_track_tag_status(conn, track_id, "matched").ok();
                             }
                         }
 
-                        // Add to target collection if user requested one
-                        if let Some(coll_id) = target_collection_id
-                            && queries::add_track_to_collection(conn, coll_id, track_id)
-                                .unwrap_or(false)
-                            {
-                                added_to_collection += 1;
-                            }
+                        inserted_track_ids[i] = Some(track_id);
                     }
                     Err(_) => errors += 1,
                 }
                 done += 1;
                 let _ = tx.send(ImportMessage::Progress(done, total_tracks));
+            }
+
+            if let Some(coll_id) = target_collection_id {
+                let ordered_ids: Vec<i64> = collection_order
+                    .iter()
+                    .filter_map(|&idx| inserted_track_ids.get(idx).and_then(|id| *id))
+                    .collect();
+                if !ordered_ids.is_empty() {
+                    added_to_collection +=
+                        queries::add_tracks_to_collection_ordered(conn, coll_id, &ordered_ids)
+                            .unwrap_or(0);
+                }
             }
         }
     }
@@ -343,6 +351,46 @@ pub(super) fn run_import_worker(
     let _ = tx.send(ImportMessage::Complete(parts.join(", ")));
 }
 
+fn collection_order_for_group(group: &ImportGroup, mb_pairing: &[Option<usize>]) -> Vec<usize> {
+    if !mb_pairing.is_empty() {
+        let mut indices: Vec<usize> = (0..group.tracks.len()).collect();
+        indices.sort_by_key(|&i| (mb_pairing.get(i).and_then(|m| *m).unwrap_or(usize::MAX), i));
+        return indices;
+    }
+
+    let items: Vec<CollectionOrderItem> = group
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(idx, (track, tag))| {
+            let album_key = tag.as_ref().and_then(|td| {
+                td.album.as_ref().map(|album| {
+                    format!(
+                        "{}\u{0}{}",
+                        td.album_artist
+                            .as_deref()
+                            .or(td.artist.as_deref())
+                            .unwrap_or(""),
+                        album
+                    )
+                })
+            });
+            CollectionOrderItem {
+                index: idx,
+                track_id: idx as i64,
+                explicit_position: None,
+                disc_number: track.disc_number,
+                track_number: track.track_number,
+                album_id: None,
+                album_key,
+                added_order: idx,
+                title: track.title.clone(),
+            }
+        })
+        .collect();
+    collection_order::ordered_indices(&items)
+}
+
 /// Pull a 1-based track position out of a filename's leading digits
 /// (e.g. `05. Foo.flac` → 5, `12 - Bar.mp3` → 12). Returns `None` if
 /// there are no leading digits or the number is 0. Used only as a
@@ -362,7 +410,9 @@ fn parse_filename_position(path: &std::path::Path) -> Option<u32> {
 /// Called only when the title tag is absent (i.e. `track.title` is a raw
 /// file stem).
 fn strip_filename_title_prefixes(s: &str) -> String {
-    let after_digits = s.trim_start().trim_start_matches(|c: char| c.is_ascii_digit());
+    let after_digits = s
+        .trim_start()
+        .trim_start_matches(|c: char| c.is_ascii_digit());
     let after_sep =
         after_digits.trim_start_matches(|c: char| c == '.' || c == '-' || c == '_' || c == ' ');
     // Drop one "Something - " prefix if present (typical Artist separator).
@@ -462,11 +512,7 @@ pub(super) fn match_group_to_mb(
             if taken[mi] {
                 continue;
             }
-            let mb_title: String = mt
-                .title
-                .chars()
-                .flat_map(|c| c.to_lowercase())
-                .collect();
+            let mb_title: String = mt.title.chars().flat_map(|c| c.to_lowercase()).collect();
             let score = strsim::jaro_winkler(&local_title, &mb_title);
             if score >= 0.85 {
                 candidates.push((li, mi, score));
@@ -546,10 +592,9 @@ fn build_mb_tag_changes(mb: &MbRelease, mbt: &MbTrack) -> TagChanges {
             .set
             .push((ItemKey::TrackTotal, TagValue::Text(total.to_string())));
     }
-    changes.set.push((
-        ItemKey::MusicBrainzReleaseId,
-        TagValue::Text(mb.id.clone()),
-    ));
+    changes
+        .set
+        .push((ItemKey::MusicBrainzReleaseId, TagValue::Text(mb.id.clone())));
     changes.set.push((
         ItemKey::MusicBrainzRecordingId,
         TagValue::Text(mbt.recording_id.clone()),
@@ -723,15 +768,8 @@ mod tests {
         // No track numbers, titles totally opaque (no similarity to MB
         // titles). Must fall through to positional — regression check
         // that the positional pass is *still* there for tag-less files.
-        let group = vec![
-            local("xxxxxxxxxxxxx", None),
-            local("yyyyyyyyyyyyy", None),
-        ];
-        let mb_tracks = vec![
-            mb(1, "Alpha"),
-            mb(2, "Beta"),
-            mb(3, "Gamma"),
-        ];
+        let group = vec![local("xxxxxxxxxxxxx", None), local("yyyyyyyyyyyyy", None)];
+        let mb_tracks = vec![mb(1, "Alpha"), mb(2, "Beta"), mb(3, "Gamma")];
 
         let matches = match_group_to_mb(&group, &mb_tracks);
         assert_eq!(matches, vec![Some(0), Some(1)]);
@@ -765,9 +803,7 @@ mod tests {
             local_untagged_at("06. 9Lana - Never Give Up", "/tmp/album"),
             local_untagged_at("07. 9Lana - propose", "/tmp/album"),
         ];
-        let mb_tracks: Vec<MbTrack> = (1..=11)
-            .map(|p| mb(p, &format!("track-{}", p)))
-            .collect();
+        let mb_tracks: Vec<MbTrack> = (1..=11).map(|p| mb(p, &format!("track-{}", p))).collect();
 
         let matches = match_group_to_mb(&group, &mb_tracks);
         let got: Vec<u32> = matches
@@ -803,13 +839,9 @@ mod tests {
         // honour the (wrong) tags and pair local→MB 1, even though the
         // filename hints at position 5 / title "Nandemoshitaikara".
         let mut item = local("Let me battle", Some(1));
-        item.0.file_path =
-            PathBuf::from("/tmp/album/05. 9Lana - Nandemoshitaikara.flac");
+        item.0.file_path = PathBuf::from("/tmp/album/05. 9Lana - Nandemoshitaikara.flac");
         let group = vec![item];
-        let mb_tracks = vec![
-            mb(1, "Let me battle"),
-            mb(5, "Nandemoshitaikara"),
-        ];
+        let mb_tracks = vec![mb(1, "Let me battle"), mb(5, "Nandemoshitaikara")];
         let matches = match_group_to_mb(&group, &mb_tracks);
         // Honour the wrong tags — pair to MB position 1, not 5.
         assert_eq!(matches, vec![Some(0)]);
@@ -828,7 +860,10 @@ mod tests {
         // Digit-dot-only, no artist prefix
         assert_eq!(strip_filename_title_prefixes("07. Song"), "Song");
         // Already clean — untouched
-        assert_eq!(strip_filename_title_prefixes("Nandemoshitaikara"), "Nandemoshitaikara");
+        assert_eq!(
+            strip_filename_title_prefixes("Nandemoshitaikara"),
+            "Nandemoshitaikara"
+        );
     }
 
     #[test]
@@ -843,10 +878,7 @@ mod tests {
             Some(12)
         );
         // No leading digits
-        assert_eq!(
-            parse_filename_position(Path::new("/x/Unknown.flac")),
-            None
-        );
+        assert_eq!(parse_filename_position(Path::new("/x/Unknown.flac")), None);
         // "00" — treated as None so it can't hijack
         assert_eq!(parse_filename_position(Path::new("/x/00_Intro.mp3")), None);
     }

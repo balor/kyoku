@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use rusqlite::Connection;
 
 use crate::config::Settings;
-use crate::core::organizer::{self, remove_empty_parents, DeleteCollectionPlan};
+use crate::core::organizer::{self, DeleteCollectionPlan, remove_empty_parents};
 use crate::core::pruner;
 use crate::db::queries::{self, CollectionRow, TrackRow};
 use crate::error::Result;
@@ -19,6 +19,7 @@ use crate::tui::themes::Theme;
 use crate::tui::views::library::format_duration_ms;
 use crate::tui::widgets::confirm_delete::{ConfirmAction, ConfirmDelete};
 use crate::tui::widgets::input::TextInput;
+use crate::tui::widgets::track_table;
 
 pub enum CollectionsAction {
     None,
@@ -39,7 +40,10 @@ pub enum CollectionDetailAction {
 enum InputMode {
     Normal,
     Creating(TextInput),
-    Renaming { input: TextInput, id: i64 },
+    Renaming {
+        input: TextInput,
+        id: i64,
+    },
     ConfirmDelete {
         plan: DeleteCollectionPlan,
         widget: ConfirmDelete,
@@ -211,13 +215,8 @@ impl CollectionsView {
                     }
                     ConfirmAction::Confirm { delete_files } => {
                         for plan in plans.iter() {
-                            organizer::apply_delete_collection(
-                                conn,
-                                plan,
-                                delete_files,
-                                music_dir,
-                            )
-                            .ok();
+                            organizer::apply_delete_collection(conn, plan, delete_files, music_dir)
+                                .ok();
                         }
                         self.mode = InputMode::Normal;
                         self.selection.clear();
@@ -252,9 +251,10 @@ impl CollectionsView {
             self.selected = count - 1;
         }
         if keys::is_confirm(&key)
-            && let Some(coll) = self.collections.get(self.selected) {
-                return CollectionsAction::OpenCollection(coll.id);
-            }
+            && let Some(coll) = self.collections.get(self.selected)
+        {
+            return CollectionsAction::OpenCollection(coll.id);
+        }
         if key.code == KeyCode::Char('n') {
             let mut input = TextInput::new("Collection name...").with_label(" Name: ");
             input.focused = true;
@@ -263,15 +263,11 @@ impl CollectionsView {
         }
         if key.code == KeyCode::Char('R') {
             if let Some(coll) = self.collections.get(self.selected) {
-                let mut input =
-                    TextInput::new("New collection name...").with_label(" Name: ");
+                let mut input = TextInput::new("New collection name...").with_label(" Name: ");
                 input.value = coll.name.clone();
                 input.cursor = input.value.len();
                 input.focused = true;
-                self.mode = InputMode::Renaming {
-                    input,
-                    id: coll.id,
-                };
+                self.mode = InputMode::Renaming { input, id: coll.id };
             }
             return CollectionsAction::None;
         }
@@ -284,13 +280,14 @@ impl CollectionsView {
         }
 
         if keys::is_toggle_select(&key)
-            && let Some(coll) = self.collections.get(self.selected) {
-                self.selection.toggle(coll.id);
-                if count > 0 && self.selected < count - 1 {
-                    self.selected += 1;
-                }
-                return CollectionsAction::None;
+            && let Some(coll) = self.collections.get(self.selected)
+        {
+            self.selection.toggle(coll.id);
+            if count > 0 && self.selected < count - 1 {
+                self.selected += 1;
             }
+            return CollectionsAction::None;
+        }
 
         if keys::is_delete(&key) && !self.collections.is_empty() {
             let ids: Vec<i64> = if self.selection.is_empty() {
@@ -348,10 +345,8 @@ impl CollectionsView {
                 if plans.is_empty() {
                     return CollectionsAction::None;
                 }
-                let total_files: usize =
-                    plans.iter().map(|p| p.files_to_delete.len()).sum();
-                let total_orphans: usize =
-                    plans.iter().map(|p| p.orphaned_track_ids.len()).sum();
+                let total_files: usize = plans.iter().map(|p| p.files_to_delete.len()).sum();
+                let total_orphans: usize = plans.iter().map(|p| p.orphaned_track_ids.len()).sum();
                 let total_outside: usize =
                     plans.iter().map(|p| p.files_outside_music_dir.len()).sum();
 
@@ -412,12 +407,9 @@ impl CollectionsView {
             let x = area.x + area.width.saturating_sub(line_w) / 2;
             let w = line_w.min(area.width);
             let centered = Rect::new(x, y, w, 1);
-            let msg = Paragraph::new(Span::styled(
-                text,
-                Style::default().fg(theme.fg_muted),
-            ))
-            .alignment(Alignment::Center)
-            .style(Style::default().bg(theme.bg));
+            let msg = Paragraph::new(Span::styled(text, Style::default().fg(theme.fg_muted)))
+                .alignment(Alignment::Center)
+                .style(Style::default().bg(theme.bg));
             frame.render_widget(msg, centered);
             return;
         }
@@ -437,7 +429,7 @@ impl CollectionsView {
         for i in scroll..self.collections.len().min(scroll + visible_height) {
             let coll = &self.collections[i];
             let is_selected = i == self.selected;
-            let desc = coll.description.as_deref().unwrap_or("");
+            let duration = format_duration_ms(coll.total_duration_ms);
 
             let gutter_span = if self.selection.contains(coll.id) {
                 Span::styled("▎", Style::default().fg(theme.accent))
@@ -447,47 +439,28 @@ impl CollectionsView {
             let row = Row::new(vec![
                 Cell::from(gutter_span),
                 Cell::from(coll.name.clone()),
-                Cell::from(format!("{:>4}", coll.track_count)),
-                Cell::from(desc.to_string()),
+                track_table::count_cell(coll.track_count),
+                track_table::duration_cell(duration),
             ]);
 
-            let style = if is_selected {
-                Style::default()
-                    .bg(theme.bg_selected)
-                    .fg(theme.fg)
-                    .add_modifier(Modifier::BOLD)
-            } else if i % 2 == 0 {
-                Style::default().bg(theme.bg).fg(theme.fg)
-            } else {
-                Style::default().bg(theme.bg_alt).fg(theme.fg)
-            };
-
-            rows.push(row.style(style));
+            rows.push(row.style(track_table::row_style(theme, i, is_selected)));
         }
 
         let header = Row::new(vec![
             Cell::from(" "),
-            Cell::from(Span::styled("Collection", Style::default().fg(theme.accent))),
-            Cell::from(Span::styled("Tracks", Style::default().fg(theme.accent))),
-            Cell::from(Span::styled("Description", Style::default().fg(theme.accent))),
+            track_table::header_cell("Collection", theme),
+            track_table::count_header_cell("Tracks", theme),
+            track_table::duration_header_cell("Duration", theme),
         ])
         .style(Style::default().add_modifier(Modifier::BOLD));
 
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Length(1),
-                Constraint::Percentage(30),
-                Constraint::Length(8),
-                Constraint::Percentage(50),
-            ],
-        )
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border)),
-        );
+        let table = Table::new(rows, track_table::collection_list_widths())
+            .header(header)
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(theme.border)),
+            );
 
         frame.render_widget(table, area);
 
@@ -530,12 +503,7 @@ impl CollectionsView {
                     90,
                 )
             } else if nothing {
-                (
-                    OrganizeView::Summary,
-                    "Organize Library",
-                    "Esc = close",
-                    85,
-                )
+                (OrganizeView::Summary, "Organize Library", "Esc = close", 85)
             } else {
                 (
                     OrganizeView::Summary,
@@ -561,7 +529,10 @@ impl CollectionsView {
     pub fn render_detail_bar(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if let Some(coll) = self.collections.get(self.selected) {
             let duration = format_duration_ms(coll.total_duration_ms);
-            let detail = format!(" {} · {} tracks · {}", coll.name, coll.track_count, duration);
+            let detail = format!(
+                " {} · {} tracks · {}",
+                coll.name, coll.track_count, duration
+            );
             let p = Paragraph::new(Span::styled(detail, Style::default().fg(theme.fg_dim)))
                 .style(Style::default().bg(theme.bg_alt));
             frame.render_widget(p, area);
@@ -648,12 +619,7 @@ impl CollectionDetailView {
 }
 
 impl CollectionDetailView {
-    pub fn load(
-        &mut self,
-        conn: &Connection,
-        collection_id: i64,
-        music_dir: &Path,
-    ) -> Result<()> {
+    pub fn load(&mut self, conn: &Connection, collection_id: i64, music_dir: &Path) -> Result<()> {
         // Get collection info
         let collections = queries::list_collections(conn)?;
         self.collection = collections.into_iter().find(|c| c.id == collection_id);
@@ -778,17 +744,19 @@ impl CollectionDetailView {
             if keys::is_confirm(&key) {
                 let new_name = input.value.trim().to_string();
                 if let Some(coll) = &self.collection
-                    && !new_name.is_empty() && new_name != coll.name {
-                        let id = coll.id;
-                        queries::rename_collection(conn, id, &new_name).ok();
-                        // Reload collection info while preserving cursor
-                        let prev = self.selected;
-                        let cached_music_dir = self.music_dir.clone();
-                        self.load(conn, id, &cached_music_dir).ok();
-                        if prev < self.tracks.len() {
-                            self.selected = prev;
-                        }
+                    && !new_name.is_empty()
+                    && new_name != coll.name
+                {
+                    let id = coll.id;
+                    queries::rename_collection(conn, id, &new_name).ok();
+                    // Reload collection info while preserving cursor
+                    let prev = self.selected;
+                    let cached_music_dir = self.music_dir.clone();
+                    self.load(conn, id, &cached_music_dir).ok();
+                    if prev < self.tracks.len() {
+                        self.selected = prev;
                     }
+                }
                 self.rename_input = None;
                 return CollectionDetailAction::None;
             }
@@ -819,13 +787,15 @@ impl CollectionDetailView {
 
                         if delete_files {
                             if let Some(p) = &file_path
-                                && p.exists() && p.starts_with(music_dir) {
-                                    let _ = std::fs::remove_file(p);
-                                    if let Some(parent) = p.parent() {
-                                        let roots = [music_dir.to_path_buf()];
-                                        let _ = remove_empty_parents(parent, &roots);
-                                    }
+                                && p.exists()
+                                && p.starts_with(music_dir)
+                            {
+                                let _ = std::fs::remove_file(p);
+                                if let Some(parent) = p.parent() {
+                                    let roots = [music_dir.to_path_buf()];
+                                    let _ = remove_empty_parents(parent, &roots);
                                 }
+                            }
                             // If removing this would leave the track with no
                             // file home, delete the track entirely.
                             if will_orphan {
@@ -864,9 +834,7 @@ impl CollectionDetailView {
             self.selected = count - 1;
         }
 
-        let current_track = visible
-            .get(self.selected)
-            .and_then(|&i| self.tracks.get(i));
+        let current_track = visible.get(self.selected).and_then(|&i| self.tracks.get(i));
 
         if keys::is_back(&key) && !self.selection.is_empty() {
             self.selection.clear();
@@ -874,13 +842,14 @@ impl CollectionDetailView {
         }
 
         if keys::is_toggle_select(&key)
-            && let Some(track) = current_track {
-                self.selection.toggle(track.id);
-                if count > 0 && self.selected < count - 1 {
-                    self.selected += 1;
-                }
-                return CollectionDetailAction::None;
+            && let Some(track) = current_track
+        {
+            self.selection.toggle(track.id);
+            if count > 0 && self.selected < count - 1 {
+                self.selected += 1;
             }
+            return CollectionDetailAction::None;
+        }
 
         if keys::is_delete(&key) {
             let ids: Vec<i64> = if self.selection.is_empty() {
@@ -908,54 +877,57 @@ impl CollectionDetailView {
         }
 
         if key.code == KeyCode::Char('e')
-            && let Some(track) = current_track {
-                return CollectionDetailAction::EditTrack(track.id);
-            }
+            && let Some(track) = current_track
+        {
+            return CollectionDetailAction::EditTrack(track.id);
+        }
         if key.code == KeyCode::Char('x') {
             if let Some(track) = current_track
-                && let Some(coll) = &self.collection {
-                    // Look up the collection_file_path and other-homes info
-                    let homes = queries::get_collection_tracks_with_other_homes(conn, coll.id)
-                        .unwrap_or_default();
-                    let info = homes.iter().find(|h| h.track_id == track.id);
-                    let file_path = info.and_then(|i| i.collection_file_path.clone()).map(PathBuf::from);
-                    let will_orphan = info
-                        .map(|i| !i.has_album && i.other_collection_count == 0)
-                        .unwrap_or(false);
+                && let Some(coll) = &self.collection
+            {
+                // Look up the collection_file_path and other-homes info
+                let homes = queries::get_collection_tracks_with_other_homes(conn, coll.id)
+                    .unwrap_or_default();
+                let info = homes.iter().find(|h| h.track_id == track.id);
+                let file_path = info
+                    .and_then(|i| i.collection_file_path.clone())
+                    .map(PathBuf::from);
+                let will_orphan = info
+                    .map(|i| !i.has_album && i.other_collection_count == 0)
+                    .unwrap_or(false);
 
-                    let mut widget = ConfirmDelete::new(
-                        "Confirm Remove",
-                        format!("Remove '{}' from collection '{}'?", track.title, coll.name),
-                    );
-                    if let Some(p) = &file_path {
-                        if p.starts_with(music_dir) {
-                            widget = widget.with_summary(format!("File: {}", p.display()));
-                        } else {
-                            widget = widget.without_checkbox();
-                        }
+                let mut widget = ConfirmDelete::new(
+                    "Confirm Remove",
+                    format!("Remove '{}' from collection '{}'?", track.title, coll.name),
+                );
+                if let Some(p) = &file_path {
+                    if p.starts_with(music_dir) {
+                        widget = widget.with_summary(format!("File: {}", p.display()));
                     } else {
                         widget = widget.without_checkbox();
                     }
-                    if will_orphan {
-                        widget = widget.with_warning(
-                            "This is the only place this track lives — \
-                             checking the box will remove it from the library entirely",
-                        );
-                    }
-
-                    self.confirm_remove = Some(RemoveTrackConfirm {
-                        track_id: track.id,
-                        file_path,
-                        will_orphan,
-                        widget,
-                    });
+                } else {
+                    widget = widget.without_checkbox();
                 }
+                if will_orphan {
+                    widget = widget.with_warning(
+                        "This is the only place this track lives — \
+                             checking the box will remove it from the library entirely",
+                    );
+                }
+
+                self.confirm_remove = Some(RemoveTrackConfirm {
+                    track_id: track.id,
+                    file_path,
+                    will_orphan,
+                    widget,
+                });
+            }
             return CollectionDetailAction::None;
         }
         if key.code == KeyCode::Char('R') {
             if let Some(coll) = &self.collection {
-                let mut input =
-                    TextInput::new("New collection name...").with_label(" Name: ");
+                let mut input = TextInput::new("New collection name...").with_label(" Name: ");
                 input.value = coll.name.clone();
                 input.cursor = input.value.len();
                 input.focused = true;
@@ -980,7 +952,7 @@ impl CollectionDetailView {
             .direction(ratatui::layout::Direction::Vertical)
             .constraints([
                 Constraint::Length(2), // header
-                Constraint::Min(5),   // tracks
+                Constraint::Min(5),    // tracks
                 Constraint::Length(2), // footer (status + path)
             ])
             .split(area);
@@ -1020,8 +992,12 @@ impl CollectionDetailView {
         let scroll = self.scroll_offset;
 
         let mut rows = Vec::new();
-        for pos in scroll..total.min(scroll + visible_height) {
-            let i = visible[pos];
+        for (pos, &i) in visible
+            .iter()
+            .enumerate()
+            .take(total.min(scroll + visible_height))
+            .skip(scroll)
+        {
             let track = &self.tracks[i];
             let is_selected = pos == self.selected;
 
@@ -1041,46 +1017,27 @@ impl CollectionDetailView {
             };
             let row = Row::new(vec![
                 Cell::from(gutter_span),
+                track_table::numeric_cell(i + 1),
                 Cell::from(track.title.clone()),
                 Cell::from(artist.to_string()),
                 Cell::from(duration),
                 Cell::from(track.file_format.to_uppercase()),
             ]);
 
-            let style = if is_selected {
-                Style::default()
-                    .bg(theme.bg_selected)
-                    .fg(theme.fg)
-                    .add_modifier(Modifier::BOLD)
-            } else if pos % 2 == 0 {
-                Style::default().bg(theme.bg).fg(theme.fg)
-            } else {
-                Style::default().bg(theme.bg_alt).fg(theme.fg)
-            };
-
-            rows.push(row.style(style));
+            rows.push(row.style(track_table::row_style(theme, pos, is_selected)));
         }
 
         let header = Row::new(vec![
             Cell::from(" "),
-            Cell::from(Span::styled("Title", Style::default().fg(theme.accent))),
-            Cell::from(Span::styled("Artist", Style::default().fg(theme.accent))),
-            Cell::from(Span::styled("Duration", Style::default().fg(theme.accent))),
-            Cell::from(Span::styled("Fmt", Style::default().fg(theme.accent))),
+            track_table::numeric_header_cell("#", theme),
+            track_table::header_cell("Title", theme),
+            track_table::header_cell("Artist", theme),
+            track_table::header_cell("Duration", theme),
+            track_table::header_cell("Fmt", theme),
         ])
         .style(Style::default().add_modifier(Modifier::BOLD));
 
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Length(1),
-                Constraint::Percentage(35),
-                Constraint::Percentage(30),
-                Constraint::Length(8),
-                Constraint::Length(6),
-            ],
-        )
-        .header(header);
+        let table = Table::new(rows, track_table::collection_detail_widths()).header(header);
 
         frame.render_widget(table, chunks[1]);
 
@@ -1090,10 +1047,7 @@ impl CollectionDetailView {
             .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(chunks[2]);
 
-        if let Some(selected_track) = visible
-            .get(self.selected)
-            .and_then(|&i| self.tracks.get(i))
-        {
+        if let Some(selected_track) = visible.get(self.selected).and_then(|&i| self.tracks.get(i)) {
             // Line 1: notice (if set) or status badge
             if let Some(notice) = &self.notice {
                 let p = Paragraph::new(Span::styled(
@@ -1103,8 +1057,7 @@ impl CollectionDetailView {
                 .style(Style::default().bg(theme.bg_alt));
                 frame.render_widget(p, footer_chunks[0]);
             } else {
-                let has_collection_copy =
-                    self.collection_paths.contains_key(&selected_track.id);
+                let has_collection_copy = self.collection_paths.contains_key(&selected_track.id);
                 let track_path = Path::new(&selected_track.file_path);
                 let track_in_library = !self.music_dir.as_os_str().is_empty()
                     && track_path.starts_with(&self.music_dir);

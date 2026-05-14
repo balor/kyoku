@@ -207,6 +207,7 @@ pub fn plan_organize(
                 .to_lowercase(),
             label: t.label.clone().unwrap_or_default(),
             collection: String::new(),
+            position: 0,
         };
 
         let has_album = t.album_title.is_some();
@@ -228,17 +229,22 @@ pub fn plan_organize(
             }
         };
 
-        // Sort collections deterministically by ID (oldest first)
+        // Sort collections deterministically by ID (oldest first). Each
+        // collection carries its own effective position; collection templates
+        // should use `{position}` for collection order while `{track}` stays
+        // the source track-number tag.
         let mut collections = t.collections.clone();
-        collections.sort_by_key(|(id, _, _)| *id);
+        collections.sort_by_key(|c| c.id);
 
         // Helper to compute a collection's raw target path (pre-disambiguation)
-        let collection_target = |coll_name: &str, coll_template: &Option<String>| -> PathBuf {
-            let tmpl = coll_template
+        let collection_target = |coll: &queries::OrganizeCollectionMembership| -> PathBuf {
+            let tmpl = coll
+                .path_template
                 .as_deref()
                 .unwrap_or(&settings.library.collection_path_template);
             let mut coll_vars = vars.clone();
-            coll_vars.collection = coll_name.to_string();
+            coll_vars.collection = coll.name.clone();
+            coll_vars.position = coll.effective_position;
             preserve_filename(music_dir.join(template::render_path(tmpl, &coll_vars)))
         };
 
@@ -281,13 +287,15 @@ pub fn plan_organize(
             if let Some(aid) = t.album_id
                 && let Some(parent) = copy_source.parent()
             {
-                album_dest_dir.entry(aid).or_insert_with(|| parent.to_path_buf());
+                album_dest_dir
+                    .entry(aid)
+                    .or_insert_with(|| parent.to_path_buf());
             }
 
             // One copy per collection — skip if the target already exists on disk
             // (collection was already organized).
-            for (coll_id, coll_name, coll_template) in &collections {
-                let raw = collection_target(coll_name, coll_template);
+            for coll in &collections {
+                let raw = collection_target(coll);
                 if raw.exists() {
                     used_paths.insert(raw);
                     plan.skipped += 1;
@@ -295,8 +303,8 @@ pub fn plan_organize(
                     let target = disambiguate(raw, &mut used_paths);
                     plan.copies.push(FileCopy {
                         track_id: t.id,
-                        collection_id: *coll_id,
-                        collection_name: coll_name.clone(),
+                        collection_id: coll.id,
+                        collection_name: coll.name.clone(),
                         from: copy_source.clone(),
                         to: target,
                     });
@@ -304,8 +312,8 @@ pub fn plan_organize(
             }
         } else if !collections.is_empty() {
             // Loose track in collections: MOVE to first collection's folder
-            let (first_id, first_name, first_template) = &collections[0];
-            let raw_primary = collection_target(first_name, first_template);
+            let first = &collections[0];
+            let raw_primary = collection_target(first);
 
             // Same post-move-location rule as above.
             let copy_source: PathBuf = if from == raw_primary {
@@ -322,15 +330,15 @@ pub fn plan_organize(
                         track_id: t.id,
                         from: from.clone(),
                         to: primary_target.clone(),
-                        also_collection: Some((*first_id, first_name.clone())),
+                        also_collection: Some((first.id, first.name.clone())),
                     });
                     primary_target
                 }
             };
 
             // COPY to each additional collection's folder — skip if already exists
-            for (coll_id, coll_name, coll_template) in &collections[1..] {
-                let raw = collection_target(coll_name, coll_template);
+            for coll in &collections[1..] {
+                let raw = collection_target(coll);
                 if raw.exists() {
                     used_paths.insert(raw);
                     plan.skipped += 1;
@@ -338,8 +346,8 @@ pub fn plan_organize(
                     let target = disambiguate(raw, &mut used_paths);
                     plan.copies.push(FileCopy {
                         track_id: t.id,
-                        collection_id: *coll_id,
-                        collection_name: coll_name.clone(),
+                        collection_id: coll.id,
+                        collection_name: coll.name.clone(),
                         from: copy_source.clone(),
                         to: target,
                     });
@@ -458,20 +466,17 @@ pub fn apply_organize(
                 // If this move also represents a collection's primary file location,
                 // update collection_tracks.collection_file_path so the DB knows.
                 if let Some((coll_id, _)) = &m.also_collection
-                    && let Err(e) = queries::update_collection_track_path(
-                        conn,
-                        *coll_id,
-                        m.track_id,
-                        &new_path,
-                    ) {
-                        result.errors.push((
+                    && let Err(e) =
+                        queries::update_collection_track_path(conn, *coll_id, m.track_id, &new_path)
+                {
+                    result.errors.push((
                             m.from.display().to_string(),
                             format!(
                                 "file moved and tracks row updated, but collection_tracks update failed: {e}"
                             ),
                         ));
-                        continue;
-                    }
+                    continue;
+                }
 
                 // Only count moves that are fully consistent (fs + every DB update).
                 result.moved += 1;
@@ -479,12 +484,15 @@ pub fn apply_organize(
 
                 // Track the source directory for cleanup
                 if operation != "copy"
-                    && let Some(parent) = m.from.parent() {
-                        emptied_dirs.push(parent.to_path_buf());
-                    }
+                    && let Some(parent) = m.from.parent()
+                {
+                    emptied_dirs.push(parent.to_path_buf());
+                }
             }
             Err(e) => {
-                result.errors.push((m.from.display().to_string(), e.to_string()));
+                result
+                    .errors
+                    .push((m.from.display().to_string(), e.to_string()));
             }
         }
     }
@@ -513,7 +521,9 @@ pub fn apply_organize(
                 mark_occupied(&c.to, &mut occupied);
             }
             Err(e) => {
-                result.errors.push((c.from.display().to_string(), e.to_string()));
+                result
+                    .errors
+                    .push((c.from.display().to_string(), e.to_string()));
             }
         }
     }
@@ -624,9 +634,7 @@ pub fn apply_organize(
         // Don't schedule the parent for emptied-dir cleanup when the
         // orphan was replaced by a move — the directory is now hosting
         // the new file, not empty.
-        if !replaced_by_move
-            && let Some(parent) = entry.path.parent()
-        {
+        if !replaced_by_move && let Some(parent) = entry.path.parent() {
             emptied_dirs.push(parent.to_path_buf());
         }
     }
@@ -719,15 +727,18 @@ pub fn plan_delete_collection(
         // Track has another home — if its tracks.file_path matches the
         // about-to-be-deleted collection file, we need to promote another path.
         if let Some(coll_path) = &h.collection_file_path
-            && &h.track_file_path == coll_path && !h.has_album {
-                // No album to fall back on, but other collection(s) exist.
-                // Find one of those other collection_file_path values.
-                if let Ok(Some(new_path)) = find_other_collection_path(conn, h.track_id, collection_id) {
-                    promote_paths.push((h.track_id, new_path));
-                }
+            && &h.track_file_path == coll_path
+            && !h.has_album
+        {
+            // No album to fall back on, but other collection(s) exist.
+            // Find one of those other collection_file_path values.
+            if let Ok(Some(new_path)) = find_other_collection_path(conn, h.track_id, collection_id)
+            {
+                promote_paths.push((h.track_id, new_path));
             }
-            // If has_album, file_path should already point at the album file
-            // (set by organize when the album move happens).
+        }
+        // If has_album, file_path should already point at the album file
+        // (set by organize when the album move happens).
     }
 
     Ok(DeleteCollectionPlan {
@@ -840,9 +851,8 @@ pub fn cleanup_roots(settings: &Settings) -> Vec<PathBuf> {
 pub(crate) fn remove_empty_parents(dir: &Path, roots: &[PathBuf]) -> u32 {
     // Must live strictly inside at least one root. Being equal to a root
     // is not enough — roots themselves are sacrosanct.
-    let is_inside_a_root = |p: &Path| -> bool {
-        roots.iter().any(|r| p.starts_with(r) && p != r.as_path())
-    };
+    let is_inside_a_root =
+        |p: &Path| -> bool { roots.iter().any(|r| p.starts_with(r) && p != r.as_path()) };
     if !is_inside_a_root(dir) {
         return 0;
     }

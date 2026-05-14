@@ -176,7 +176,7 @@ fn default_path_template_single_disc() -> String {
 }
 
 fn default_collection_path_template() -> String {
-    "Collections/{collection}/{track:02} {album_artist} - {title}.{ext}".to_string()
+    "Collections/{collection}/{position:02} {album_artist} - {title}.{ext}".to_string()
 }
 
 fn default_loose_path_template() -> String {
@@ -259,8 +259,7 @@ impl Settings {
         // Expand tilde in paths
         settings.library.music_dir =
             crate::config::paths::expand_tilde(&settings.library.music_dir);
-        settings.library.data_dir =
-            crate::config::paths::expand_tilde(&settings.library.data_dir);
+        settings.library.data_dir = crate::config::paths::expand_tilde(&settings.library.data_dir);
         settings.library.inbox_dirs = settings
             .library
             .inbox_dirs

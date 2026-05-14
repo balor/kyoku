@@ -14,20 +14,26 @@ pub struct TemplateVars {
     pub ext: String,
     pub label: String,
     pub collection: String,
+    pub position: u32,
 }
 
 /// Render a path template by replacing `{variable}` and `{variable:format}`
 /// placeholders with sanitized values from `vars`.
 ///
 /// Supported format specifiers:
-/// - `{track:02}` → zero-padded to 2 digits
-/// - `{disc:0}`   → plain number (no padding)
-/// - `{year:4}`   → 4-digit year
+/// - `{track:02}`    → zero-padded track number to 2 digits
+/// - `{position:02}` → zero-padded collection position to 2 digits
+/// - `{disc:0}`      → plain number (no padding)
+/// - `{year:4}`      → 4-digit year
 pub fn render_path(template: &str, vars: &TemplateVars) -> PathBuf {
     let mut result = template.to_string();
 
     // Process each {var} or {var:format} placeholder
-    result = replace_var(&result, "album_artist", fallback(&vars.album_artist, &vars.artist));
+    result = replace_var(
+        &result,
+        "album_artist",
+        fallback(&vars.album_artist, &vars.artist),
+    );
     result = replace_var(&result, "artist", fallback(&vars.artist, "Unknown"));
     result = replace_var(&result, "album", fallback(&vars.album, "Unknown Album"));
     result = replace_var(&result, "year", fallback(&vars.year, "0000"));
@@ -39,6 +45,7 @@ pub fn render_path(template: &str, vars: &TemplateVars) -> PathBuf {
 
     // Numeric variables with format specifiers
     result = replace_num_var(&result, "track", vars.track);
+    result = replace_num_var(&result, "position", vars.position);
     result = replace_num_var(&result, "disc", vars.disc);
 
     PathBuf::from(result)
@@ -66,7 +73,7 @@ fn replace_num_var(template: &str, name: &str, value: u32) -> String {
         if let Some(end) = rest.find('}') {
             let format_spec = &rest[..end];
             let formatted = format_number(value, format_spec);
-            let full_pattern = format!("{}{}}}",  prefix, format_spec);
+            let full_pattern = format!("{}{}}}", prefix, format_spec);
             result = result.replacen(&full_pattern, &formatted, 1);
         } else {
             break;
@@ -86,9 +93,10 @@ fn format_number(value: u32, spec: &str) -> String {
         return value.to_string();
     }
     if let Some(stripped) = spec.strip_prefix('0')
-        && let Ok(width) = stripped.parse::<usize>() {
-            return format!("{:0>width$}", value, width = width);
-        }
+        && let Ok(width) = stripped.parse::<usize>()
+    {
+        return format!("{:0>width$}", value, width = width);
+    }
     if let Ok(width) = spec.parse::<usize>() {
         return format!("{:>width$}", value, width = width);
     }
@@ -180,7 +188,10 @@ mod tests {
             ext: "flac".to_string(),
             ..Default::default()
         };
-        let path = render_path("{album_artist}/{album} ({year})/{track:02} {title}.{ext}", &vars);
+        let path = render_path(
+            "{album_artist}/{album} ({year})/{track:02} {title}.{ext}",
+            &vars,
+        );
         assert_eq!(
             path,
             PathBuf::from("Radiohead/OK Computer (1997)/02 Paranoid Android.flac")
@@ -196,10 +207,7 @@ mod tests {
             ..Default::default()
         };
         let path = render_path("{album_artist}/{album}/{track:02} {title}.{ext}", &vars);
-        assert_eq!(
-            path,
-            PathBuf::from("Unknown/Unknown Album/01 Song.mp3")
-        );
+        assert_eq!(path, PathBuf::from("Unknown/Unknown Album/01 Song.mp3"));
     }
 
     #[test]
@@ -239,10 +247,7 @@ mod tests {
             ..Default::default()
         };
         let path = render_path("{album_artist}/{album}/{track:02} {title}.{ext}", &vars);
-        assert_eq!(
-            path,
-            PathBuf::from("初音ミク/VOCALOID BEST/03 千本桜.mp3")
-        );
+        assert_eq!(path, PathBuf::from("初音ミク/VOCALOID BEST/03 千本桜.mp3"));
     }
 
     #[test]
@@ -256,5 +261,14 @@ mod tests {
             render_path("{disc:0}-{track:02}", &vars),
             PathBuf::from("2-07")
         );
+    }
+
+    #[test]
+    fn position_format_specifier() {
+        let vars = TemplateVars {
+            position: 7,
+            ..Default::default()
+        };
+        assert_eq!(render_path("{position:02}", &vars), PathBuf::from("07"));
     }
 }

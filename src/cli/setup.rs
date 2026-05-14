@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use inquire::{Confirm, Select, Text};
 
-use crate::config::{self, Settings, settings::{CoverArtSize, NameScriptPreference}};
+use crate::config::{
+    self, Settings,
+    settings::{CoverArtSize, NameScriptPreference},
+};
 
 pub fn run(current: Settings) -> anyhow::Result<()> {
     let config_path = config::paths::config_file();
@@ -239,9 +242,9 @@ data_dir = "{db_dir}"
 # Inbox directories — kyoku scans these for new/unimported files.
 inbox_dirs = {inbox_toml}
 
-# Path template for organizing files (used by `kyoku organize`)
+# Path template for organizing album files (used by `kyoku organize`)
 # Available variables: {{artist}}, {{album_artist}}, {{album}}, {{year}}, {{track}},
-#                      {{title}}, {{disc}}, {{genre}}, {{ext}}, {{artist_sort}}
+#                      {{title}}, {{disc}}, {{genre}}, {{label}}, {{ext}}
 path_template = "{{album_artist}}/{{album}} ({{year}})/{{disc:0}}-{{track:02}} {{title}}.{{ext}}"
 
 # Template for single-disc albums (disc_total == 1)
@@ -249,8 +252,9 @@ path_template_single_disc = "{{album_artist}}/{{album}} ({{year}})/{{track:02}} 
 
 # Default template for tracks copied/linked into a collection (when the
 # collection itself doesn't override it). Available variables: same as
-# path_template, plus {{collection}}.
-collection_path_template = "Collections/{{collection}}/{{track:02}} {{album_artist}} - {{title}}.{{ext}}"
+# path_template, plus {{collection}} and {{position}}. Use {{position}}
+# for collection numbering; {{track}} always means the track-number tag.
+collection_path_template = "Collections/{{collection}}/{{position:02}} {{album_artist}} - {{title}}.{{ext}}"
 
 # Template for "loose" tracks — files with no album / not part of a
 # collection. Kept simple on purpose so they're easy to find.

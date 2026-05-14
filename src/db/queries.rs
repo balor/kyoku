@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::Connection;
 
+use crate::core::collection_order::{self, CollectionOrderItem};
 use crate::db::models::Track;
 use crate::error::Result;
 
@@ -175,12 +176,60 @@ pub fn get_or_create_collection(conn: &Connection, name: &str) -> Result<(i64, b
 }
 
 /// Add a track to a collection. Returns true if the track was newly added.
-pub fn add_track_to_collection(conn: &Connection, collection_id: i64, track_id: i64) -> Result<bool> {
-    conn.execute(
-        "INSERT OR IGNORE INTO collection_tracks (collection_id, track_id) VALUES (?1, ?2)",
-        rusqlite::params![collection_id, track_id],
+///
+/// New memberships get an append position. Existing memberships are left
+/// untouched and do not consume a position.
+pub fn add_track_to_collection(
+    conn: &Connection,
+    collection_id: i64,
+    track_id: i64,
+) -> Result<bool> {
+    add_tracks_to_collection_ordered(conn, collection_id, &[track_id]).map(|n| n > 0)
+}
+
+/// Add tracks to a collection in the provided order. Returns the number of
+/// newly inserted memberships. Existing memberships are skipped without
+/// changing their stored position.
+pub fn add_tracks_to_collection_ordered(
+    conn: &Connection,
+    collection_id: i64,
+    track_ids: &[i64],
+) -> Result<u32> {
+    let mut next_position = next_collection_position(conn, collection_id)?;
+    let mut added = 0u32;
+
+    for &track_id in track_ids {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM collection_tracks
+                WHERE collection_id = ?1 AND track_id = ?2
+             )",
+            rusqlite::params![collection_id, track_id],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if exists {
+            continue;
+        }
+
+        conn.execute(
+            "INSERT INTO collection_tracks (collection_id, track_id, position)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![collection_id, track_id, next_position],
+        )?;
+        next_position += 1;
+        added += 1;
+    }
+
+    Ok(added)
+}
+
+fn next_collection_position(conn: &Connection, collection_id: i64) -> Result<u32> {
+    let (max_position, member_count): (Option<u32>, u32) = conn.query_row(
+        "SELECT MAX(position), COUNT(*) FROM collection_tracks WHERE collection_id = ?1",
+        [collection_id],
+        |row| Ok((row.get(0)?, row.get::<_, u32>(1)?)),
     )?;
-    Ok(conn.changes() > 0)
+    Ok(max_position.unwrap_or(0).max(member_count) + 1)
 }
 
 /// Count total tracks in the database.
@@ -295,7 +344,10 @@ pub fn list_albums(
         dir,
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params![limit as i64, offset as i64], map_album_row)?;
+    let rows = stmt.query_map(
+        rusqlite::params![limit as i64, offset as i64],
+        map_album_row,
+    )?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);
@@ -322,7 +374,10 @@ pub fn list_loose_tracks(conn: &Connection, offset: usize, limit: usize) -> Resu
          ORDER BY title COLLATE NOCASE
          LIMIT ?1 OFFSET ?2",
     )?;
-    let rows = stmt.query_map(rusqlite::params![limit as i64, offset as i64], map_track_row)?;
+    let rows = stmt.query_map(
+        rusqlite::params![limit as i64, offset as i64],
+        map_track_row,
+    )?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);
@@ -526,6 +581,12 @@ pub fn search_collections(conn: &Connection, query: &str) -> Result<Vec<Collecti
     Ok(result)
 }
 
+struct CollectionTrackSortRow {
+    track: TrackRow,
+    explicit_position: Option<u32>,
+    album_id: Option<i64>,
+}
+
 /// Get tracks in a collection.
 pub fn get_collection_tracks(
     conn: &Connection,
@@ -533,24 +594,98 @@ pub fn get_collection_tracks(
     offset: usize,
     limit: usize,
 ) -> Result<Vec<TrackRow>> {
+    let rows = load_collection_track_sort_rows(conn, collection_id)?;
+    let items: Vec<CollectionOrderItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| CollectionOrderItem {
+            index: idx,
+            track_id: row.track.id,
+            explicit_position: row.explicit_position,
+            disc_number: row.track.disc_number,
+            track_number: row.track.track_number,
+            album_id: row.album_id,
+            album_key: None,
+            added_order: idx,
+            title: row.track.title.clone(),
+        })
+        .collect();
+    let ordered = collection_order::ordered_indices(&items);
+
+    let start = offset.min(ordered.len());
+    let end = start.saturating_add(limit).min(ordered.len());
+    Ok(ordered[start..end]
+        .iter()
+        .map(|&idx| rows[idx].track.clone())
+        .collect())
+}
+
+fn load_collection_track_sort_rows(
+    conn: &Connection,
+    collection_id: i64,
+) -> Result<Vec<CollectionTrackSortRow>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, t.artist, t.track_number, t.disc_number, t.duration_ms,
-                t.tag_status, t.bitrate, t.file_format, t.file_path
+                t.tag_status, t.bitrate, t.file_format, t.file_path,
+                ct.position, t.album_id
          FROM collection_tracks ct
          JOIN tracks t ON t.id = ct.track_id
          WHERE ct.collection_id = ?1
-         ORDER BY ct.position, t.title COLLATE NOCASE
-         LIMIT ?2 OFFSET ?3",
+         ORDER BY ct.added_at, t.id",
     )?;
-    let rows = stmt.query_map(
-        rusqlite::params![collection_id, limit as i64, offset as i64],
-        map_track_row,
-    )?;
-    let mut result = Vec::new();
+    let rows = stmt.query_map([collection_id], |row| {
+        Ok(CollectionTrackSortRow {
+            track: TrackRow {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                artist: row.get(2)?,
+                track_number: row.get(3)?,
+                disc_number: row.get::<_, Option<u32>>(4)?.unwrap_or(1),
+                duration_ms: row.get::<_, Option<i64>>(5)?.map(|v| v as u64),
+                tag_status: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                bitrate: row.get(7)?,
+                file_format: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                file_path: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+            },
+            explicit_position: row.get(10)?,
+            album_id: row.get(11)?,
+        })
+    })?;
+    let mut out = Vec::new();
     for row in rows {
-        result.push(row?);
+        out.push(row?);
     }
-    Ok(result)
+    Ok(out)
+}
+
+fn get_collection_effective_positions(
+    conn: &Connection,
+    collection_id: i64,
+) -> Result<HashMap<i64, u32>> {
+    let rows = load_collection_track_sort_rows(conn, collection_id)?;
+    let items: Vec<CollectionOrderItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| CollectionOrderItem {
+            index: idx,
+            track_id: row.track.id,
+            explicit_position: row.explicit_position,
+            disc_number: row.track.disc_number,
+            track_number: row.track.track_number,
+            album_id: row.album_id,
+            album_key: None,
+            added_order: idx,
+            title: row.track.title.clone(),
+        })
+        .collect();
+    let effective = collection_order::effective_positions(&items);
+    let mut out = HashMap::new();
+    for (idx, pos) in effective {
+        if let Some(row) = rows.get(idx) {
+            out.insert(row.track.id, pos);
+        }
+    }
+    Ok(out)
 }
 
 /// Load every `collection_file_path` for a collection, keyed by track_id.
@@ -750,8 +885,10 @@ pub fn get_tracks_delete_info(
         "SELECT id, file_path, album_id FROM tracks WHERE id IN ({})",
         placeholders
     );
-    let params: Vec<&dyn rusqlite::ToSql> =
-        track_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    let params: Vec<&dyn rusqlite::ToSql> = track_ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::ToSql)
+        .collect();
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params.as_slice(), |row| {
@@ -786,12 +923,11 @@ pub fn list_tracks_for_albums(conn: &Connection, album_ids: &[i64]) -> Result<Ve
         return Ok(Vec::new());
     }
     let placeholders = album_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let sql = format!(
-        "SELECT id FROM tracks WHERE album_id IN ({})",
-        placeholders
-    );
-    let params: Vec<&dyn rusqlite::ToSql> =
-        album_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    let sql = format!("SELECT id FROM tracks WHERE album_id IN ({})", placeholders);
+    let params: Vec<&dyn rusqlite::ToSql> = album_ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::ToSql)
+        .collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, i64>(0))?;
     let mut out = Vec::new();
@@ -863,6 +999,14 @@ pub fn set_track_tag_status(conn: &Connection, track_id: i64, status: &str) -> R
 
 /// Track data needed to compute an organize target path.
 #[derive(Debug, Clone)]
+pub struct OrganizeCollectionMembership {
+    pub id: i64,
+    pub name: String,
+    pub path_template: Option<String>,
+    pub effective_position: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct OrganizeTrackRow {
     pub id: i64,
     pub title: String,
@@ -877,8 +1021,7 @@ pub struct OrganizeTrackRow {
     pub genre: Option<String>,
     pub label: Option<String>,
     pub disc_total: Option<u32>,
-    /// (collection_id, collection_name, collection path_template or None)
-    pub collections: Vec<(i64, String, Option<String>)>,
+    pub collections: Vec<OrganizeCollectionMembership>,
 }
 
 /// Get all tracks with album + collection info for organizing.
@@ -950,9 +1093,12 @@ pub fn get_all_tracks_for_organize(
         tracks.push(row?);
     }
 
-    // Load collection memberships
+    // Load collection memberships. Effective positions are computed against
+    // the whole collection (not just the filtered organize subset) so
+    // collection filenames stay stable when organizing one artist/album.
+    let mut effective_cache: HashMap<i64, HashMap<i64, u32>> = HashMap::new();
     let mut coll_stmt = conn.prepare(
-        "SELECT ct.collection_id, c.name, c.path_template
+        "SELECT ct.collection_id, c.name, c.path_template, ct.position
          FROM collection_tracks ct
          JOIN collections c ON c.id = ct.collection_id
          WHERE ct.track_id = ?1",
@@ -963,10 +1109,25 @@ pub fn get_all_tracks_for_organize(
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<u32>>(3)?,
             ))
         })?;
         for c in colls {
-            track.collections.push(c?);
+            let (id, name, path_template, position) = c?;
+            if let std::collections::hash_map::Entry::Vacant(entry) = effective_cache.entry(id) {
+                entry.insert(get_collection_effective_positions(conn, id)?);
+            }
+            let effective_position = effective_cache
+                .get(&id)
+                .and_then(|positions| positions.get(&track.id).copied())
+                .or(position)
+                .unwrap_or(0);
+            track.collections.push(OrganizeCollectionMembership {
+                id,
+                name,
+                path_template,
+                effective_position,
+            });
         }
     }
 
@@ -1108,15 +1269,13 @@ const EXISTING_TRACK_SELECT: &str = "SELECT \
 /// pass in `dup_detect::detect`.
 pub fn find_track_by_mbid(conn: &Connection, mbid: &str) -> Result<Option<ExistingTrackRef>> {
     let sql = format!("{} WHERE t.mbid = ?1 LIMIT 1", EXISTING_TRACK_SELECT);
-    let row = conn
-        .query_row(&sql, [mbid], map_existing_track)
-        .ok();
+    let row = conn.query_row(&sql, [mbid], map_existing_track).ok();
     Ok(row)
 }
 
 /// Look up an existing track by its position within an album (album + disc
 /// + track number). Used as the secondary duplicate signal when MBIDs
-/// aren't available on one or both sides.
+///   aren't available on one or both sides.
 pub fn find_track_by_album_slot(
     conn: &Connection,
     album_id: i64,
@@ -1241,6 +1400,14 @@ mod tests {
         }
     }
 
+    fn test_track_with(path: &str, title: &str, track_number: Option<u32>) -> Track {
+        let mut track = test_track();
+        track.file_path = PathBuf::from(path);
+        track.title = title.to_string();
+        track.track_number = track_number;
+        track
+    }
+
     #[test]
     fn test_track_exists_by_path_empty_db() {
         let conn = db::open_memory().unwrap();
@@ -1292,10 +1459,146 @@ mod tests {
         // Add a track
         let track = test_track();
         let track_id = insert_track(&conn, &track, None, None).unwrap();
-        add_track_to_collection(&conn, coll_id, track_id).unwrap();
+        assert!(add_track_to_collection(&conn, coll_id, track_id).unwrap());
 
-        // Adding again should not error (OR IGNORE)
-        add_track_to_collection(&conn, coll_id, track_id).unwrap();
+        // Adding again should not error or report a new membership.
+        assert!(!add_track_to_collection(&conn, coll_id, track_id).unwrap());
+    }
+
+    #[test]
+    fn test_collection_positions_append_without_readd_consuming_position() {
+        let conn = db::open_memory().unwrap();
+        let (coll_id, _) = get_or_create_collection(&conn, "Mix").unwrap();
+        let t1 = insert_track(
+            &conn,
+            &test_track_with("/test/one.mp3", "One", Some(1)),
+            None,
+            None,
+        )
+        .unwrap();
+        let t2 = insert_track(
+            &conn,
+            &test_track_with("/test/two.mp3", "Two", Some(2)),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(add_track_to_collection(&conn, coll_id, t1).unwrap());
+        assert!(!add_track_to_collection(&conn, coll_id, t1).unwrap());
+        assert!(add_track_to_collection(&conn, coll_id, t2).unwrap());
+
+        let positions: Vec<(i64, u32)> = conn
+            .prepare(
+                "SELECT track_id, position FROM collection_tracks
+                 WHERE collection_id = ?1 ORDER BY position",
+            )
+            .unwrap()
+            .query_map([coll_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(positions, vec![(t1, 1), (t2, 2)]);
+    }
+
+    #[test]
+    fn test_collection_tracks_use_explicit_position_order() {
+        let conn = db::open_memory().unwrap();
+        let (coll_id, _) = get_or_create_collection(&conn, "Mix").unwrap();
+        let t1 = insert_track(
+            &conn,
+            &test_track_with("/test/a.mp3", "A", Some(1)),
+            None,
+            None,
+        )
+        .unwrap();
+        let t2 = insert_track(
+            &conn,
+            &test_track_with("/test/b.mp3", "B", Some(2)),
+            None,
+            None,
+        )
+        .unwrap();
+        add_tracks_to_collection_ordered(&conn, coll_id, &[t1, t2]).unwrap();
+        conn.execute(
+            "UPDATE collection_tracks
+             SET position = CASE track_id WHEN ?1 THEN 2 WHEN ?2 THEN 1 END
+             WHERE collection_id = ?3",
+            rusqlite::params![t1, t2, coll_id],
+        )
+        .unwrap();
+
+        let tracks = get_collection_tracks(&conn, coll_id, 0, 10).unwrap();
+        assert_eq!(
+            tracks.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![t2, t1]
+        );
+    }
+
+    #[test]
+    fn test_collection_tracks_legacy_cohesive_metadata_order() {
+        let conn = db::open_memory().unwrap();
+        let (album_id, _) =
+            get_or_create_album(&conn, "Album", Some("Artist"), None, None, 2).unwrap();
+        let (coll_id, _) = get_or_create_collection(&conn, "Mix").unwrap();
+        let t2 = insert_track(
+            &conn,
+            &test_track_with("/test/two.mp3", "Two", Some(2)),
+            Some(album_id),
+            None,
+        )
+        .unwrap();
+        let t1 = insert_track(
+            &conn,
+            &test_track_with("/test/one.mp3", "One", Some(1)),
+            Some(album_id),
+            None,
+        )
+        .unwrap();
+        add_tracks_to_collection_ordered(&conn, coll_id, &[t2, t1]).unwrap();
+        conn.execute(
+            "UPDATE collection_tracks SET position = NULL WHERE collection_id = ?1",
+            [coll_id],
+        )
+        .unwrap();
+
+        let tracks = get_collection_tracks(&conn, coll_id, 0, 10).unwrap();
+        assert_eq!(
+            tracks.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![t1, t2]
+        );
+    }
+
+    #[test]
+    fn test_collection_tracks_legacy_scrambled_metadata_uses_add_order_not_title() {
+        let conn = db::open_memory().unwrap();
+        let (coll_id, _) = get_or_create_collection(&conn, "Mix").unwrap();
+        let zulu = insert_track(
+            &conn,
+            &test_track_with("/test/z.mp3", "Zulu", Some(7)),
+            None,
+            None,
+        )
+        .unwrap();
+        let alpha = insert_track(
+            &conn,
+            &test_track_with("/test/a.mp3", "Alpha", Some(2)),
+            None,
+            None,
+        )
+        .unwrap();
+        add_tracks_to_collection_ordered(&conn, coll_id, &[zulu, alpha]).unwrap();
+        conn.execute(
+            "UPDATE collection_tracks SET position = NULL WHERE collection_id = ?1",
+            [coll_id],
+        )
+        .unwrap();
+
+        let tracks = get_collection_tracks(&conn, coll_id, 0, 10).unwrap();
+        assert_eq!(
+            tracks.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![zulu, alpha]
+        );
     }
 
     #[test]
