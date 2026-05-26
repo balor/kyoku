@@ -776,14 +776,17 @@ pub fn get_track(conn: &Connection, track_id: i64) -> Result<Option<TrackRow>> {
 }
 
 /// Update a track's fields in the database.
+/// Whitelist of tracks-table columns that [`update_track_fields`] may modify.
+/// Const so it can't be accidentally mutated and is checked at compile time.
+const UPDATABLE_FIELDS: &[&str] = &["title", "artist", "track_number", "disc_number"];
+
 pub fn update_track_fields(
     conn: &Connection,
     track_id: i64,
     fields: &[(&str, &str)],
 ) -> Result<()> {
     for (field, value) in fields {
-        let allowed = ["title", "artist", "track_number", "disc_number"];
-        if !allowed.contains(field) {
+        if !UPDATABLE_FIELDS.contains(field) {
             continue;
         }
         let sql = format!("UPDATE tracks SET {} = ?1 WHERE id = ?2", field);
