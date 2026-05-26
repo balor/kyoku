@@ -51,6 +51,40 @@ pub struct TagData {
     pub duration: Option<Duration>,
 }
 
+/// Extract [`TagData`] from an already-parsed tagged file.
+///
+/// Used internally by both [`read_tags`] and [`read_track`] so the file
+/// is only read and parsed once.
+fn tag_data_from_tagged_file(
+    tagged_file: &lofty::file::TaggedFile,
+) -> TagData {
+    let tag = tagged_file
+        .primary_tag()
+        .or_else(|| tagged_file.first_tag());
+
+    let properties = tagged_file.properties();
+
+    TagData {
+        title: tag.and_then(|t| t.title().map(|s: std::borrow::Cow<str>| s.into_owned())),
+        artist: tag.and_then(|t| t.artist().map(|s: std::borrow::Cow<str>| s.into_owned())),
+        album: tag.and_then(|t| t.album().map(|s: std::borrow::Cow<str>| s.into_owned())),
+        album_artist: tag.and_then(|t| {
+            // lofty doesn't have a direct album_artist accessor on Accessor trait,
+            // so we check common tag items
+            t.get_string(ItemKey::AlbumArtist).map(|s: &str| s.to_string())
+        }),
+        year: tag.and_then(|t| {
+            // year() was removed in lofty 0.23, use get_string with Year key
+            t.get_string(ItemKey::Year)
+                .and_then(|s: &str| s.parse::<u32>().ok())
+        }),
+        track_number: tag.and_then(|t| t.track()),
+        disc_number: tag.and_then(|t| t.disk()),
+        genre: tag.and_then(|t| t.genre().map(|s: std::borrow::Cow<str>| s.into_owned())),
+        duration: Some(properties.duration()),
+    }
+}
+
 /// Read tags and audio properties from a file.
 pub fn read_tags(path: impl AsRef<Path>) -> Result<TagData> {
     let path = path.as_ref();
@@ -60,33 +94,7 @@ pub fn read_tags(path: impl AsRef<Path>) -> Result<TagData> {
         source: e,
     })?;
 
-    let tag = tagged_file
-        .primary_tag()
-        .or_else(|| tagged_file.first_tag());
-
-    let properties = tagged_file.properties();
-
-    let data = TagData {
-        title: tag.and_then(|t| t.title().map(|s| s.to_string())),
-        artist: tag.and_then(|t| t.artist().map(|s| s.to_string())),
-        album: tag.and_then(|t| t.album().map(|s| s.to_string())),
-        album_artist: tag.and_then(|t| {
-            // lofty doesn't have a direct album_artist accessor on Accessor trait,
-            // so we check common tag items
-            t.get_string(ItemKey::AlbumArtist).map(|s| s.to_string())
-        }),
-        year: tag.and_then(|t| {
-            // year() was removed in lofty 0.23, use get_string with Year key
-            t.get_string(ItemKey::Year)
-                .and_then(|s| s.parse::<u32>().ok())
-        }),
-        track_number: tag.and_then(|t| t.track()),
-        disc_number: tag.and_then(|t| t.disk()),
-        genre: tag.and_then(|t| t.genre().map(|s| s.to_string())),
-        duration: Some(properties.duration()),
-    };
-
-    Ok(data)
+    Ok(tag_data_from_tagged_file(&tagged_file))
 }
 
 /// Read a file's tags and audio properties into a Track struct.
@@ -109,12 +117,11 @@ pub fn read_track(path: impl AsRef<Path>) -> Result<Track> {
         });
     }
 
-    let tag_data = read_tags(path)?;
-
     let tagged_file = lofty::read_from_path(path).map_err(|e| KyokuError::TagRead {
         path: path.to_path_buf(),
         source: e,
     })?;
+    let tag_data = tag_data_from_tagged_file(&tagged_file);
     let properties = tagged_file.properties();
 
     // If title is missing, derive from filename (spec rule #2)
