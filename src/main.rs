@@ -34,21 +34,18 @@ fn main() -> anyhow::Result<()> {
         if let Some(parent) = log_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        match std::fs::OpenOptions::new()
+        // If we can't open the log file, stay silent rather than corrupt the TUI.
+        if let Ok(file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log_path)
         {
-            Ok(file) => {
-                tracing_subscriber::fmt()
-                    .with_env_filter(env_filter)
-                    .with_writer(std::sync::Mutex::new(file))
-                    .with_ansi(false)
-                    .with_target(false)
-                    .init();
-            }
-            // If we can't open the log file, stay silent rather than corrupt the TUI.
-            Err(_) => {}
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_writer(std::sync::Mutex::new(file))
+                .with_ansi(false)
+                .with_target(false)
+                .init();
         }
     } else {
         tracing_subscriber::fmt()
