@@ -328,15 +328,6 @@ impl CollectionsView {
                             "{} file(s) inside the music directory",
                             total_files
                         ));
-                    } else if !plan.files_outside_music_dir.is_empty() {
-                        widget = widget.without_checkbox();
-                        widget = widget.with_detail(format!(
-                            "{} file(s) outside the music directory will be left on disk",
-                            plan.files_outside_music_dir.len()
-                        ));
-                        widget = widget.with_detail(
-                            "No files inside the managed directory — nothing to delete".to_string(),
-                        );
                     } else {
                         widget = widget.without_checkbox();
                     }
@@ -351,7 +342,7 @@ impl CollectionsView {
                             plan.orphaned_track_ids.len(), suffix
                         ));
                     }
-                    if total_files > 0 && !plan.files_outside_music_dir.is_empty() {
+                    if !plan.files_outside_music_dir.is_empty() {
                         widget = widget.with_detail(format!(
                             "{} file(s) outside the music directory will be left on disk",
                             plan.files_outside_music_dir.len()
@@ -386,15 +377,6 @@ impl CollectionsView {
                         "{} file(s) inside the music directory",
                         total_files
                     ));
-                } else if total_outside > 0 {
-                    widget = widget.without_checkbox();
-                    widget = widget.with_detail(format!(
-                        "{} file(s) outside the music directory will be left on disk",
-                        total_outside
-                    ));
-                    widget = widget.with_detail(
-                        "No files inside the managed directory — nothing to delete".to_string(),
-                    );
                 } else {
                     widget = widget.without_checkbox();
                 }
@@ -423,7 +405,7 @@ impl CollectionsView {
                         total_orphans, suffix
                     ));
                 }
-                if total_files > 0 && total_outside > 0 {
+                if total_outside > 0 {
                     widget = widget.with_detail(format!(
                         "{} file(s) outside the music directory will be left on disk",
                         total_outside
@@ -1253,24 +1235,15 @@ fn build_collection_track_confirm(plan: &pruner::DeletePlan) -> ConfirmDelete {
             plan.collection_copies_to_delete.len()
         ));
     }
-    if plan.deletable_file_count() == 0 && plan.files_outside_managed.is_empty() {
-        popup = popup.without_checkbox();
-    } else if plan.deletable_file_count() == 0 {
-        popup = popup.without_checkbox();
+    if !plan.files_outside_managed.is_empty() {
         popup = popup.with_detail(format!(
             "{} file(s) outside the music directory will be left on disk",
             plan.files_outside_managed.len()
         ));
-        popup = popup.with_detail(
-            "No files inside the managed directory — nothing to delete".to_string(),
-        );
+    }
+    if plan.deletable_file_count() == 0 {
+        popup = popup.without_checkbox();
     } else {
-        if !plan.files_outside_managed.is_empty() {
-            popup = popup.with_detail(format!(
-                "{} file(s) outside the music directory will be left on disk",
-                plan.files_outside_managed.len()
-            ));
-        }
         popup = popup.with_checkbox_label(format!(
             "Also delete {} file(s) from disk",
             plan.deletable_file_count()
