@@ -125,6 +125,9 @@ impl ConfirmDelete {
             }
         }
 
+        if !self.warnings.is_empty() && !self.details.is_empty() {
+            content.push(Line::from(""));
+        }
         for warning in &self.warnings {
             push_wrapped_styled(
                 &mut content,
