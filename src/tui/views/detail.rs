@@ -1130,15 +1130,24 @@ fn build_track_confirm(plan: &pruner::DeletePlan) -> ConfirmDelete {
             plan.collection_copies_to_delete.len()
         ));
     }
-    if plan.deletable_file_count() > 0 && !plan.files_outside_managed.is_empty() {
+    if plan.deletable_file_count() == 0 && plan.files_outside_managed.is_empty() {
+        popup = popup.without_checkbox();
+    } else if plan.deletable_file_count() == 0 {
+        popup = popup.without_checkbox();
         popup = popup.with_detail(format!(
             "{} file(s) outside the music directory will be left on disk",
             plan.files_outside_managed.len()
         ));
-    }
-    if plan.deletable_file_count() == 0 {
-        popup = popup.without_checkbox();
+        popup = popup.with_detail(
+            "No files inside the managed directory — nothing to delete".to_string(),
+        );
     } else {
+        if !plan.files_outside_managed.is_empty() {
+            popup = popup.with_detail(format!(
+                "{} file(s) outside the music directory will be left on disk",
+                plan.files_outside_managed.len()
+            ));
+        }
         popup = popup.with_checkbox_label(format!(
             "Also delete {} file(s) from disk",
             plan.deletable_file_count()

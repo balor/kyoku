@@ -633,15 +633,24 @@ fn build_album_confirm(plan: &pruner::DeletePlan, album_count: usize) -> Confirm
     if plan.additional_albums > 0 {
         popup = popup.with_detail(format!("…and {} more album(s)", plan.additional_albums));
     }
-    if plan.deletable_file_count() > 0 && !plan.files_outside_managed.is_empty() {
+    if plan.deletable_file_count() == 0 && plan.files_outside_managed.is_empty() {
+        popup = popup.without_checkbox();
+    } else if plan.deletable_file_count() == 0 {
+        popup = popup.without_checkbox();
         popup = popup.with_detail(format!(
             "{} file(s) outside the music directory will be left on disk",
             plan.files_outside_managed.len()
         ));
-    }
-    if plan.deletable_file_count() == 0 {
-        popup = popup.without_checkbox();
+        popup = popup.with_detail(
+            "No files inside the managed directory — nothing to delete".to_string(),
+        );
     } else {
+        if !plan.files_outside_managed.is_empty() {
+            popup = popup.with_detail(format!(
+                "{} file(s) outside the music directory will be left on disk",
+                plan.files_outside_managed.len()
+            ));
+        }
         popup = popup.with_checkbox_label(format!(
             "Also delete {} file(s) from disk",
             plan.deletable_file_count()
