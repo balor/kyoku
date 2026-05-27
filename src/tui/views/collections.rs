@@ -324,8 +324,8 @@ impl CollectionsView {
                     );
                     let total_files = plan.files_to_delete.len();
                     if total_files > 0 {
-                        widget = widget.with_summary(format!(
-                            "{} file(s) inside the music directory",
+                        widget = widget.with_detail(format!(
+                            "{} file(s) to delete from disk",
                             total_files
                         ));
                     } else {
@@ -373,8 +373,8 @@ impl CollectionsView {
                     format!("Delete {} collections?", plans.len()),
                 );
                 if total_files > 0 {
-                    widget = widget.with_summary(format!(
-                        "{} file(s) inside the music directory",
+                    widget = widget.with_detail(format!(
+                        "{} file(s) to delete from disk",
                         total_files
                     ));
                 } else {
