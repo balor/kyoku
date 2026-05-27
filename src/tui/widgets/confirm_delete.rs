@@ -84,8 +84,10 @@ impl ConfirmDelete {
             KeyCode::Char('y') | KeyCode::Enter => ConfirmAction::Confirm {
                 delete_files: self.show_checkbox && self.delete_files,
             },
-            KeyCode::Esc => ConfirmAction::Cancel,
-            _ => ConfirmAction::Cancel,
+            // q and Esc cancel; all other keys are ignored so stray
+            // keypresses (e.g. '?') don't accidentally dismiss the popup.
+            KeyCode::Esc | KeyCode::Char('q') => ConfirmAction::Cancel,
+            _ => ConfirmAction::None,
         }
     }
 
@@ -158,9 +160,9 @@ impl ConfirmDelete {
 
         content.push(Line::from(""));
         let hint = if self.show_checkbox {
-            "space=toggle, y/Enter=confirm, Esc=cancel"
+            "space=toggle, y/Enter=confirm, Esc/q=cancel"
         } else {
-            "y/Enter=confirm, Esc=cancel"
+            "y/Enter=confirm, Esc/q=cancel"
         };
         content.push(Line::from(Span::styled(
             hint,
