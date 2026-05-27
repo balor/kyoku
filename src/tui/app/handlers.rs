@@ -9,6 +9,8 @@ use super::{App, AppAction, AppView};
 use crate::db::queries;
 use crate::tui::keybindings as keys;
 use crate::tui::views::global_search::GlobalSearchAction;
+use crate::tui::views::import::ConfirmCancel;
+use crate::tui::widgets::confirm_delete::{ConfirmAction, ConfirmDelete};
 
 impl App {
     pub fn switch_view(&mut self, view: AppView) {
@@ -456,6 +458,27 @@ impl App {
             return AppAction::None;
         }
 
+        // Cancel-confirmation popup captures input when visible.
+        if let Some(state) = &mut self.import.confirm_cancel {
+            match state.popup.handle_key(key) {
+                ConfirmAction::Confirm { .. } => {
+                    let quit = state.quit_on_confirm;
+                    self.import.confirm_cancel = None;
+                    self.switch_view(AppView::Library);
+                    self.refresh_counts();
+                    if quit {
+                        return AppAction::Quit;
+                    }
+                    return AppAction::None;
+                }
+                ConfirmAction::Cancel => {
+                    self.import.confirm_cancel = None;
+                    return AppAction::None;
+                }
+                ConfirmAction::None => return AppAction::None,
+            }
+        }
+
         // When the wizard is capturing text input (e.g. custom-path field),
         // Esc is handled inside the view (clear input / exit custom mode)
         // — don't cancel the whole wizard unless the view itself decides.
@@ -468,8 +491,27 @@ impl App {
         let step_before = self.import.step.clone();
 
         if !capturing && keys::is_back(&key) && self.import.can_cancel() {
-            self.switch_view(AppView::Library);
-            self.refresh_counts();
+            self.import.confirm_cancel = Some(ConfirmCancel {
+                popup: ConfirmDelete::new(
+                    "Cancel import",
+                    "Leave the import wizard?",
+                )
+                .with_summary("Any in-progress selections will be lost.")
+                .without_checkbox(),
+                quit_on_confirm: false,
+            });
+            return AppAction::None;
+        }
+        if !capturing && keys::is_quit(&key) && self.import.can_cancel() {
+            self.import.confirm_cancel = Some(ConfirmCancel {
+                popup: ConfirmDelete::new(
+                    "Quit kyoku",
+                    "Leave the import wizard and quit?",
+                )
+                .with_summary("Any in-progress selections will be lost.")
+                .without_checkbox(),
+                quit_on_confirm: true,
+            });
             return AppAction::None;
         }
         self.import.handle_key(key, &self.conn);

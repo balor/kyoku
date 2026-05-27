@@ -267,6 +267,11 @@ impl App {
 
         self.import.render(frame, chunks[0], self.theme);
 
+        // Cancel-confirmation popup overlays the import view.
+        if let Some(state) = &self.import.confirm_cancel {
+            state.popup.render(frame, chunks[0], self.theme);
+        }
+
         let hints = self.import.status_hints();
         crate::tui::widgets::status_bar::render(frame, chunks[1], self.theme, &hints);
     }

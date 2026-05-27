@@ -18,6 +18,7 @@ use crate::core::tagger;
 use crate::db::models::Track;
 use crate::external::matching::MatchScore;
 use crate::external::musicbrainz::{MbClient, MbRelease};
+use crate::tui::widgets::confirm_delete::ConfirmDelete;
 use crate::tui::widgets::input::TextInput;
 use crate::tui::widgets::pick_collection::PickCollectionPopup;
 
@@ -221,6 +222,19 @@ pub struct ImportView {
     pub(super) conflicts: Vec<Conflict>,
     pub(super) decisions: Vec<ConflictDecision>,
     pub(super) conflict_cursor: usize,
+    /// Cancel-confirmation popup shown when the user presses `q` or `Esc`
+    /// during an active import wizard. `quit_on_confirm` is `true` when the
+    /// user pressed `q` (leave wizard + quit app) vs `false` for `Esc`
+    /// (leave wizard, return to library).
+    pub confirm_cancel: Option<ConfirmCancel>,
+}
+
+/// State for the import cancel-confirmation popup.
+pub struct ConfirmCancel {
+    pub popup: ConfirmDelete,
+    /// `true` → quit the app after leaving the wizard (`q`).
+    /// `false` → return to library (`Esc`).
+    pub quit_on_confirm: bool,
 }
 
 enum ScanMessage {
@@ -287,6 +301,7 @@ impl Default for ImportView {
             conflicts: Vec::new(),
             decisions: Vec::new(),
             conflict_cursor: 0,
+            confirm_cancel: None,
         }
     }
 }
@@ -321,6 +336,7 @@ impl ImportView {
         self.conflicts.clear();
         self.decisions.clear();
         self.conflict_cursor = 0;
+        self.confirm_cancel = None;
         self.rate_limit_ms = rate_limit_ms;
         self.name_script = name_script;
         self.write_tags = write_tags;
@@ -350,6 +366,15 @@ impl ImportView {
             self.library_source_index = Some(self.source_paths.len());
             self.source_paths.push(music_dir.to_path_buf());
         }
+    }
+
+    /// True when the wizard has an active popup (cancel confirmation,
+    /// MBID input, collection picker) that should capture key input and
+    /// suppress global shortcuts like `q`, `g`, `/`.
+    pub fn has_popup(&self) -> bool {
+        self.confirm_cancel.is_some()
+            || self.mbid_input.is_some()
+            || self.collection_picker.is_some()
     }
 
     /// True when the wizard is actively capturing text input and global

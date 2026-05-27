@@ -131,11 +131,16 @@ impl App {
         }
 
         // Global keys (suppressed when a view popup is accepting text input)
+        // The import view intercepts `q` to show a cancel confirmation
+        // rather than quitting the app directly.
         let view_captures_input = self.current_view_has_popup();
-        if !self.search.focused && !view_captures_input {
+        let suppress_quit = view_captures_input || self.view == AppView::Import;
+        if !self.search.focused && !suppress_quit {
             if keys::is_quit(&key) {
                 return AppAction::Quit;
             }
+        }
+        if !self.search.focused && !view_captures_input {
             if keys::is_help(&key) {
                 self.help.visible = true;
                 return AppAction::None;
@@ -197,7 +202,7 @@ impl App {
             AppView::Collections => self.collections.has_popup(),
             AppView::CollectionDetail { .. } => self.collection_detail.has_popup(),
             AppView::Editor { .. } => self.editor.is_editing(),
-            AppView::Import => self.import.is_capturing_input(),
+            AppView::Import => self.import.has_popup(),
         }
     }
 

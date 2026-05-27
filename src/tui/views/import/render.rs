@@ -165,25 +165,25 @@ impl ImportView {
                     vec![
                         ("Enter", "scan path"),
                         ("Tab", "use inbox"),
-                        ("Esc", "cancel"),
+                        ("Esc/q", "cancel"),
                     ]
                 } else {
                     vec![
                         ("Enter", "scan inbox"),
                         ("Tab", "enter path"),
-                        ("Esc", "cancel"),
+                        ("Esc/q", "cancel"),
                     ]
                 }
             }
             ImportStep::Scanning => vec![],
             ImportStep::Review => {
                 if self.groups.is_empty() {
-                    vec![("Esc", "back")]
+                    vec![("Esc/q", "back")]
                 } else if self.is_in_summary() {
                     if self.groups.iter().all(|g| g.action == GroupAction::Skip) {
-                        vec![("Enter", "close"), ("p", "back"), ("Esc", "cancel")]
+                        vec![("Enter", "close"), ("p", "back"), ("Esc/q", "cancel")]
                     } else {
-                        vec![("Enter", "import"), ("p", "back"), ("Esc", "cancel")]
+                        vec![("Enter", "import"), ("p", "back"), ("Esc/q", "cancel")]
                     }
                 } else {
                     let cur_failed = self
@@ -200,7 +200,7 @@ impl ImportView {
                         ("L", "loose"),
                         ("F", "skip rest"),
                         ("Enter/n/p", "nav"),
-                        ("Esc", "cancel"),
+                        ("Esc/q", "cancel"),
                     ];
                     if cur_failed {
                         hints.insert(0, ("r", "retry MB"));
@@ -213,7 +213,7 @@ impl ImportView {
                 ("2", "keep B"),
                 ("n/p", "nav"),
                 ("Enter", "confirm & import"),
-                ("Esc", "cancel"),
+                ("Esc/q", "cancel"),
             ],
             ImportStep::Importing => vec![],
             ImportStep::Complete => vec![("any key", "done")],
