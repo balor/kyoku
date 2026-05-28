@@ -14,16 +14,12 @@ END;
 
 -- Auto-sync on DELETE
 CREATE TRIGGER tracks_fts_delete AFTER DELETE ON tracks BEGIN
-    INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album_title)
-    VALUES('delete', OLD.id, OLD.title, OLD.artist,
-           (SELECT title FROM albums WHERE id = OLD.album_id));
+    DELETE FROM tracks_fts WHERE rowid = OLD.id;
 END;
 
 -- Auto-sync on UPDATE
 CREATE TRIGGER tracks_fts_update AFTER UPDATE ON tracks BEGIN
-    INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album_title)
-    VALUES('delete', OLD.id, OLD.title, OLD.artist,
-           (SELECT title FROM albums WHERE id = OLD.album_id));
+    DELETE FROM tracks_fts WHERE rowid = OLD.id;
     INSERT INTO tracks_fts(rowid, title, artist, album_title)
     VALUES (NEW.id, NEW.title, NEW.artist,
             (SELECT title FROM albums WHERE id = NEW.album_id));

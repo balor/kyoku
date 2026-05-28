@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use crate::error::Result;
 
 /// Current schema version.
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 6;
 
 /// Initialize the database schema. Creates tables if they don't exist
 /// and runs any pending migrations.
@@ -23,6 +23,12 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     }
     if version < 4 {
         apply_v4(conn)?;
+    }
+    if version < 5 {
+        apply_v5(conn)?;
+    }
+    if version < 6 {
+        apply_v6(conn)?;
     }
     set_schema_version(conn, SCHEMA_VERSION)?;
 
@@ -70,6 +76,16 @@ fn apply_v3(conn: &Connection) -> Result<()> {
 
 fn apply_v4(conn: &Connection) -> Result<()> {
     conn.execute_batch(include_str!("../../migrations/004_orphaned_files.sql"))?;
+    Ok(())
+}
+
+fn apply_v5(conn: &Connection) -> Result<()> {
+    conn.execute_batch(include_str!("../../migrations/005_fix_fts_schema.sql"))?;
+    Ok(())
+}
+
+fn apply_v6(conn: &Connection) -> Result<()> {
+    conn.execute_batch(include_str!("../../migrations/006_fix_fts_delete_trigger.sql"))?;
     Ok(())
 }
 

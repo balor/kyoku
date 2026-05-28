@@ -69,8 +69,6 @@ CREATE TABLE IF NOT EXISTS collection_tracks (
 -- Full-text search
 CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
     title, artist, album_title,
-    content='tracks',
-    content_rowid='id',
     tokenize='unicode61 remove_diacritics 2'
 );
 
