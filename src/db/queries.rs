@@ -1164,13 +1164,11 @@ pub fn get_all_tracks_for_organize(
             vec![Box::new(*id)],
         ),
         OrganizeFilter::Loose => ("t.album_id IS NULL".to_string(), vec![]),
-        OrganizeFilter::Path(p) => (
-            // Path filter is matched against the DB-stored form, so the
-            // caller's absolute path must be normalised to relative when
-            // it falls under music_dir.
-            "t.file_path LIKE ?1 || '%'".to_string(),
-            vec![Box::new(paths::to_db_path(p, music_dir))],
-        ),
+        // Path filtering is applied after DB rows are resolved to filesystem
+        // paths. That keeps component boundaries correct (`Artist` does not
+        // match `Artist Backup`) and handles the exact `music_dir` root, whose
+        // DB-stored prefix is intentionally not representable as an empty path.
+        OrganizeFilter::Path(_) => ("1=1".to_string(), vec![]),
         OrganizeFilter::Collection(name) => (
             "EXISTS (SELECT 1 FROM collection_tracks ct2 JOIN collections c2 ON c2.id = ct2.collection_id WHERE ct2.track_id = t.id AND c2.name = ?1)".to_string(),
             vec![Box::new(name.clone())],
@@ -1215,6 +1213,10 @@ pub fn get_all_tracks_for_organize(
         tracks.push(row?);
     }
 
+    if let OrganizeFilter::Path(prefix) = filter {
+        tracks.retain(|track| path_is_same_or_child(Path::new(&track.file_path), prefix));
+    }
+
     // Load collection memberships. Effective positions are computed against
     // the whole collection (not just the filtered organize subset) so
     // collection filenames stay stable when organizing one artist/album.
@@ -1254,6 +1256,10 @@ pub fn get_all_tracks_for_organize(
     }
 
     Ok(tracks)
+}
+
+fn path_is_same_or_child(path: &Path, prefix: &Path) -> bool {
+    path == prefix || path.strip_prefix(prefix).is_ok_and(|rel| !rel.as_os_str().is_empty())
 }
 
 /// List every (track_id, file_path) currently in the library.

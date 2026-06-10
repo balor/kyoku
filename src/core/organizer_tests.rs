@@ -101,6 +101,52 @@ fn fresh_world() -> (TempDir, PathBuf, PathBuf, Connection) {
 // ── plan_organize: branch coverage ───────────────────────────────
 
 #[test]
+fn path_filter_matches_music_dir_root_for_relative_db_rows() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    let target = music.join("Artist/Album (2024)/01 Song.mp3");
+    touch(&target);
+    let (album_id, _) =
+        queries::get_or_create_album(&conn, "Album", Some("Artist"), Some(2024), None, 1)
+            .unwrap();
+    let track = make_track_struct(target, Some(album_id), "Song", "Artist", 1);
+    queries::insert_track(&conn, &music, &track, Some(album_id), None).unwrap();
+
+    let plan = plan_organize(
+        &conn,
+        &settings_with_music_dir(&music),
+        OrganizeFilter::Path(music.clone()),
+    )
+    .unwrap();
+
+    assert_eq!(plan.missing_sources.len(), 0);
+    assert_eq!(plan.skipped, 1, "root music_dir filter should match relative DB rows");
+}
+
+#[test]
+fn path_filter_uses_component_boundaries() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    for artist in ["Artist", "Artist Backup"] {
+        let target = music.join(format!("{artist}/Album (2024)/01 Song.mp3"));
+        touch(&target);
+        let (album_id, _) =
+            queries::get_or_create_album(&conn, "Album", Some(artist), Some(2024), None, 1)
+                .unwrap();
+        let track = make_track_struct(target, Some(album_id), "Song", artist, 1);
+        queries::insert_track(&conn, &music, &track, Some(album_id), None).unwrap();
+    }
+
+    let plan = plan_organize(
+        &conn,
+        &settings_with_music_dir(&music),
+        OrganizeFilter::Path(music.join("Artist")),
+    )
+    .unwrap();
+
+    assert_eq!(plan.missing_sources.len(), 0);
+    assert_eq!(plan.skipped, 1, "Artist filter must not match Artist Backup");
+}
+
+#[test]
 fn plan_album_track_uses_single_disc_template_when_disc_total_is_1() {
     let (_tmp, src, music, conn) = fresh_world();
     add_album_track(

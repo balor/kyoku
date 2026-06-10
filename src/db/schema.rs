@@ -218,6 +218,14 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute("INSERT INTO collections (name) VALUES ('Mix')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO collection_tracks (collection_id, track_id, collection_file_path)
+             VALUES (1, 1, '/home/user/Music/Collections/Mix/01.mp3')",
+            [],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO orphaned_files (file_path, reason)
              VALUES ('/home/user/Music/Old/x.mp3', 'replaced'),
@@ -242,6 +250,15 @@ mod tests {
             .unwrap();
         assert_eq!(cover, "Artist/cover.jpg");
 
+        let collection_copy: String = conn
+            .query_row(
+                "SELECT collection_file_path FROM collection_tracks",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(collection_copy, "Collections/Mix/01.mp3");
+
         let orphans: Vec<String> = conn
             .prepare("SELECT file_path FROM orphaned_files ORDER BY id")
             .unwrap()
@@ -250,5 +267,27 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
         assert_eq!(orphans, vec!["Old/x.mp3", "/outside/y.mp3"]);
+
+        let renamed = Path::new("/mnt/renamed/Music");
+        assert_eq!(
+            crate::core::paths::from_db_path(&paths[0], renamed),
+            Path::new("/mnt/renamed/Music/Artist/01.mp3")
+        );
+        assert_eq!(
+            crate::core::paths::from_db_path(&cover, renamed),
+            Path::new("/mnt/renamed/Music/Artist/cover.jpg")
+        );
+        assert_eq!(
+            crate::core::paths::from_db_path(&collection_copy, renamed),
+            Path::new("/mnt/renamed/Music/Collections/Mix/01.mp3")
+        );
+        assert_eq!(
+            crate::core::paths::from_db_path(&orphans[0], renamed),
+            Path::new("/mnt/renamed/Music/Old/x.mp3")
+        );
+        assert_eq!(
+            crate::core::paths::from_db_path(&orphans[1], renamed),
+            Path::new("/outside/y.mp3")
+        );
     }
 }

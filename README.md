@@ -44,7 +44,7 @@ None of these are damning critiques of beets — it's a different design point a
 - **Tag editor** that writes both the DB and the file tags.
 - **Cover art fetch** from the Cover Art Archive.
 - **Organize** with templated paths and a dry-run preview.
-- **Relocate** to rebase library paths after a drive move.
+- **Relative media paths** for music and cover art under `music_dir`, so DB-next-to-media libraries can move without rebasing.
 - **Scriptable CLI** for common automation (`import`, `scan`, `organize`, `info`, `paths`, `setup`).
 - **Preview-first file operations** for moving, copying, deleting, and reorganizing music.
 

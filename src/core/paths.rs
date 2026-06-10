@@ -16,16 +16,36 @@ use std::path::{Path, PathBuf};
 ///
 /// The strip uses `Path::strip_prefix`, which is component-aware — so a
 /// `music_dir` of `/foo/Music` will not accidentally strip the prefix of
-/// `/foo/Music Backup/...`.
+/// `/foo/Music Backup/...`. When the lexical check misses because one side
+/// uses a symlink or normalized filesystem spelling, an existing path falls
+/// back to canonicalized comparison.
 pub fn to_db_path(path: &Path, music_dir: &Path) -> String {
     // No music_dir context (in-memory tests, fresh setup) — every path is
     // stored verbatim; relative inputs stay relative.
     if path.is_relative() || music_dir.as_os_str().is_empty() {
         return path.display().to_string();
     }
-    match path.strip_prefix(music_dir) {
-        Ok(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
-        _ => path.display().to_string(),
+
+    if let Some(rel) = strip_non_empty(path, music_dir) {
+        return rel.display().to_string();
+    }
+
+    if let (Ok(canonical_path), Ok(canonical_music_dir)) =
+        (std::fs::canonicalize(path), std::fs::canonicalize(music_dir))
+        && let Some(rel) = strip_non_empty(&canonical_path, &canonical_music_dir)
+    {
+        return rel.display().to_string();
+    }
+
+    path.display().to_string()
+}
+
+fn strip_non_empty(path: &Path, prefix: &Path) -> Option<PathBuf> {
+    let rel = path.strip_prefix(prefix).ok()?;
+    if rel.as_os_str().is_empty() {
+        None
+    } else {
+        Some(rel.to_path_buf())
     }
 }
 
@@ -127,5 +147,19 @@ mod tests {
             from_db_path(&stored, renamed),
             PathBuf::from("/mnt/external/Music/Artist/01.mp3")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_fallback_strips_paths_when_music_dir_is_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real_music = tmp.path().join("real_music");
+        let link_music = tmp.path().join("link_music");
+        let track = real_music.join("Artist/Album/01.flac");
+        std::fs::create_dir_all(track.parent().unwrap()).unwrap();
+        std::fs::write(&track, b"").unwrap();
+        std::os::unix::fs::symlink(&real_music, &link_music).unwrap();
+
+        assert_eq!(to_db_path(&track, &link_music), "Artist/Album/01.flac");
     }
 }
