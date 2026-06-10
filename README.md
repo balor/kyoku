@@ -18,7 +18,7 @@ kyoku reads, catalogs, and enriches metadata. You decide when and how files move
 2. **Loose collections as first-class objects.** Mixtapes, DJ sets, a folder of random MP3s, personal compilations, soundtracks with 40 different artists — I want these to live alongside the album hierarchy, not get squeezed into it.
 3. **A TUI I can drive without the docs open.** Every screen shows its keys at the bottom; browsing the library, tweaking tags, or running an import wizard should be discoverable by poking around, not by memorising a query DSL.
 4. **CJK / Unicode working everywhere.** Japanese, Korean, Chinese characters in tags, filenames, search, display, and sorting — handled as a default, not a config tweak.
-5. **Built-in library relocation.** Moving a library to a new drive should be `kyoku relocate /old /new`, not hand-written SQLite.
+5. **Library relocation should be a non-event.** Paths inside the library are stored relative to `music_dir`, so renaming the directory (or moving the whole library to another drive, as long as the DB travels with it) just needs the config to point at the new path — no DB rebase, no migration step.
 
 None of these are damning critiques of beets — it's a different design point and an older, much richer tool. kyoku is just a smaller, narrower thing shaped to one person's habits.
 
@@ -45,7 +45,7 @@ None of these are damning critiques of beets — it's a different design point a
 - **Cover art fetch** from the Cover Art Archive.
 - **Organize** with templated paths and a dry-run preview.
 - **Relocate** to rebase library paths after a drive move.
-- **Scriptable CLI** for common automation (`import`, `scan`, `organize`, `relocate`, `info`, `paths`, `setup`).
+- **Scriptable CLI** for common automation (`import`, `scan`, `organize`, `info`, `paths`, `setup`).
 - **Preview-first file operations** for moving, copying, deleting, and reorganizing music.
 
 ---
@@ -88,7 +88,7 @@ kyoku setup       # interactive first-run wizard
 kyoku             # launch the TUI — everything else lives in there
 ```
 
-The CLI subcommands (`import`, `scan`, `organize`, `relocate`, …) are there for scripting, but day-to-day use happens mostly in the TUI. MusicBrainz review/matching currently lives in the TUI import wizard; CLI import is a simpler as-is cataloging path. Run `kyoku --help` if you want to see the commands.
+The CLI subcommands (`import`, `scan`, `organize`, …) are there for scripting, but day-to-day use happens mostly in the TUI. MusicBrainz review/matching currently lives in the TUI import wizard; CLI import is a simpler as-is cataloging path. Run `kyoku --help` if you want to see the commands.
 
 Config lives at `$XDG_CONFIG_HOME/kyoku/config.toml`, or `~/.config/kyoku/config.toml` if that variable isn't set. The database location is configurable during setup. Run `kyoku paths` to see the exact locations on your machine.
 

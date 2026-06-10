@@ -167,8 +167,11 @@ fn ordered_group_indices(
 /// - Groups into albums (unless `loose`)
 /// - Inserts into SQLite
 /// - Optionally adds to a collection
+///
+/// `music_dir` is the library root; paths under it get stored relative.
 pub fn import(
     conn: &Connection,
+    music_dir: &Path,
     path: impl AsRef<Path>,
     loose: bool,
     pretend: bool,
@@ -201,9 +204,9 @@ pub fn import(
         let path_str = abs_path.display().to_string();
 
         // Check for duplicates
-        if queries::track_exists_by_path(conn, &path_str)? {
+        if queries::track_exists_by_path(conn, music_dir, &path_str)? {
             if collection.is_some() {
-                if let Some(track_id) = queries::get_track_id_by_path(conn, &path_str)? {
+                if let Some(track_id) = queries::get_track_id_by_path(conn, music_dir, &path_str)? {
                     duplicate_track_ids.push((track_id, file_path.display().to_string()));
                 }
             } else {
@@ -323,7 +326,12 @@ pub fn import(
                     if let Some(source_dir) = tracks[first_idx].source_dir.as_deref()
                         && let Some(cover) = detect_sibling_cover(source_dir)
                     {
-                        queries::set_album_cover_path(&tx, id, &cover.display().to_string())?;
+                        queries::set_album_cover_path(
+                            &tx,
+                            music_dir,
+                            id,
+                            &cover.display().to_string(),
+                        )?;
                     }
                     Some(id)
                 } else {
@@ -343,7 +351,7 @@ pub fn import(
                 .map(|m| m.len() as i64)
                 .ok();
 
-            let track_id = queries::insert_track(&tx, track, album_id, file_size)?;
+            let track_id = queries::insert_track(&tx, music_dir, track, album_id, file_size)?;
             inserted_ids.push(track_id);
             result.imported += 1;
 
@@ -370,11 +378,12 @@ pub fn import(
 /// pending-orphan leftovers as "untracked".
 pub fn scan_inbox(
     conn: &Connection,
+    music_dir: &Path,
     inbox_dirs: &[std::path::PathBuf],
 ) -> Result<Vec<std::path::PathBuf>> {
     // Build the exclusion set once per call — O(N) memory in library size,
     // but a single pass per table beats a per-file query.
-    let known = queries::list_all_known_paths(conn)?;
+    let known = queries::list_all_known_paths(conn, music_dir)?;
     let mut unimported = Vec::new();
 
     for dir in inbox_dirs {
@@ -406,6 +415,10 @@ mod tests {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_library")
     }
 
+    fn no_root() -> &'static Path {
+        Path::new("")
+    }
+
     #[test]
     fn test_scan_audio_files() {
         let files = scan_audio_files(fixtures_dir());
@@ -420,7 +433,7 @@ mod tests {
     #[test]
     fn test_import_basic() {
         let conn = db::open_memory().unwrap();
-        let result = import(&conn, fixtures_dir(), false, false, None).unwrap();
+        let result = import(&conn, no_root(), fixtures_dir(), false, false, None).unwrap();
         assert!(result.imported >= 3);
         assert_eq!(result.skipped_duplicate, 0);
     }
@@ -429,9 +442,9 @@ mod tests {
     fn test_import_duplicates_skipped() {
         let conn = db::open_memory().unwrap();
         // Import once
-        import(&conn, fixtures_dir(), false, false, None).unwrap();
+        import(&conn, no_root(), fixtures_dir(), false, false, None).unwrap();
         // Import again — should skip all
-        let result = import(&conn, fixtures_dir(), false, false, None).unwrap();
+        let result = import(&conn, no_root(), fixtures_dir(), false, false, None).unwrap();
         assert_eq!(result.imported, 0);
         assert!(result.skipped_duplicate >= 3);
     }
@@ -439,7 +452,7 @@ mod tests {
     #[test]
     fn test_import_loose() {
         let conn = db::open_memory().unwrap();
-        let result = import(&conn, fixtures_dir(), true, false, None).unwrap();
+        let result = import(&conn, no_root(), fixtures_dir(), true, false, None).unwrap();
         assert!(result.imported >= 3);
         assert_eq!(result.albums_created, 0);
     }
@@ -447,14 +460,22 @@ mod tests {
     #[test]
     fn test_import_pretend() {
         let conn = db::open_memory().unwrap();
-        let result = import(&conn, fixtures_dir(), false, true, None).unwrap();
+        let result = import(&conn, no_root(), fixtures_dir(), false, true, None).unwrap();
         assert_eq!(result.imported, 0); // pretend doesn't insert
     }
 
     #[test]
     fn test_import_with_collection() {
         let conn = db::open_memory().unwrap();
-        let result = import(&conn, fixtures_dir(), true, false, Some("Test Collection")).unwrap();
+        let result = import(
+            &conn,
+            no_root(),
+            fixtures_dir(),
+            true,
+            false,
+            Some("Test Collection"),
+        )
+        .unwrap();
         assert!(result.imported >= 3);
 
         // Verify collection was created and tracks added
@@ -474,11 +495,19 @@ mod tests {
     fn test_reimport_with_collection_adds_existing_tracks() {
         let conn = db::open_memory().unwrap();
         // Import once without collection
-        let result1 = import(&conn, fixtures_dir(), true, false, None).unwrap();
+        let result1 = import(&conn, no_root(), fixtures_dir(), true, false, None).unwrap();
         assert!(result1.imported >= 3);
 
         // Re-import with collection — duplicates should be added to collection
-        let result2 = import(&conn, fixtures_dir(), true, false, Some("Favorites")).unwrap();
+        let result2 = import(
+            &conn,
+            no_root(),
+            fixtures_dir(),
+            true,
+            false,
+            Some("Favorites"),
+        )
+        .unwrap();
         assert_eq!(result2.imported, 0);
         assert!(result2.skipped_duplicate >= 3);
         assert!(result2.added_to_collection >= 3);
@@ -559,15 +588,15 @@ mod tests {
     #[test]
     fn test_scan_inbox_empty() {
         let conn = db::open_memory().unwrap();
-        let unimported = scan_inbox(&conn, &[fixtures_dir()]).unwrap();
+        let unimported = scan_inbox(&conn, no_root(), &[fixtures_dir()]).unwrap();
         assert!(unimported.len() >= 3);
     }
 
     #[test]
     fn test_scan_inbox_after_import() {
         let conn = db::open_memory().unwrap();
-        import(&conn, fixtures_dir(), false, false, None).unwrap();
-        let unimported = scan_inbox(&conn, &[fixtures_dir()]).unwrap();
+        import(&conn, no_root(), fixtures_dir(), false, false, None).unwrap();
+        let unimported = scan_inbox(&conn, no_root(), &[fixtures_dir()]).unwrap();
         assert_eq!(unimported.len(), 0);
     }
 }

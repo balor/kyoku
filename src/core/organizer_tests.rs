@@ -61,14 +61,16 @@ fn add_album_track(
         queries::get_or_create_album(conn, album, Some(artist), year, None, 1).unwrap();
     touch(&src_path);
     let track = make_track_struct(src_path, Some(album_id), title, artist, track_no);
-    queries::insert_track(conn, &track, Some(album_id), None).unwrap()
+    // Tests use absolute paths and an in-memory DB; storage form is
+    // pre-organize so the inbox path stays absolute regardless of music_dir.
+    queries::insert_track(conn, Path::new(""), &track, Some(album_id), None).unwrap()
 }
 
 /// Insert a loose track at `src_path` (touched on disk). No album row.
 fn add_loose_track(conn: &Connection, src_path: PathBuf, artist: &str, title: &str) -> i64 {
     touch(&src_path);
     let track = make_track_struct(src_path, None, title, artist, 1);
-    queries::insert_track(conn, &track, None, None).unwrap()
+    queries::insert_track(conn, Path::new(""), &track, None, None).unwrap()
 }
 
 fn set_album_disc_total(conn: &Connection, album_id: i64, disc_total: u32) {
@@ -386,7 +388,7 @@ fn apply_move_relocates_file_and_updates_db_path() {
     );
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
 
     assert_eq!(result.moved, 1);
     assert!(result.errors.is_empty());
@@ -397,12 +399,11 @@ fn apply_move_relocates_file_and_updates_db_path() {
         "source should be gone after move"
     );
 
-    let new_path: String = conn
-        .query_row("SELECT file_path FROM tracks WHERE id = ?1", [tid], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(PathBuf::from(new_path), target);
+    // Stored path is now relative-to-music_dir; the queries layer resolves
+    // it back to absolute on read, so go through that instead of reading
+    // the row directly.
+    let row = queries::get_track(&conn, &music, tid).unwrap().unwrap();
+    assert_eq!(PathBuf::from(&row.file_path), target);
 }
 
 #[test]
@@ -420,20 +421,17 @@ fn apply_copy_creates_collection_file_and_updates_collection_tracks_path() {
     let coll_id = ensure_collection(&conn, "Mix", tid);
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
 
     assert_eq!(result.copied, 1);
-    let coll_path: Option<String> = conn
-        .query_row(
-            "SELECT collection_file_path FROM collection_tracks
-             WHERE collection_id = ?1 AND track_id = ?2",
-            rusqlite::params![coll_id, tid],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let coll_path = coll_path.expect("collection_file_path should be set after copy");
+    // Resolved through the queries layer so the relative storage form is
+    // rejoined with music_dir before the on-disk check.
+    let coll_paths = queries::get_collection_file_paths(&conn, &music, coll_id).unwrap();
+    let coll_path = coll_paths
+        .get(&tid)
+        .expect("collection_file_path should be set after copy");
     assert!(
-        PathBuf::from(&coll_path).exists(),
+        PathBuf::from(coll_path).exists(),
         "collection copy should exist on disk"
     );
     assert!(coll_path.contains("Collections/Mix/"));
@@ -447,26 +445,19 @@ fn apply_move_with_also_collection_updates_both_tracks_and_collection_tracks() {
     let coll_id = ensure_collection(&conn, "Mix", tid);
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
     assert_eq!(result.moved, 1);
     assert_eq!(
         result.copied, 0,
         "no separate copy expected — the move is the copy"
     );
 
-    let track_path: String = conn
-        .query_row("SELECT file_path FROM tracks WHERE id = ?1", [tid], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    let coll_path: String = conn
-        .query_row(
-            "SELECT collection_file_path FROM collection_tracks
-             WHERE collection_id = ?1 AND track_id = ?2",
-            rusqlite::params![coll_id, tid],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let track_path = queries::get_track(&conn, &music, tid).unwrap().unwrap().file_path;
+    let coll_paths = queries::get_collection_file_paths(&conn, &music, coll_id).unwrap();
+    let coll_path = coll_paths
+        .get(&tid)
+        .expect("collection_file_path should be set")
+        .clone();
     assert_eq!(
         track_path, coll_path,
         "both rows must point at the same file"
@@ -489,7 +480,7 @@ fn apply_move_cleans_empty_source_directories_walking_up() {
     );
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
     assert_eq!(result.moved, 1);
     assert!(
         result.dirs_cleaned >= 2,
@@ -522,7 +513,7 @@ fn apply_deletes_orphan_track_rows() {
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
     assert_eq!(plan.missing_sources.len(), 1);
 
-    let result = apply_organize(&conn, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
 
     assert_eq!(result.orphans_cleaned, 1);
     let exists: i64 = conn
@@ -544,6 +535,7 @@ fn plan_picks_up_file_orphans_from_orphaned_files_table() {
     touch(&orphan_path);
     queries::insert_orphan(
         &conn,
+        &music,
         &orphan_path.display().to_string(),
         Some("Old Song"),
         Some("Artist"),
@@ -570,6 +562,7 @@ fn plan_includes_file_orphans_regardless_of_filter() {
     touch(&orphan_path);
     queries::insert_orphan(
         &conn,
+        &music,
         &orphan_path.display().to_string(),
         None,
         None,
@@ -597,6 +590,7 @@ fn apply_unlinks_orphan_file_and_clears_tracking_row() {
     touch(&orphan_path);
     queries::insert_orphan(
         &conn,
+        &music,
         &orphan_path.display().to_string(),
         Some("Old"),
         Some("Artist"),
@@ -606,7 +600,7 @@ fn apply_unlinks_orphan_file_and_clears_tracking_row() {
     .unwrap();
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &plan, "move", &[music.clone()]).unwrap();
+    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone()]).unwrap();
 
     assert_eq!(result.file_orphans_removed, 1);
     assert!(result.errors.is_empty());
@@ -626,6 +620,7 @@ fn apply_treats_already_missing_orphan_as_success() {
     let ghost = music.join("Artist/Album (2024)/ghost.mp3");
     queries::insert_orphan(
         &conn,
+        &music,
         &ghost.display().to_string(),
         Some("Ghost"),
         Some("Artist"),
@@ -636,7 +631,7 @@ fn apply_treats_already_missing_orphan_as_success() {
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
     assert_eq!(plan.file_orphans.len(), 1);
 
-    let result = apply_organize(&conn, &plan, "move", &[music.clone()]).unwrap();
+    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone()]).unwrap();
 
     assert_eq!(result.file_orphans_removed, 1);
     assert!(result.errors.is_empty());
@@ -655,6 +650,7 @@ fn apply_cleans_empty_parent_directories_after_orphan_unlink() {
     touch(&orphan_path);
     queries::insert_orphan(
         &conn,
+        &music,
         &orphan_path.display().to_string(),
         None,
         None,
@@ -664,7 +660,7 @@ fn apply_cleans_empty_parent_directories_after_orphan_unlink() {
     .unwrap();
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &plan, "move", &[music.clone()]).unwrap();
+    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone()]).unwrap();
 
     assert_eq!(result.file_orphans_removed, 1);
     assert!(
@@ -710,6 +706,7 @@ fn apply_skips_orphan_unlink_when_path_was_just_occupied_by_move() {
     touch(&dest);
     queries::insert_orphan(
         &conn,
+        &music,
         &dest.display().to_string(),
         Some("Song"),
         Some("Artist"),
@@ -723,7 +720,7 @@ fn apply_skips_orphan_unlink_when_path_was_just_occupied_by_move() {
     assert_eq!(plan.file_orphans.len(), 1, "expected one pending orphan");
     assert_eq!(plan.moves[0].to, dest);
 
-    let result = apply_organize(&conn, &plan, "move", &[music.clone()]).unwrap();
+    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone()]).unwrap();
 
     assert_eq!(result.moved, 1);
     assert_eq!(result.file_orphans_removed, 1);
@@ -738,15 +735,12 @@ fn apply_skips_orphan_unlink_when_path_was_just_occupied_by_move() {
         dest.exists(),
         "newly-moved file was deleted by the orphan-unlink loop — bug regressed"
     );
-    // DB path updated to the new location.
-    let db_path: String = conn
-        .query_row(
-            "SELECT file_path FROM tracks WHERE id = ?1",
-            [track_id],
-            |r| r.get(0),
-        )
+    // DB path resolves to the new location (via the queries layer, since
+    // the row stores the relative-to-music_dir form now).
+    let row = queries::get_track(&conn, &music, track_id)
+        .unwrap()
         .unwrap();
-    assert_eq!(db_path, dest.display().to_string());
+    assert_eq!(row.file_path, dest.display().to_string());
     // Orphan tracking row is cleared (the move resolved it).
     let remaining: i64 = conn
         .query_row("SELECT COUNT(*) FROM orphaned_files", [], |r| r.get(0))
@@ -769,7 +763,7 @@ fn seed_collection_file(
     let abs = music.join(rel_path);
     let tid = add_loose_track(conn, abs.clone(), artist, title);
     let coll_id = ensure_collection(conn, coll, tid);
-    queries::update_collection_track_path(conn, coll_id, tid, &abs.display().to_string()).unwrap();
+    queries::update_collection_track_path(conn, &music, coll_id, tid, &abs.display().to_string()).unwrap();
     (tid, coll_id, abs)
 }
 
@@ -798,7 +792,7 @@ fn plan_delete_classifies_files_outside_music_dir_as_skipped() {
     let outside = tmp.path().join("elsewhere/song.mp3");
     let tid = add_loose_track(&conn, outside.clone(), "Artist", "Song");
     let coll_id = ensure_collection(&conn, "Mix", tid);
-    queries::update_collection_track_path(&conn, coll_id, tid, &outside.display().to_string())
+    queries::update_collection_track_path(&conn, &music, coll_id, tid, &outside.display().to_string())
         .unwrap();
 
     let plan = plan_delete_collection(&conn, coll_id, &music).unwrap();
@@ -834,10 +828,10 @@ fn plan_delete_promotes_alternate_collection_path_when_track_has_other_home() {
     let (coll_b, _) = queries::get_or_create_collection(&conn, "B").unwrap();
     queries::add_track_to_collection(&conn, coll_a, tid).unwrap();
     queries::add_track_to_collection(&conn, coll_b, tid).unwrap();
-    queries::update_collection_track_path(&conn, coll_a, tid, &abs_a.display().to_string())
+    queries::update_collection_track_path(&conn, &music, coll_a, tid, &abs_a.display().to_string())
         .unwrap();
     let abs_b = music.join("Collections/B/song.mp3");
-    queries::update_collection_track_path(&conn, coll_b, tid, &abs_b.display().to_string())
+    queries::update_collection_track_path(&conn, &music, coll_b, tid, &abs_b.display().to_string())
         .unwrap();
 
     let plan = plan_delete_collection(&conn, coll_a, &music).unwrap();
@@ -866,7 +860,7 @@ fn apply_delete_with_files_true_removes_files_and_orphan_track_rows() {
     );
     let plan = plan_delete_collection(&conn, coll_id, &music).unwrap();
 
-    let result = apply_delete_collection(&conn, &plan, true, &music).unwrap();
+    let result = apply_delete_collection(&conn, &music, &plan, true).unwrap();
 
     assert_eq!(result.files_deleted, 1);
     assert_eq!(result.tracks_orphaned_removed, 1);
@@ -900,7 +894,7 @@ fn apply_delete_with_files_false_keeps_files_but_cleans_db() {
     );
     let plan = plan_delete_collection(&conn, coll_id, &music).unwrap();
 
-    let result = apply_delete_collection(&conn, &plan, false, &music).unwrap();
+    let result = apply_delete_collection(&conn, &music, &plan, false).unwrap();
 
     assert_eq!(
         result.files_deleted, 0,

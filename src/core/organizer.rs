@@ -108,7 +108,7 @@ pub fn plan_organize(
     // of any particular (artist/album/collection) filter — an orphan
     // row has no album_id by the time we see it. Always include them so
     // running any organize pass eventually cleans them up.
-    for o in queries::list_orphans(conn)? {
+    for o in queries::list_orphans(conn, music_dir)? {
         plan.file_orphans.push(FileOrphanEntry {
             id: o.id,
             path: PathBuf::from(o.file_path),
@@ -119,7 +119,7 @@ pub fn plan_organize(
         });
     }
 
-    let tracks = queries::get_all_tracks_for_organize(conn, &filter)?;
+    let tracks = queries::get_all_tracks_for_organize(conn, music_dir, &filter)?;
 
     // Collision tracking: `tracks.file_path` has a UNIQUE constraint in the
     // DB, so two tracks cannot end up with the same destination path.
@@ -127,7 +127,7 @@ pub fn plan_organize(
     // (those slots will be freed), and disambiguate proposed targets
     // against this set before committing them to the plan.
     use std::collections::{BTreeMap, HashSet};
-    let mut used_paths: HashSet<PathBuf> = queries::list_all_track_paths(conn)?
+    let mut used_paths: HashSet<PathBuf> = queries::list_all_track_paths(conn, music_dir)?
         .into_iter()
         .map(|(_, p)| PathBuf::from(p))
         .collect();
@@ -382,7 +382,7 @@ pub fn plan_organize(
     // `<album_dir>/cover.<ext>`. Skipped when source == dest or the source
     // file no longer exists on disk.
     for (album_id, album_dir) in &album_dest_dir {
-        let Some(src_str) = queries::get_album_cover_path(conn, *album_id)? else {
+        let Some(src_str) = queries::get_album_cover_path(conn, music_dir, *album_id)? else {
             continue;
         };
         let src = PathBuf::from(&src_str);
@@ -419,6 +419,7 @@ pub fn plan_organize(
 /// whose row was not yet updated in the DB.
 pub fn apply_organize(
     conn: &Connection,
+    music_dir: &Path,
     plan: &OrganizePlan,
     operation: &str,
     cleanup_roots: &[PathBuf],
@@ -455,7 +456,7 @@ pub fn apply_organize(
                 // Update tracks.file_path. On failure, record a detailed error
                 // (file is already on disk at `new_path`) and skip this track's
                 // remaining updates — but keep processing the rest of the plan.
-                if let Err(e) = queries::update_track_path(conn, m.track_id, &new_path) {
+                if let Err(e) = queries::update_track_path(conn, music_dir, m.track_id, &new_path) {
                     result.errors.push((
                         m.from.display().to_string(),
                         format!("file moved to {new_path} but DB update failed: {e}"),
@@ -466,8 +467,13 @@ pub fn apply_organize(
                 // If this move also represents a collection's primary file location,
                 // update collection_tracks.collection_file_path so the DB knows.
                 if let Some((coll_id, _)) = &m.also_collection
-                    && let Err(e) =
-                        queries::update_collection_track_path(conn, *coll_id, m.track_id, &new_path)
+                    && let Err(e) = queries::update_collection_track_path(
+                        conn,
+                        music_dir,
+                        *coll_id,
+                        m.track_id,
+                        &new_path,
+                    )
                 {
                     result.errors.push((
                             m.from.display().to_string(),
@@ -507,6 +513,7 @@ pub fn apply_organize(
                 let new_path = c.to.display().to_string();
                 if let Err(e) = queries::update_collection_track_path(
                     conn,
+                    music_dir,
                     c.collection_id,
                     c.track_id,
                     &new_path,
@@ -546,7 +553,7 @@ pub fn apply_organize(
         match outcome {
             Ok(()) => {
                 let new_path = cm.to.display().to_string();
-                if let Err(e) = queries::set_album_cover_path(conn, cm.album_id, &new_path) {
+                if let Err(e) = queries::set_album_cover_path(conn, music_dir, cm.album_id, &new_path) {
                     result.errors.push((
                         cm.from.display().to_string(),
                         format!("cover moved to {new_path} but DB update failed: {e}"),
@@ -693,15 +700,21 @@ pub fn plan_delete_collection(
     collection_id: i64,
     music_dir: &Path,
 ) -> Result<DeleteCollectionPlan> {
-    plan_delete_collection_with_roots(conn, collection_id, &[music_dir.to_path_buf()])
+    plan_delete_collection_with_roots(
+        conn,
+        music_dir,
+        collection_id,
+        &[music_dir.to_path_buf()],
+    )
 }
 
 pub fn plan_delete_collection_with_roots(
     conn: &Connection,
+    music_dir: &Path,
     collection_id: i64,
     managed_roots: &[PathBuf],
 ) -> Result<DeleteCollectionPlan> {
-    let homes = queries::get_collection_tracks_with_other_homes(conn, collection_id)?;
+    let homes = queries::get_collection_tracks_with_other_homes(conn, music_dir, collection_id)?;
     let collection_name: String = conn
         .query_row(
             "SELECT name FROM collections WHERE id = ?1",
@@ -754,7 +767,8 @@ pub fn plan_delete_collection_with_roots(
         {
             // No album to fall back on, but other collection(s) exist.
             // Find one of those other collection_file_path values.
-            if let Ok(Some(new_path)) = find_other_collection_path(conn, h.track_id, collection_id)
+            if let Ok(Some(new_path)) =
+                find_other_collection_path(conn, music_dir, h.track_id, collection_id)
             {
                 promote_paths.push((h.track_id, new_path));
             }
@@ -775,6 +789,7 @@ pub fn plan_delete_collection_with_roots(
 
 fn find_other_collection_path(
     conn: &Connection,
+    music_dir: &Path,
     track_id: i64,
     exclude_collection_id: i64,
 ) -> Result<Option<String>> {
@@ -788,7 +803,9 @@ fn find_other_collection_path(
             |row| row.get(0),
         )
         .ok();
-    Ok(path)
+    // promote_paths carries absolute paths (rest of the codebase deals in
+    // absolute and the `update_track_path` boundary re-normalises).
+    Ok(path.map(|s| crate::core::paths::from_db_path(&s, music_dir).display().to_string()))
 }
 
 /// Execute a collection deletion plan. Orphaned tracks are removed from the
@@ -797,15 +814,22 @@ fn find_other_collection_path(
 #[allow(dead_code)]
 pub fn apply_delete_collection(
     conn: &Connection,
+    music_dir: &Path,
     plan: &DeleteCollectionPlan,
     delete_files: bool,
-    music_dir: &Path,
 ) -> Result<DeleteCollectionResult> {
-    apply_delete_collection_with_roots(conn, plan, delete_files, &[music_dir.to_path_buf()])
+    apply_delete_collection_with_roots(
+        conn,
+        music_dir,
+        plan,
+        delete_files,
+        &[music_dir.to_path_buf()],
+    )
 }
 
 pub fn apply_delete_collection_with_roots(
     conn: &Connection,
+    music_dir: &Path,
     plan: &DeleteCollectionPlan,
     delete_files: bool,
     cleanup_roots: &[PathBuf],
@@ -839,7 +863,7 @@ pub fn apply_delete_collection_with_roots(
     // Promote alternate file_paths for tracks that survive (have another home).
     // Done before the cascade so we don't accidentally end up pointing at a deleted file.
     for (track_id, new_path) in &plan.promote_paths {
-        queries::update_track_path(conn, *track_id, new_path)?;
+        queries::update_track_path(conn, music_dir, *track_id, new_path)?;
     }
 
     // Delete orphaned tracks entirely so they do not silently become loose.

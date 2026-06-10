@@ -105,7 +105,9 @@ impl App {
         };
 
         // Initial data load
-        app.library.load(&app.conn, None).ok();
+        app.library
+            .load(&app.conn, &app.settings.library.music_dir, None)
+            .ok();
         app
     }
 
@@ -126,7 +128,9 @@ impl App {
 
         // Global search captures all input when open
         if self.global_search_open {
-            let action = self.global_search.handle_key(key, &self.conn);
+            let action =
+                self.global_search
+                    .handle_key(key, &self.conn, &self.settings.library.music_dir);
             return self.handle_global_search_action(action);
         }
 
@@ -223,7 +227,8 @@ impl App {
         // while the user isn't pressing keys. Cheap no-op when nothing is
         // pending.
         if matches!(self.view, AppView::AlbumDetail { .. }) {
-            self.album_detail.tick(&self.conn);
+            self.album_detail
+                .tick(&self.conn, &self.settings.library.music_dir);
         }
     }
 }

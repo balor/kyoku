@@ -27,9 +27,13 @@ pub fn run(conn: Connection, settings: Settings) -> anyhow::Result<()> {
     let theme = theme_by_name(&settings.ui.theme);
 
     // Calculate inbox count
-    let inbox_count = importer::scan_inbox(&conn, &settings.library.inbox_dirs)
-        .map(|files| files.len())
-        .unwrap_or(0);
+    let inbox_count = importer::scan_inbox(
+        &conn,
+        &settings.library.music_dir,
+        &settings.library.inbox_dirs,
+    )
+    .map(|files| files.len())
+    .unwrap_or(0);
 
     // Rebuild FTS index if needed
     let fts_count: i64 = conn

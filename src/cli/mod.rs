@@ -71,21 +71,4 @@ pub enum Command {
         #[arg(long)]
         collection: Option<String>,
     },
-
-    /// Rebase all library paths when music moves to a new location
-    Relocate {
-        /// Old path prefix
-        old_prefix: Option<PathBuf>,
-
-        /// New path prefix
-        new_prefix: Option<PathBuf>,
-
-        /// Check all DB paths exist on disk, report missing
-        #[arg(long)]
-        verify: bool,
-
-        /// Preview changes without applying
-        #[arg(long)]
-        pretend: bool,
-    },
 }

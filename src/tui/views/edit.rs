@@ -111,7 +111,7 @@ impl EditorView {
         self.notice = None;
         self.write_to_file = settings.tagging.write_tags;
 
-        let Some(track) = queries::get_track(conn, track_id)? else {
+        let Some(track) = queries::get_track(conn, &settings.library.music_dir, track_id)? else {
             self.frames.clear();
             return Ok(());
         };

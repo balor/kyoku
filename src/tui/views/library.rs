@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -74,19 +76,25 @@ impl Default for LibraryView {
 }
 
 impl LibraryView {
-    pub fn load(&mut self, conn: &Connection, search: Option<&str>) -> Result<()> {
+    pub fn load(
+        &mut self,
+        conn: &Connection,
+        music_dir: &Path,
+        search: Option<&str>,
+    ) -> Result<()> {
         self.selection.clear();
         self.pending_delete = None;
         if let Some(query) = search
             && !query.is_empty()
         {
-            self.albums = queries::search_albums(conn, query, 500)?;
+            self.albums = queries::search_albums(conn, music_dir, query, 500)?;
             self.total_albums = self.albums.len();
             self.loose_count = 0;
             self.clamp_selection();
             return Ok(());
         }
-        self.albums = queries::list_albums(conn, self.sort, self.sort_ascending, 0, 500)?;
+        self.albums =
+            queries::list_albums(conn, music_dir, self.sort, self.sort_ascending, 0, 500)?;
         self.total_albums = self.albums.len();
         self.loose_count = queries::count_loose_tracks(conn)?;
         self.clamp_selection();
@@ -131,7 +139,13 @@ impl LibraryView {
                     let file_delete_roots = organizer::file_delete_roots(settings);
                     let plan = plan.clone();
                     self.pending_delete = None;
-                    match pruner::apply_delete_plan(conn, &plan, delete_files, &file_delete_roots) {
+                    match pruner::apply_delete_plan(
+                        conn,
+                        &settings.library.music_dir,
+                        &plan,
+                        delete_files,
+                        &file_delete_roots,
+                    ) {
                         Ok(report) => {
                             let mut parts = Vec::new();
                             if report.albums_deleted > 0 {
@@ -284,7 +298,12 @@ impl LibraryView {
             if self.selection.is_empty() && self.selected >= self.albums.len() {
                 match queries::list_loose_track_ids(conn).and_then(|ids| {
                     let file_delete_roots = organizer::file_delete_roots(settings);
-                    pruner::plan_delete_tracks(conn, &ids, &file_delete_roots)
+                    pruner::plan_delete_tracks(
+                        conn,
+                        &settings.library.music_dir,
+                        &ids,
+                        &file_delete_roots,
+                    )
                 }) {
                     Ok(plan) => {
                         if plan.is_empty() {
@@ -314,7 +333,12 @@ impl LibraryView {
                 return LibraryAction::None;
             }
             let file_delete_roots = organizer::file_delete_roots(settings);
-            match pruner::plan_delete_albums(conn, &ids, &file_delete_roots) {
+            match pruner::plan_delete_albums(
+                conn,
+                &settings.library.music_dir,
+                &ids,
+                &file_delete_roots,
+            ) {
                 Ok(plan) => {
                     if plan.is_empty() {
                         self.notice = Some("Nothing to delete".to_string());
@@ -367,7 +391,8 @@ impl LibraryView {
             // Add whole album (all tracks of selected album) to a collection
             if self.selected < self.albums.len() {
                 let album = &self.albums[self.selected];
-                if let Ok(tracks) = queries::get_album_tracks(conn, album.id)
+                if let Ok(tracks) =
+                    queries::get_album_tracks(conn, &settings.library.music_dir, album.id)
                     && !tracks.is_empty()
                 {
                     let ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();

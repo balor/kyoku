@@ -345,7 +345,11 @@ fn lookup_album(
 /// for `(group, track)` pairs that the first pass left alone — MBID only
 /// disambiguates, it never emits a second conflict for a pair that
 /// album-slot already covered.
-pub fn detect(conn: &Connection, groups: &[ImportGroup]) -> Result<Vec<Conflict>> {
+pub fn detect(
+    conn: &Connection,
+    music_dir: &std::path::Path,
+    groups: &[ImportGroup],
+) -> Result<Vec<Conflict>> {
     let mut conflicts = Vec::new();
     // Maps (album_id, disc, position) → first batch track that claimed it.
     // Used to catch intra-batch dupes.
@@ -396,7 +400,7 @@ pub fn detect(conn: &Connection, groups: &[ImportGroup]) -> Result<Vec<Conflict>
 
             // Library dup?
             if let Some(existing) =
-                queries::find_track_by_album_slot(conn, album_id, disc, pos)?
+                queries::find_track_by_album_slot(conn, music_dir, album_id, disc, pos)?
             {
                 conflicts.push(Conflict {
                     new: new_ref,
@@ -467,7 +471,7 @@ pub fn detect(conn: &Connection, groups: &[ImportGroup]) -> Result<Vec<Conflict>
 
             // Library dup by MBID? Only counts when the existing track
             // belongs to the same album the user is importing into.
-            if let Some(existing) = queries::find_track_by_mbid(conn, &recording_id)? {
+            if let Some(existing) = queries::find_track_by_mbid(conn, music_dir, &recording_id)? {
                 let existing_keys = album_keys_for_existing_track(&existing);
                 if shares_key(&existing_keys, group_keys) {
                     conflicts.push(Conflict {
@@ -796,7 +800,7 @@ mod tests {
             tag_status: TagStatus::Matched,
             source_dir: None,
         };
-        queries::insert_track(conn, &track, Some(album_id), Some(10_000)).unwrap()
+        queries::insert_track(conn, std::path::Path::new(""), &track, Some(album_id), Some(10_000)).unwrap()
     }
 
     #[test]
@@ -810,7 +814,7 @@ mod tests {
             GroupAction::AcceptAsIs,
             vec![track("New Five", Some(5), "/in/05.flac")],
         );
-        let conflicts = detect(&conn, &[g]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g]).unwrap();
         assert_eq!(conflicts.len(), 1);
         match &conflicts[0].other {
             DupOther::Library(e) => assert_eq!(e.file_path, "/lib/05.flac"),
@@ -839,6 +843,7 @@ mod tests {
         // Existing library track: Readymade @ pos 1 of Kyougen.
         queries::insert_track(
             &conn,
+            std::path::Path::new(""),
             &Track {
                 id: None,
                 album_id: Some(kyougen_id),
@@ -874,7 +879,7 @@ mod tests {
             ],
         );
         g.target_collection = "Headphone Test".to_string();
-        let conflicts = detect(&conn, &[g]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g]).unwrap();
         // Only the legitimate Readymade-vs-Readymade match should fire.
         // No phantom Usseewa/Odo conflicts against the Kyougen slot.
         assert_eq!(
@@ -901,7 +906,7 @@ mod tests {
                 track("B", Some(5), "/in/b.flac"),
             ],
         );
-        let conflicts = detect(&conn, &[g]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g]).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert!(matches!(conflicts[0].other, DupOther::Batch(_)));
     }
@@ -919,7 +924,7 @@ mod tests {
             GroupAction::AcceptAsIs,
             vec![track("A", Some(5), "/in/a.flac")],
         );
-        let conflicts = detect(&conn, &[g]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g]).unwrap();
         assert!(conflicts.is_empty());
     }
 
@@ -940,7 +945,7 @@ mod tests {
             vec![track("Y", Some(5), "/in/y.flac")],
         );
         g_loose.action = GroupAction::Loose;
-        let conflicts = detect(&conn, &[g_skip, g_loose]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g_skip, g_loose]).unwrap();
         assert!(conflicts.is_empty());
     }
 
@@ -956,7 +961,7 @@ mod tests {
                 track("B", Some(0), "/in/b.flac"),
             ],
         );
-        let conflicts = detect(&conn, &[g]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g]).unwrap();
         assert!(conflicts.is_empty());
     }
 
@@ -1127,6 +1132,7 @@ mod tests {
         .unwrap();
         let existing_id = queries::insert_track(
             &conn,
+            std::path::Path::new(""),
             &Track {
                 id: None,
                 album_id: Some(album_id),
@@ -1155,7 +1161,7 @@ mod tests {
             vec![track("New", Some(5), "/in/05.flac")],
             candidate_with_recording(5, "rec-abc"),
         );
-        let conflicts = detect(&conn, &[g]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g]).unwrap();
         assert!(
             conflicts.is_empty(),
             "same MBID on a different album must not raise a conflict, got {:?}",
@@ -1180,6 +1186,7 @@ mod tests {
         .unwrap();
         let existing_id = queries::insert_track(
             &conn,
+            std::path::Path::new(""),
             &Track {
                 id: None,
                 album_id: Some(album_id),
@@ -1216,7 +1223,7 @@ mod tests {
         let mut g = g;
         g.mb_candidates[0].release.title = "Shared Album".to_string();
         g.mb_candidates[0].release.artist = "Artist".to_string();
-        let conflicts = detect(&conn, &[g]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g]).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].signal, DupSignal::Mbid);
         match &conflicts[0].other {
@@ -1241,7 +1248,7 @@ mod tests {
             vec![track("A", Some(1), "/in/g2/01.flac")],
             candidate_with_recording(1, "rec-shared"),
         );
-        let conflicts = detect(&conn, &[g1, g2]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g1, g2]).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].signal, DupSignal::Mbid);
         match &conflicts[0].other {
@@ -1266,7 +1273,7 @@ mod tests {
             vec![track("New", Some(5), "/in/05.flac")],
             candidate_with_recording(5, "rec-match"),
         );
-        let conflicts = detect(&conn, &[g]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g]).unwrap();
         assert_eq!(conflicts.len(), 1, "one conflict, not two");
         assert_eq!(conflicts[0].signal, DupSignal::AlbumSlot);
     }
@@ -1289,6 +1296,7 @@ mod tests {
         .unwrap();
         let existing_id = queries::insert_track(
             &conn,
+            std::path::Path::new(""),
             &Track {
                 id: None,
                 album_id: Some(album_id),
@@ -1319,7 +1327,7 @@ mod tests {
             vec![track("A", Some(1), "/in/a.flac")],
             cand,
         );
-        let conflicts = detect(&conn, &[g]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g]).unwrap();
         assert!(
             conflicts.is_empty(),
             "empty tracklist → MBID pass skipped, no conflicts"
@@ -1366,7 +1374,7 @@ mod tests {
             GroupAction::AcceptAsIs,
             vec![track_with_disc("Late Song", Some(1), 2, "/in/b/2-01.flac")],
         );
-        let conflicts = detect(&conn, &[g1, g2]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g1, g2]).unwrap();
         assert_eq!(conflicts.len(), 1, "title pass must catch disc-divergent dup");
         assert_eq!(conflicts[0].signal, DupSignal::AlbumTitle);
         match &conflicts[0].other {
@@ -1394,7 +1402,7 @@ mod tests {
             GroupAction::AcceptAsIs,
             vec![track_with_disc("Only Song", Some(1), 2, "/in/b/01.flac")],
         );
-        let conflicts = detect(&conn, &[g1, g2]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g1, g2]).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].signal, DupSignal::AlbumTitle);
     }
@@ -1414,7 +1422,7 @@ mod tests {
                 track("Same Title", Some(5), "/in/b.flac"),
             ],
         );
-        let conflicts = detect(&conn, &[g]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g]).unwrap();
         assert_eq!(conflicts.len(), 1, "one conflict, not two");
         assert_eq!(conflicts[0].signal, DupSignal::AlbumSlot);
     }
@@ -1438,7 +1446,7 @@ mod tests {
             GroupAction::AcceptAsIs,
             vec![track_with_disc("Song Beta", Some(1), 2, "/in/b.flac")],
         );
-        let conflicts = detect(&conn, &[g1, g2]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g1, g2]).unwrap();
         assert!(conflicts.is_empty(), "different titles → no conflict");
     }
 
@@ -1462,7 +1470,7 @@ mod tests {
 
         let g1 = group("A", GroupAction::AcceptAsIs, vec![t1]);
         let g2 = group("B", GroupAction::AcceptAsIs, vec![t2]);
-        let conflicts = detect(&conn, &[g1, g2]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g1, g2]).unwrap();
         assert!(conflicts.is_empty(), "empty titles → no title-pass conflict");
     }
 
@@ -1542,7 +1550,7 @@ mod tests {
         };
         let g1 = mb_group("A", make_tracks("a"), cand.clone());
         let g2 = mb_group("B", make_tracks("b"), cand);
-        let conflicts = detect(&conn, &[g1, g2]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g1, g2]).unwrap();
 
         // Every disc/pos combo appears exactly twice (once per group),
         // so we expect exactly 6 inter-group conflicts — and zero
@@ -1585,7 +1593,7 @@ mod tests {
         };
         let g1 = group("A", GroupAction::AcceptAsIs, make("a"));
         let g2 = group("B", GroupAction::AcceptAsIs, make("b"));
-        let conflicts = detect(&conn, &[g1, g2]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g1, g2]).unwrap();
 
         assert_eq!(conflicts.len(), 4, "one conflict per later-group track");
         // Each later-group track must pair with the earlier-group track
@@ -1627,7 +1635,7 @@ mod tests {
                 track("Song", Some(4), "/in/04.flac"),
             ],
         );
-        let conflicts = detect(&conn, &[g]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g]).unwrap();
         assert!(
             conflicts.is_empty(),
             "same-title tracks in a single group are legit alt-versions, not dups"
@@ -1657,7 +1665,7 @@ mod tests {
             GroupAction::AcceptAsIs,
             vec![track("Shared", Some(1), "/in/b.flac")],
         );
-        let conflicts = detect(&conn, &[g1, g2]).unwrap();
+        let conflicts = detect(&conn, std::path::Path::new(""), &[g1, g2]).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].signal, DupSignal::AlbumTitle);
     }

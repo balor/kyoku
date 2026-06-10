@@ -56,7 +56,12 @@ impl GlobalSearchView {
         self.scroll_offset = 0;
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent, conn: &Connection) -> GlobalSearchAction {
+    pub fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        conn: &Connection,
+        music_dir: &std::path::Path,
+    ) -> GlobalSearchAction {
         if keys::is_back(&key) {
             return GlobalSearchAction::Close;
         }
@@ -103,12 +108,12 @@ impl GlobalSearchView {
         }
 
         if self.input.handle_key(key) {
-            self.execute(conn);
+            self.execute(conn, music_dir);
         }
         GlobalSearchAction::None
     }
 
-    pub fn execute(&mut self, conn: &Connection) {
+    pub fn execute(&mut self, conn: &Connection, music_dir: &std::path::Path) {
         self.results.clear();
         self.selected = 0;
         self.scroll_offset = 0;
@@ -119,14 +124,14 @@ impl GlobalSearchView {
         }
 
         // Albums (up to 20)
-        if let Ok(albums) = queries::search_albums(conn, query, 20) {
+        if let Ok(albums) = queries::search_albums(conn, music_dir, query, 20) {
             for a in albums {
                 self.results.push(GlobalResult::Album(a));
             }
         }
 
         // Tracks (up to 30)
-        if let Ok(tracks) = queries::search_tracks(conn, query, 30) {
+        if let Ok(tracks) = queries::search_tracks(conn, music_dir, query, 30) {
             // Apply client-side fuzzy filter as well for better ranking
             for t in tracks {
                 let artist = t.artist.clone().unwrap_or_default();

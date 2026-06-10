@@ -14,22 +14,25 @@ use crate::tui::widgets::confirm_delete::{ConfirmAction, ConfirmDelete};
 
 impl App {
     pub fn switch_view(&mut self, view: AppView) {
+        let music_dir = self.settings.library.music_dir.clone();
         match &view {
             AppView::Library => {
-                self.library.load(&self.conn, None).ok();
+                self.library.load(&self.conn, &music_dir, None).ok();
             }
             AppView::Collections => {
                 self.collections.load(&self.conn, None).ok();
             }
             AppView::AlbumDetail { album_id } => {
-                self.album_detail.load(&self.conn, *album_id).ok();
+                self.album_detail
+                    .load(&self.conn, &music_dir, *album_id)
+                    .ok();
             }
             AppView::LooseTracks => {
-                self.album_detail.load_loose(&self.conn).ok();
+                self.album_detail.load_loose(&self.conn, &music_dir).ok();
             }
             AppView::CollectionDetail { collection_id } => {
                 self.collection_detail
-                    .load(&self.conn, *collection_id, &self.settings.library.music_dir)
+                    .load(&self.conn, *collection_id, &music_dir)
                     .ok();
             }
             AppView::Import => {
@@ -62,9 +65,10 @@ impl App {
         } else {
             Some(self.search.value.as_str())
         };
+        let music_dir = self.settings.library.music_dir.clone();
         match self.view {
             AppView::Library => {
-                self.library.load(&self.conn, query).ok();
+                self.library.load(&self.conn, &music_dir, query).ok();
             }
             AppView::Collections => {
                 self.collections.load(&self.conn, query).ok();
@@ -117,11 +121,15 @@ impl App {
                 } else {
                     Some(self.search.value.as_str())
                 };
-                self.library.load(&self.conn, query).ok();
+                self.library
+                    .load(&self.conn, &self.settings.library.music_dir, query)
+                    .ok();
                 AppAction::None
             }
             crate::tui::views::library::LibraryAction::Deleted => {
-                self.library.load(&self.conn, None).ok();
+                self.library
+                    .load(&self.conn, &self.settings.library.music_dir, None)
+                    .ok();
                 self.refresh_counts();
                 AppAction::None
             }
@@ -131,6 +139,7 @@ impl App {
                     if let Some(plan) = self.library.organize_plan.take() {
                         match crate::core::organizer::apply_organize(
                             &self.conn,
+                            &self.settings.library.music_dir,
                             &plan,
                             &self.settings.import.organize_operation,
                             &crate::core::organizer::cleanup_roots(&self.settings),
@@ -173,7 +182,9 @@ impl App {
                                     Some(format!("Organize failed: {}", e));
                             }
                         }
-                        self.library.load(&self.conn, None).ok();
+                        self.library
+                            .load(&self.conn, &self.settings.library.music_dir, None)
+                            .ok();
                         self.refresh_counts();
                     }
                 } else {
@@ -221,6 +232,7 @@ impl App {
                     if let Some(plan) = self.collections.organize_plan.take() {
                         if let Ok(_result) = crate::core::organizer::apply_organize(
                             &self.conn,
+                            &self.settings.library.music_dir,
                             &plan,
                             &self.settings.import.organize_operation,
                             &crate::core::organizer::cleanup_roots(&self.settings),
@@ -267,14 +279,20 @@ impl App {
                 // removed with delete_files or the last track), drop to library.
                 match self.view.clone() {
                     AppView::AlbumDetail { album_id } => {
-                        if queries::get_album(&self.conn, album_id)
-                            .map(|o| o.is_none())
-                            .unwrap_or(true)
+                        if queries::get_album(
+                            &self.conn,
+                            &self.settings.library.music_dir,
+                            album_id,
+                        )
+                        .map(|o| o.is_none())
+                        .unwrap_or(true)
                         {
                             self.switch_view(AppView::Library);
                         } else {
                             let prev = self.album_detail.selected;
-                            self.album_detail.load(&self.conn, album_id).ok();
+                            self.album_detail
+                                .load(&self.conn, &self.settings.library.music_dir, album_id)
+                                .ok();
                             if prev < self.album_detail.tracks.len() {
                                 self.album_detail.selected = prev;
                             }
@@ -282,7 +300,9 @@ impl App {
                     }
                     AppView::LooseTracks => {
                         let prev = self.album_detail.selected;
-                        self.album_detail.load_loose(&self.conn).ok();
+                        self.album_detail
+                            .load_loose(&self.conn, &self.settings.library.music_dir)
+                            .ok();
                         if prev < self.album_detail.tracks.len() {
                             self.album_detail.selected = prev;
                         }
@@ -385,6 +405,7 @@ impl App {
                         if let Some(plan) = self.collection_detail.organize_plan.take() {
                             if let Ok(result) = crate::core::organizer::apply_organize(
                                 &self.conn,
+                                &self.settings.library.music_dir,
                                 &plan,
                                 &self.settings.import.organize_operation,
                                 &crate::core::organizer::cleanup_roots(&self.settings),
@@ -533,10 +554,13 @@ impl App {
 
     fn refresh_counts(&mut self) {
         self.track_count = queries::count_tracks(&self.conn).unwrap_or(0);
-        self.inbox_count =
-            crate::core::importer::scan_inbox(&self.conn, &self.settings.library.inbox_dirs)
-                .map(|v| v.len())
-                .unwrap_or(0);
+        self.inbox_count = crate::core::importer::scan_inbox(
+            &self.conn,
+            &self.settings.library.music_dir,
+            &self.settings.library.inbox_dirs,
+        )
+        .map(|v| v.len())
+        .unwrap_or(0);
     }
 
     /// Full refresh: reloads counts and the current view's data from disk/DB.
@@ -550,10 +574,11 @@ impl App {
             Some(self.search.value.clone())
         };
 
+        let music_dir = self.settings.library.music_dir.clone();
         match &self.view {
             AppView::Library => {
                 self.library
-                    .load(&self.conn, search_query.as_deref())
+                    .load(&self.conn, &music_dir, search_query.as_deref())
                     .ok();
             }
             AppView::Collections => {
@@ -563,14 +588,16 @@ impl App {
             }
             AppView::AlbumDetail { album_id } => {
                 let prev = self.album_detail.selected;
-                self.album_detail.load(&self.conn, *album_id).ok();
+                self.album_detail
+                    .load(&self.conn, &music_dir, *album_id)
+                    .ok();
                 if prev < self.album_detail.tracks.len() {
                     self.album_detail.selected = prev;
                 }
             }
             AppView::LooseTracks => {
                 let prev = self.album_detail.selected;
-                self.album_detail.load_loose(&self.conn).ok();
+                self.album_detail.load_loose(&self.conn, &music_dir).ok();
                 if prev < self.album_detail.tracks.len() {
                     self.album_detail.selected = prev;
                 }
@@ -578,7 +605,7 @@ impl App {
             AppView::CollectionDetail { collection_id } => {
                 let prev = self.collection_detail.selected;
                 self.collection_detail
-                    .load(&self.conn, *collection_id, &self.settings.library.music_dir)
+                    .load(&self.conn, *collection_id, &music_dir)
                     .ok();
                 if prev < self.collection_detail.tracks.len() {
                     self.collection_detail.selected = prev;
@@ -630,17 +657,20 @@ impl App {
 
             // If the editor made changes, refresh the underlying view's data
             // but keep the cursor in place by re-running load (which clamps selection).
+            let music_dir = self.settings.library.music_dir.clone();
             match &return_view {
                 AppView::AlbumDetail { album_id } => {
                     let prev_selected = self.album_detail.selected;
-                    self.album_detail.load(&self.conn, *album_id).ok();
+                    self.album_detail
+                        .load(&self.conn, &music_dir, *album_id)
+                        .ok();
                     if prev_selected < self.album_detail.tracks.len() {
                         self.album_detail.selected = prev_selected;
                     }
                 }
                 AppView::LooseTracks => {
                     let prev_selected = self.album_detail.selected;
-                    self.album_detail.load_loose(&self.conn).ok();
+                    self.album_detail.load_loose(&self.conn, &music_dir).ok();
                     if prev_selected < self.album_detail.tracks.len() {
                         self.album_detail.selected = prev_selected;
                     }
@@ -648,7 +678,7 @@ impl App {
                 AppView::CollectionDetail { collection_id } => {
                     let prev_selected = self.collection_detail.selected;
                     self.collection_detail
-                        .load(&self.conn, *collection_id, &self.settings.library.music_dir)
+                        .load(&self.conn, *collection_id, &music_dir)
                         .ok();
                     if prev_selected < self.collection_detail.tracks.len() {
                         self.collection_detail.selected = prev_selected;

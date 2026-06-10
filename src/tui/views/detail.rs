@@ -100,9 +100,9 @@ impl AlbumDetailView {
 }
 
 impl AlbumDetailView {
-    pub fn load(&mut self, conn: &Connection, album_id: i64) -> Result<()> {
-        self.album = queries::get_album(conn, album_id)?;
-        self.tracks = queries::get_album_tracks(conn, album_id)?;
+    pub fn load(&mut self, conn: &Connection, music_dir: &Path, album_id: i64) -> Result<()> {
+        self.album = queries::get_album(conn, music_dir, album_id)?;
+        self.tracks = queries::get_album_tracks(conn, music_dir, album_id)?;
         self.filter.clear();
         self.selected = 0;
         self.scroll_offset = 0;
@@ -121,10 +121,10 @@ impl AlbumDetailView {
 
     /// Load all loose tracks (no album). `album` is set to `None`, so the
     /// view renders as "Loose Tracks" and the rename binding is disabled.
-    pub fn load_loose(&mut self, conn: &Connection) -> Result<()> {
+    pub fn load_loose(&mut self, conn: &Connection, music_dir: &Path) -> Result<()> {
         self.album = None;
         // Fetch enough loose tracks for the typical library size
-        self.tracks = queries::list_loose_tracks(conn, 0, 5000)?;
+        self.tracks = queries::list_loose_tracks(conn, music_dir, 0, 5000)?;
         self.filter.clear();
         self.selected = 0;
         self.scroll_offset = 0;
@@ -195,7 +195,13 @@ impl AlbumDetailView {
                     let file_delete_roots = organizer::file_delete_roots(settings);
                     let plan = plan.clone();
                     self.pending_delete = None;
-                    match pruner::apply_delete_plan(conn, &plan, delete_files, &file_delete_roots) {
+                    match pruner::apply_delete_plan(
+                        conn,
+                        &settings.library.music_dir,
+                        &plan,
+                        delete_files,
+                        &file_delete_roots,
+                    ) {
                         Ok(report) => {
                             let mut parts = Vec::new();
                             if report.tracks_deleted > 0 {
@@ -233,6 +239,7 @@ impl AlbumDetailView {
                 if let Some(plan) = self.organize_plan.take() {
                     match organizer::apply_organize(
                         conn,
+                        &settings.library.music_dir,
                         &plan,
                         &settings.import.organize_operation,
                         &organizer::cleanup_roots(settings),
@@ -281,7 +288,7 @@ impl AlbumDetailView {
                     // Reload to reflect new paths
                     if let Some(album) = &self.album {
                         let prev = self.selected;
-                        self.load(conn, album.id).ok();
+                        self.load(conn, &settings.library.music_dir, album.id).ok();
                         if prev < self.tracks.len() {
                             self.selected = prev;
                         }
@@ -345,7 +352,7 @@ impl AlbumDetailView {
                         let id = album.id;
                         queries::rename_album(conn, id, &new_title).ok();
                         // Reload to reflect the change
-                        self.load(conn, id).ok();
+                        self.load(conn, &settings.library.music_dir, id).ok();
                         return DetailAction::None;
                     }
                 self.rename_input = None;
@@ -408,7 +415,12 @@ impl AlbumDetailView {
                 return DetailAction::None;
             }
             let file_delete_roots = organizer::file_delete_roots(settings);
-            match pruner::plan_delete_tracks(conn, &ids, &file_delete_roots) {
+            match pruner::plan_delete_tracks(
+                conn,
+                &settings.library.music_dir,
+                &ids,
+                &file_delete_roots,
+            ) {
                 Ok(plan) => {
                     if plan.is_empty() {
                         self.notice =
@@ -565,7 +577,7 @@ impl AlbumDetailView {
     /// result, writes bytes to `<album_dir>/cover.<ext>`, updates
     /// `albums.cover_art_path`, and reloads the album row so the header
     /// picks up the new path on the next render.
-    pub fn tick(&mut self, conn: &Connection) {
+    pub fn tick(&mut self, conn: &Connection, music_dir: &Path) {
         let Some(rx) = self.cover_fetch_rx.as_ref() else {
             return;
         };
@@ -581,7 +593,7 @@ impl AlbumDetailView {
         }
 
         match msg.result {
-            Ok(Some(img)) => match self.save_fetched_cover(conn, msg.album_id, &img) {
+            Ok(Some(img)) => match self.save_fetched_cover(conn, music_dir, msg.album_id, &img) {
                 Ok(path) => {
                     self.notice = Some((
                         NoticeKind::Success,
@@ -619,6 +631,7 @@ impl AlbumDetailView {
     fn save_fetched_cover(
         &mut self,
         conn: &Connection,
+        music_dir: &Path,
         album_id: i64,
         img: &CoverImage,
     ) -> Result<PathBuf> {
@@ -636,9 +649,9 @@ impl AlbumDetailView {
         std::fs::create_dir_all(&album_dir)?;
         let dest = album_dir.join(format!("cover.{}", img.extension));
         std::fs::write(&dest, &img.bytes)?;
-        queries::set_album_cover_path(conn, album_id, &dest.to_string_lossy())?;
+        queries::set_album_cover_path(conn, music_dir, album_id, &dest.to_string_lossy())?;
         // Refresh the cached row so the header renders with the new path.
-        self.album = queries::get_album(conn, album_id)?;
+        self.album = queries::get_album(conn, music_dir, album_id)?;
         Ok(dest)
     }
 

@@ -100,6 +100,7 @@ fn classify_file(
 /// `files_outside_managed` and are reported to the user but never removed.
 pub fn plan_delete_tracks(
     conn: &Connection,
+    music_dir: &Path,
     track_ids: &[i64],
     managed_roots: &[PathBuf],
 ) -> Result<DeletePlan> {
@@ -107,7 +108,7 @@ pub fn plan_delete_tracks(
     if track_ids.is_empty() {
         return Ok(plan);
     }
-    let infos = queries::get_tracks_delete_info(conn, track_ids)?;
+    let infos = queries::get_tracks_delete_info(conn, music_dir, track_ids)?;
 
     // Collect unique album ids for summary purposes (NOT for deletion —
     // plan_delete_tracks never removes album rows).
@@ -141,6 +142,7 @@ pub fn plan_delete_tracks(
 /// tracks during apply.
 pub fn plan_delete_albums(
     conn: &Connection,
+    music_dir: &Path,
     album_ids: &[i64],
     managed_roots: &[PathBuf],
 ) -> Result<DeletePlan> {
@@ -150,7 +152,7 @@ pub fn plan_delete_albums(
     }
 
     let track_ids = queries::list_tracks_for_albums(conn, album_ids)?;
-    let infos = queries::get_tracks_delete_info(conn, &track_ids)?;
+    let infos = queries::get_tracks_delete_info(conn, music_dir, &track_ids)?;
 
     use std::collections::BTreeMap;
     let mut album_counts: BTreeMap<i64, u32> = BTreeMap::new();
@@ -237,6 +239,7 @@ fn fill_album_summary(
 ///   - physical files stay on disk untouched.
 pub fn apply_delete_plan(
     conn: &Connection,
+    music_dir: &Path,
     plan: &DeletePlan,
     delete_files: bool,
     cleanup_roots: &[PathBuf],
@@ -274,7 +277,7 @@ pub fn apply_delete_plan(
     // This prevents a surviving track from pointing at an album file that the
     // user opted to delete when an organized collection copy already exists.
     for (track_id, new_path) in &plan.promote_paths {
-        let _ = queries::update_track_path(conn, *track_id, new_path);
+        let _ = queries::update_track_path(conn, music_dir, *track_id, new_path);
     }
 
     // Detach tracks that survive album deletion through collection membership.

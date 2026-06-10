@@ -191,6 +191,10 @@ pub struct ImportView {
     /// here so the worker, which spawns its own connection on its own
     /// thread, doesn't have to re-derive it from settings.
     pub db_path: PathBuf,
+    /// Resolved library root, threaded into the background worker so it
+    /// can normalise paths (relative-when-under-music_dir) when writing
+    /// rows. Same rationale as `db_path` — the worker has its own conn.
+    pub music_dir: PathBuf,
     scan_rx: Option<mpsc::Receiver<ScanMessage>>,
     /// Persistent MB search channel. Lives across all searches so a prefetch
     /// of the *next* group can complete even after the user navigates and we
@@ -288,6 +292,7 @@ impl Default for ImportView {
             auto_match_threshold: 0.85,
             match_candidates: 5,
             db_path: PathBuf::new(),
+            music_dir: PathBuf::new(),
             scan_rx: None,
             mb_rx: None,
             mb_tx: None,
@@ -343,6 +348,7 @@ impl ImportView {
         self.auto_match_threshold = auto_match_threshold;
         self.match_candidates = match_candidates;
         self.db_path = db_path;
+        self.music_dir = music_dir.to_path_buf();
 
         // Reset SelectSource fields
         self.custom_path = TextInput::new("~/Music/new-album").with_label(" Path: ");

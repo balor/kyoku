@@ -37,8 +37,15 @@ fn e2e_import_album_then_organize_lands_files_under_music_dir() {
     let conn = db::open_memory().unwrap();
 
     // Step 1: import from inbox.
-    let result = importer::import(&conn, &inbox, /*loose*/ false, /*pretend*/ false, None)
-        .expect("import should succeed");
+    let result = importer::import(
+        &conn,
+        &music,
+        &inbox,
+        /*loose*/ false,
+        /*pretend*/ false,
+        None,
+    )
+    .expect("import should succeed");
     assert_eq!(result.imported, 1, "exactly one track should be imported");
     assert_eq!(result.skipped_error, 0);
 
@@ -62,6 +69,7 @@ fn e2e_import_album_then_organize_lands_files_under_music_dir() {
 
     let result = organizer::apply_organize(
         &conn,
+        &music,
         &plan,
         "move",
         &[music.clone(), inbox.clone()],
@@ -87,21 +95,39 @@ fn e2e_import_album_then_organize_lands_files_under_music_dir() {
         inbox_file
     );
 
-    // Step 4: DB path reflects the new location.
-    let db_path: String = conn
-        .query_row("SELECT file_path FROM tracks LIMIT 1", [], |r| r.get(0))
-        .unwrap();
+    // Step 4: DB row resolves to the new location. The stored path is now
+    // relative to music_dir (the v7 storage convention), and the queries
+    // layer rejoins it on read — fetch a TrackRow via the public API to
+    // verify the resolved path matches the move target.
+    let track = kyoku::db::queries::get_album_tracks(&conn, &music, /*album_id*/ 1)
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("at least one track row");
     assert_eq!(
-        PathBuf::from(&db_path),
+        PathBuf::from(&track.file_path),
         planned_target,
-        "tracks.file_path should match the move target"
+        "resolved file_path should match the move target"
     );
 
-    // Step 5: no lingering unresolved paths.
-    let missing = kyoku::core::relocator::verify_paths(&conn).unwrap();
+    // Step 5: renaming music_dir is the central use case of the refactor —
+    // the same DB resolves under a different prefix without any rewrite.
+    let renamed = tmp.path().join("music_renamed");
+    std::fs::rename(&music, &renamed).unwrap();
+    let renamed_target = renamed.join(planned_target.strip_prefix(&music).unwrap());
+    let track2 = kyoku::db::queries::get_album_tracks(&conn, &renamed, 1)
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("track still listed after music_dir rename");
+    assert_eq!(
+        PathBuf::from(&track2.file_path),
+        renamed_target,
+        "file_path resolves under the renamed music_dir without any DB rewrite"
+    );
     assert!(
-        missing.is_empty(),
-        "no DB paths should point to missing files after organize, got {:?}",
-        missing
+        renamed_target.exists(),
+        "renamed target {:?} should exist on disk",
+        renamed_target
     );
 }

@@ -327,7 +327,7 @@ impl ImportView {
     /// actions. Populates `conflicts` / `decisions` for the summary
     /// line and the resolver step. Called when entering the summary.
     pub(super) fn refresh_conflict_preview(&mut self, conn: &Connection) {
-        match super::dup_detect::detect(conn, &self.groups) {
+        match super::dup_detect::detect(conn, &self.music_dir, &self.groups) {
             Ok(conflicts) => {
                 self.decisions = conflicts.iter().map(default_decision_for).collect();
                 self.conflicts = conflicts;
@@ -466,7 +466,8 @@ impl ImportView {
 
         // Filter out files that are already in the DB (main thread — needs conn).
         // This is the same logic used by `kyoku scan` for the inbox indicator.
-        let unimported = importer::scan_inbox(conn, &self.source_paths).unwrap_or_default();
+        let unimported =
+            importer::scan_inbox(conn, &self.music_dir, &self.source_paths).unwrap_or_default();
 
         let (tx, rx) = mpsc::channel();
         self.scan_rx = Some(rx);
@@ -863,6 +864,7 @@ impl ImportView {
         let name_script = self.name_script;
         let write_tags = self.write_tags;
         let db_path = self.db_path.clone();
+        let music_dir = self.music_dir.clone();
         let (tx, rx) = mpsc::channel();
         self.import_rx = Some(rx);
 
@@ -875,6 +877,7 @@ impl ImportView {
                 name_script,
                 write_tags,
                 db_path,
+                music_dir,
                 tx,
             );
         });

@@ -26,9 +26,10 @@ pub(super) fn run_import_worker(
     name_script: NameScriptPreference,
     write_tags: bool,
     db_path: std::path::PathBuf,
+    music_dir: std::path::PathBuf,
     tx: mpsc::Sender<ImportMessage>,
 ) {
-    let conn = match crate::db::open_database(&db_path) {
+    let conn = match crate::db::open_database(&db_path, &music_dir) {
         Ok(c) => c,
         Err(e) => {
             let _ = tx.send(ImportMessage::Complete(format!("DB open failed: {}", e)));
@@ -113,7 +114,7 @@ pub(super) fn run_import_worker(
             // once per group and only when we actually created/found an
             // album row — loose tracks don't have albums to attach to.
             if let Some(aid) = mb_album_id {
-                stamp_sibling_cover(conn, aid, group);
+                stamp_sibling_cover(conn, &music_dir, aid, group);
             }
 
             // Update MB album with MB metadata
@@ -163,7 +164,7 @@ pub(super) fn run_import_worker(
             };
 
             if let Some(aid) = asis_album_id {
-                stamp_sibling_cover(conn, aid, group);
+                stamp_sibling_cover(conn, &music_dir, aid, group);
             }
 
             // Pair each local track to an MB track once, up front. We need
@@ -214,6 +215,7 @@ pub(super) fn run_import_worker(
                     }
                     if let Err(e) = queries::insert_orphan(
                         conn,
+                        &music_dir,
                         &repl.file_path,
                         Some(&repl.title),
                         repl.artist.as_deref(),
@@ -230,7 +232,7 @@ pub(super) fn run_import_worker(
                     }
                 }
 
-                if queries::track_exists_by_path(conn, &path_str).unwrap_or(false) {
+                if queries::track_exists_by_path(conn, &music_dir, &path_str).unwrap_or(false) {
                     skipped += 1;
                     done += 1;
                     let _ = tx.send(ImportMessage::Progress(done, total_tracks));
@@ -255,7 +257,7 @@ pub(super) fn run_import_worker(
                     .map(|m| m.len() as i64)
                     .ok();
 
-                match queries::insert_track(conn, track, album_id, file_size) {
+                match queries::insert_track(conn, &music_dir, track, album_id, file_size) {
                     Ok(track_id) => {
                         imported += 1;
 
@@ -605,7 +607,12 @@ fn build_mb_tag_changes(mb: &MbRelease, mbt: &MbTrack) -> TagChanges {
 /// Scan the group's source directory for a cover-art file and stamp it onto
 /// the given album row. No-op if the group has no resolvable source dir or
 /// no matching cover file sits next to the audio.
-fn stamp_sibling_cover(conn: &rusqlite::Connection, album_id: i64, group: &ImportGroup) {
+fn stamp_sibling_cover(
+    conn: &rusqlite::Connection,
+    music_dir: &std::path::Path,
+    album_id: i64,
+    group: &ImportGroup,
+) {
     let Some(source_dir) = group
         .tracks
         .first()
@@ -614,7 +621,12 @@ fn stamp_sibling_cover(conn: &rusqlite::Connection, album_id: i64, group: &Impor
         return;
     };
     if let Some(cover) = detect_sibling_cover(source_dir) {
-        let _ = queries::set_album_cover_path(conn, album_id, &cover.display().to_string());
+        let _ = queries::set_album_cover_path(
+            conn,
+            music_dir,
+            album_id,
+            &cover.display().to_string(),
+        );
     }
 }
 

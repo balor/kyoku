@@ -44,7 +44,7 @@ These are the specific frustrations this project aims to solve:
 
 4. **Poor Unicode / CJK handling.** Japanese, Chinese, Korean characters in tags, filenames, and search. Beets has recurring issues with encoding, display, sorting, and filesystem operations for non-Latin content. kyoku must handle CJK as a core concern, not an afterthought.
 
-5. **Library relocation is painful.** Moving a library to a new drive or path in beets requires manual SQLite queries. kyoku has a built-in `kyoku relocate` command that rebases all paths in one operation.
+5. **Library relocation is painful.** Moving a library to a new drive or path in beets historically required manual SQLite queries. kyoku stores file paths relative to `music_dir` (the approach beets adopted in v2.10 — see [beets#133](https://github.com/beetbox/beets/issues/133)), so renaming the library directory (or moving it wholesale to a new drive when the DB lives alongside) is a config edit and nothing more — no rebase, no migration, no `relocate` subcommand to remember.
 
 ### Design Principles
 1. **TUI-first** — the TUI is the primary interface; CLI subcommands are for automation and scripting
@@ -639,17 +639,15 @@ Press `O` in the library browser to organize the entire library, or in album det
 
 `Enter` applies from either view. `Esc` goes back (detail → summary → close).
 
-### 6.7 Library Relocation (`kyoku relocate`)
+### 6.7 Library Relocation
 
-Rebase all library paths when you move your music to a different drive or directory. No manual SQLite queries needed.
+There is no `kyoku relocate` command — there is nothing to relocate. Paths inside `music_dir` are stored relative to it (`tracks.file_path`, `albums.cover_art_path`, `collection_tracks.collection_file_path`, `orphaned_files.file_path`), so renaming the library directory only requires editing `[library].music_dir` in `config.toml`. The common case — the database lives inside `music_dir` so the rename moves it along with the music — needs no further action: open the TUI and everything resolves under the new prefix.
 
-```bash
-kyoku relocate /old/Music /new/drive/Music           # Rebase all paths from old to new prefix
-kyoku relocate /old/Music /new/drive/Music --pretend  # Preview changes
-kyoku relocate --verify                                # Check all DB paths exist on disk, report missing
-```
+Paths outside `music_dir` (inbox files awaiting `kyoku organize`, user-relocated collection copies) stay absolute, so the rename rule doesn't touch them. The split is automatic — there's no flag to set.
 
-This does a simple string prefix replacement on all `file_path` entries in the database. Combined with `--verify`, it can also detect and report files that have gone missing (e.g. removed drive, deleted files).
+If you're moving the library to a different drive, the same rule applies as long as the database file moves with it. If you keep the DB elsewhere, point `[library].data_dir` at the new DB location *and* `[library].music_dir` at the new music directory before launching kyoku.
+
+Inspired by beets v2.10's switch to relative paths (see [beetbox/beets#133](https://github.com/beetbox/beets/issues/133)). Existing libraries migrate transparently the first time they're opened — the v7 schema migration rewrites any absolute path under the configured `music_dir` to its relative form. Paths outside are left untouched.
 
 ### 6.8 File Info (`kyoku info <path>`)
 
@@ -1012,8 +1010,7 @@ A single MB entity can have both a native-script primary name and one or more La
 - [x] `kyoku organize` — preview + apply file reorganization (`src/core/organizer.rs`)
 - [x] `kyoku organize --apply` with filters: `--artist`, `--album`, `--path`, `--collection`
 - [x] Collection dual-copy support (album copy + collection copy with custom template)
-- [x] `kyoku relocate` — rebase all paths when library moves (`src/core/relocator.rs`)
-- [x] `kyoku relocate --verify` — detect missing files
+- [x] Relative-path storage — `tracks.file_path` / cover / collection-copy / orphan paths are stored relative to `music_dir` (schema v7), so renaming the library directory only needs a config edit (`src/core/paths.rs`, `migrations/007_*` in `src/db/schema.rs`). Inspired by beets v2.10.
 - [x] Clean up empty directories after moves (recursive parent cleanup)
 - [x] `kyoku organize` TUI integration (`O` key — library: organize all, album detail: organize album; summary/detail views with scrollable per-file listing)
 - [x] Filesystem output honours `[musicbrainz] name_script` — artist dirs and album-title segments follow the Latin/native preference resolved at MB-fetch time (see Milestone 4)

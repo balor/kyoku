@@ -98,7 +98,7 @@ fn main() -> anyhow::Result<()> {
                     );
                     std::process::exit(1);
                 }
-                let conn = db::open_database(settings.database_file())?;
+                let conn = db::open_database(settings.database_file(), &settings.library.music_dir)?;
                 tui::run(conn, settings)?;
             }
         }
@@ -108,7 +108,7 @@ fn main() -> anyhow::Result<()> {
             loose,
             collection,
         }) => {
-            let conn = db::open_database(settings.database_file())?;
+            let conn = db::open_database(settings.database_file(), &settings.library.music_dir)?;
 
             let paths: Vec<std::path::PathBuf> = match path {
                 Some(p) => vec![p],
@@ -132,6 +132,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 let result = core::importer::import(
                     &conn,
+                    &settings.library.music_dir,
                     import_path,
                     loose,
                     pretend,
@@ -269,14 +270,14 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some(Command::Scan) => {
-            let conn = db::open_database(settings.database_file())?;
+            let conn = db::open_database(settings.database_file(), &settings.library.music_dir)?;
             let inbox_dirs = &settings.library.inbox_dirs;
 
             if inbox_dirs.is_empty() {
                 println!("No inbox directories configured.");
                 println!("Add inbox_dirs to your config (see `kyoku paths`).");
             } else {
-                let unimported = core::importer::scan_inbox(&conn, inbox_dirs)?;
+                let unimported = core::importer::scan_inbox(&conn, &settings.library.music_dir, inbox_dirs)?;
                 if unimported.is_empty() {
                     println!("No new files found in inbox directories.");
                 } else {
@@ -297,7 +298,7 @@ fn main() -> anyhow::Result<()> {
             path,
             collection,
         }) => {
-            let conn = db::open_database(settings.database_file())?;
+            let conn = db::open_database(settings.database_file(), &settings.library.music_dir)?;
             let filter = if let Some(a) = artist {
                 core::organizer::OrganizeFilter::Artist(a)
             } else if let Some(a) = album {
@@ -438,6 +439,7 @@ fn main() -> anyhow::Result<()> {
 
                     let result = core::organizer::apply_organize(
                         &conn,
+                        &settings.library.music_dir,
                         &plan,
                         &settings.import.organize_operation,
                         &core::organizer::cleanup_roots(&settings),
@@ -460,54 +462,6 @@ fn main() -> anyhow::Result<()> {
                 } else {
                     println!("(dry run — use --apply to execute)");
                 }
-            }
-        }
-        Some(Command::Relocate {
-            old_prefix,
-            new_prefix,
-            verify,
-            pretend,
-        }) => {
-            let conn = db::open_database(settings.database_file())?;
-
-            if verify {
-                let missing = core::relocator::verify_paths(&conn)?;
-                if missing.is_empty() {
-                    println!("All {} track paths verified — no missing files.", {
-                        let count: i64 =
-                            conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))?;
-                        count
-                    });
-                } else {
-                    println!("{} missing file(s):", missing.len());
-                    for (id, path) in &missing {
-                        println!("  [{}] {}", id, path);
-                    }
-                }
-            } else if let (Some(old), Some(new)) = (old_prefix, new_prefix) {
-                let old_str = old.display().to_string();
-                let new_str = new.display().to_string();
-                let plan = core::relocator::plan_relocate(&conn, &old_str, &new_str)?;
-
-                if plan.is_empty() {
-                    println!("No tracks match the prefix '{}'.", old_str);
-                } else {
-                    for (_, old_path, new_path) in &plan {
-                        println!("  {} → {}", old_path, new_path);
-                    }
-                    println!("\n{} path(s) to update.", plan.len());
-
-                    if pretend {
-                        println!("(dry run — remove --pretend to apply)");
-                    } else {
-                        let count = core::relocator::apply_relocate(&conn, &plan)?;
-                        println!("Done: {} path(s) updated.", count);
-                    }
-                }
-            } else {
-                eprintln!("Usage: kyoku relocate <old_prefix> <new_prefix>");
-                eprintln!("       kyoku relocate --verify");
-                std::process::exit(1);
             }
         }
     }

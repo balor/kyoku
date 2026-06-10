@@ -52,13 +52,13 @@ fn add_album_track(
         queries::get_or_create_album(conn, album, Some(artist), year, None, 1).unwrap();
     touch(&src_path);
     let track = make_track_struct(src_path, Some(album_id), title, artist, track_no);
-    queries::insert_track(conn, &track, Some(album_id), None).unwrap()
+    queries::insert_track(conn, std::path::Path::new(""), &track, Some(album_id), None).unwrap()
 }
 
 fn add_loose_track(conn: &Connection, src_path: PathBuf, artist: &str, title: &str) -> i64 {
     touch(&src_path);
     let track = make_track_struct(src_path, None, title, artist, 1);
-    queries::insert_track(conn, &track, None, None).unwrap()
+    queries::insert_track(conn, std::path::Path::new(""), &track, None, None).unwrap()
 }
 
 /// (TempDir, src_dir, music_dir, conn).
@@ -84,15 +84,15 @@ fn plan_delete_tracks_collects_collection_copies() {
     let (coll_a, _) = queries::get_or_create_collection(&conn, "A").unwrap();
     queries::add_track_to_collection(&conn, coll_a, tid).unwrap();
     let copy_a = music.join("Collections/A/track.mp3");
-    queries::update_collection_track_path(&conn, coll_a, tid, &copy_a.display().to_string())
+    queries::update_collection_track_path(&conn, &music, coll_a, tid, &copy_a.display().to_string())
         .unwrap();
     let (coll_b, _) = queries::get_or_create_collection(&conn, "B").unwrap();
     queries::add_track_to_collection(&conn, coll_b, tid).unwrap();
     let copy_b = music.join("Collections/B/track.mp3");
-    queries::update_collection_track_path(&conn, coll_b, tid, &copy_b.display().to_string())
+    queries::update_collection_track_path(&conn, &music, coll_b, tid, &copy_b.display().to_string())
         .unwrap();
 
-    let plan = plan_delete_tracks(&conn, &[tid], &[music.clone()]).unwrap();
+    let plan = plan_delete_tracks(&conn, &music, &[tid], &[music.clone()]).unwrap();
 
     assert_eq!(plan.track_ids, vec![tid]);
     assert!(
@@ -121,7 +121,7 @@ fn plan_delete_album_lists_tracks_and_album_row() {
         })
         .unwrap();
 
-    let plan = plan_delete_albums(&conn, &[aid], &[music.clone()]).unwrap();
+    let plan = plan_delete_albums(&conn, &music, &[aid], &[music.clone()]).unwrap();
 
     let mut track_ids = plan.track_ids.clone();
     track_ids.sort();
@@ -164,10 +164,10 @@ fn delete_album_preserves_tracks_that_belong_to_collections() {
     queries::add_track_to_collection(&conn, coll_id, tid).unwrap();
     let copy = music.join("Collections/Mix/song.mp3");
     touch(&copy);
-    queries::update_collection_track_path(&conn, coll_id, tid, &copy.display().to_string())
+    queries::update_collection_track_path(&conn, &music, coll_id, tid, &copy.display().to_string())
         .unwrap();
 
-    let plan = plan_delete_albums(&conn, &[aid], &[music.clone()]).unwrap();
+    let plan = plan_delete_albums(&conn, &music, &[aid], &[music.clone()]).unwrap();
     assert!(
         plan.track_ids.is_empty(),
         "collection tracks should survive album deletion"
@@ -176,21 +176,24 @@ fn delete_album_preserves_tracks_that_belong_to_collections() {
     assert_eq!(plan.promote_paths, vec![(tid, copy.display().to_string())]);
     assert_eq!(plan.files_to_delete, vec![primary.clone()]);
 
-    let report = apply_delete_plan(&conn, &plan, true, &[music.clone()]).unwrap();
+    let report = apply_delete_plan(&conn, &music, &plan, true, &[music.clone()]).unwrap();
 
     assert_eq!(report.albums_deleted, 1);
     assert_eq!(report.tracks_deleted, 0);
     assert_eq!(report.files_deleted, 1);
     assert!(!primary.exists());
-    let (album_id, file_path): (Option<i64>, String) = conn
+    let album_id: Option<i64> = conn
         .query_row(
-            "SELECT album_id, file_path FROM tracks WHERE id = ?1",
+            "SELECT album_id FROM tracks WHERE id = ?1",
             [tid],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )
         .unwrap();
     assert_eq!(album_id, None);
-    assert_eq!(file_path, copy.display().to_string());
+    // tracks.file_path now stores the relative form — read through the
+    // queries layer to resolve it back to absolute for the assertion.
+    let row = queries::get_track(&conn, &music, tid).unwrap().unwrap();
+    assert_eq!(row.file_path, copy.display().to_string());
     let membership_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM collection_tracks WHERE collection_id = ?1 AND track_id = ?2",
@@ -214,7 +217,7 @@ fn delete_album_keeps_primary_file_for_collection_track_without_copy() {
     let (coll_id, _) = queries::get_or_create_collection(&conn, "Mix").unwrap();
     queries::add_track_to_collection(&conn, coll_id, tid).unwrap();
 
-    let plan = plan_delete_albums(&conn, &[aid], std::slice::from_ref(&music)).unwrap();
+    let plan = plan_delete_albums(&conn, &music, &[aid], std::slice::from_ref(&music)).unwrap();
     assert!(plan.track_ids.is_empty());
     assert_eq!(plan.album_survivor_track_ids, vec![tid]);
     assert!(plan.promote_paths.is_empty());
@@ -223,7 +226,7 @@ fn delete_album_keeps_primary_file_for_collection_track_without_copy() {
         "do not delete a surviving collection track's only physical file"
     );
 
-    let report = apply_delete_plan(&conn, &plan, true, std::slice::from_ref(&music)).unwrap();
+    let report = apply_delete_plan(&conn, &music, &plan, true, std::slice::from_ref(&music)).unwrap();
 
     assert_eq!(report.albums_deleted, 1);
     assert_eq!(report.files_deleted, 0);
@@ -244,9 +247,9 @@ fn apply_delete_plan_keeps_files_when_flag_false() {
     let (_tmp, _src, music, conn) = fresh_world();
     let p = music.join("Artist/Album/song.mp3");
     let tid = add_album_track(&conn, p.clone(), "Artist", "Album", 1, "Song", None);
-    let plan = plan_delete_tracks(&conn, &[tid], &[music.clone()]).unwrap();
+    let plan = plan_delete_tracks(&conn, &music, &[tid], &[music.clone()]).unwrap();
 
-    let report = apply_delete_plan(&conn, &plan, false, &[music.clone()]).unwrap();
+    let report = apply_delete_plan(&conn, &music, &plan, false, &[music.clone()]).unwrap();
 
     assert_eq!(report.tracks_deleted, 1);
     assert_eq!(
@@ -267,9 +270,9 @@ fn apply_delete_plan_removes_files_and_empty_parents() {
     let (_tmp, _src, music, conn) = fresh_world();
     let p = music.join("Artist/Album/song.mp3");
     let tid = add_album_track(&conn, p.clone(), "Artist", "Album", 1, "Song", None);
-    let plan = plan_delete_tracks(&conn, &[tid], &[music.clone()]).unwrap();
+    let plan = plan_delete_tracks(&conn, &music, &[tid], &[music.clone()]).unwrap();
 
-    let report = apply_delete_plan(&conn, &plan, true, &[music.clone()]).unwrap();
+    let report = apply_delete_plan(&conn, &music, &plan, true, &[music.clone()]).unwrap();
 
     assert_eq!(report.files_deleted, 1);
     assert_eq!(report.tracks_deleted, 1);
@@ -293,10 +296,10 @@ fn apply_delete_plan_rejects_path_outside_managed_roots() {
     let tid = add_loose_track(&conn, outside.clone(), "Artist", "Song");
     // Plan treats the *actual* file location as managed so it lands in
     // `files_to_delete` — but at apply time we pass a different roots list.
-    let plan = plan_delete_tracks(&conn, &[tid], &[tmp.path().to_path_buf()]).unwrap();
+    let plan = plan_delete_tracks(&conn, &music, &[tid], &[tmp.path().to_path_buf()]).unwrap();
     assert_eq!(plan.files_to_delete, vec![outside.clone()]);
 
-    let report = apply_delete_plan(&conn, &plan, true, &[music.clone()]).unwrap();
+    let report = apply_delete_plan(&conn, &music, &plan, true, &[music.clone()]).unwrap();
 
     assert_eq!(report.files_deleted, 0, "apply must refuse unmanaged paths");
     assert!(outside.exists(), "file outside cleanup_roots is untouched");
@@ -312,7 +315,7 @@ fn plan_delete_flags_files_outside_managed_roots() {
 
     // managed_roots contains only music_dir; outside path lands in
     // `files_outside_managed` and must not appear in `files_to_delete`.
-    let plan = plan_delete_tracks(&conn, &[tid], &[music.clone()]).unwrap();
+    let plan = plan_delete_tracks(&conn, &music, &[tid], &[music.clone()]).unwrap();
 
     assert!(plan.files_to_delete.is_empty());
     assert_eq!(plan.files_outside_managed, vec![outside]);

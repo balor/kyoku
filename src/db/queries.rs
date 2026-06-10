@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use rusqlite::Connection;
 
 use crate::core::collection_order::{self, CollectionOrderItem};
+use crate::core::paths;
 use crate::db::models::Track;
 use crate::error::Result;
 
@@ -12,22 +14,19 @@ use crate::error::Result;
 /// are already accounted for somewhere, including collection copies sitting
 /// inside `music_dir` and pending-orphan leftovers.
 ///
-/// Each path is inserted twice: once as the DB-stored literal, and once as
-/// its canonicalized form (when canonicalize succeeds). The scanner
-/// canonicalizes the paths it finds on disk, so matching only on the literal
-/// would miss whenever the stored path has a symlink component or UTF
-/// normalization that differs from what the filesystem returns (NFD vs NFC
-/// on macOS is the usual culprit). Both forms in the set means either
-/// comparison succeeds.
-pub fn list_all_known_paths(conn: &Connection) -> Result<HashSet<String>> {
+/// Stored paths are resolved against `music_dir` so the returned set is
+/// fully absolute, ready to compare against scanner output. Each path is
+/// also inserted in its canonicalized form (when canonicalize succeeds) so
+/// symlink / NFC-vs-NFD variants don't slip past the dedup check.
+pub fn list_all_known_paths(conn: &Connection, music_dir: &Path) -> Result<HashSet<String>> {
     let mut out = HashSet::new();
-    let mut insert_both = |p: String| {
-        // Canonical form first (cheap string clone, may fail for missing files
-        // — that's fine, we still have the literal).
-        if let Ok(canon) = std::fs::canonicalize(&p) {
+    let mut insert_both = |stored: String| {
+        let abs = paths::from_db_path(&stored, music_dir);
+        let abs_str = abs.display().to_string();
+        if let Ok(canon) = std::fs::canonicalize(&abs) {
             out.insert(canon.display().to_string());
         }
-        out.insert(p);
+        out.insert(abs_str);
     };
     // One statement per source table — UNIONing inside SQLite would also
     // work but this keeps the borrow of `conn` straightforward.
@@ -50,34 +49,46 @@ pub fn list_all_known_paths(conn: &Connection) -> Result<HashSet<String>> {
 }
 
 /// Check if a track with the given file path already exists in the database.
-pub fn track_exists_by_path(conn: &Connection, path: &str) -> Result<bool> {
+/// `path` is the caller's absolute path; we normalize to DB form before lookup.
+pub fn track_exists_by_path(conn: &Connection, music_dir: &Path, path: &str) -> Result<bool> {
+    let stored = paths::to_db_path(Path::new(path), music_dir);
     let count: i32 = conn.query_row(
         "SELECT COUNT(*) FROM tracks WHERE file_path = ?1",
-        [path],
+        [&stored],
         |row| row.get(0),
     )?;
     Ok(count > 0)
 }
 
-/// Get the track ID for a given file path, if it exists.
-pub fn get_track_id_by_path(conn: &Connection, path: &str) -> Result<Option<i64>> {
+/// Get the track ID for a given absolute file path, if it exists.
+pub fn get_track_id_by_path(
+    conn: &Connection,
+    music_dir: &Path,
+    path: &str,
+) -> Result<Option<i64>> {
+    let stored = paths::to_db_path(Path::new(path), music_dir);
     let id: Option<i64> = conn
         .query_row(
             "SELECT id FROM tracks WHERE file_path = ?1",
-            [path],
+            [&stored],
             |row| row.get(0),
         )
         .ok();
     Ok(id)
 }
 
-/// Insert a track into the database. Returns the new track ID.
+/// Insert a track into the database. Returns the new track ID. The track's
+/// `file_path` is normalised against `music_dir` (relative when under it).
+/// `source_dir` is left untouched — it's a historical breadcrumb, not a path
+/// the rest of the system follows back to a file.
 pub fn insert_track(
     conn: &Connection,
+    music_dir: &Path,
     track: &Track,
     album_id: Option<i64>,
     file_size: Option<i64>,
 ) -> Result<i64> {
+    let file_path = paths::to_db_path(&track.file_path, music_dir);
     conn.execute(
         "INSERT INTO tracks (
             album_id, title, artist, track_number, disc_number,
@@ -91,7 +102,7 @@ pub fn insert_track(
             track.track_number,
             track.disc_number,
             track.duration_ms.map(|d| d as i64),
-            track.file_path.display().to_string(),
+            file_path,
             file_size,
             track.file_format.as_str(),
             track.bitrate,
@@ -134,19 +145,34 @@ pub fn get_or_create_album(
 }
 
 /// Set the cover-art path for an album. Always overwrites any existing
-/// value. `path` is the absolute file path. Pass an empty string to clear.
-pub fn set_album_cover_path(conn: &Connection, album_id: i64, path: &str) -> Result<()> {
-    let value: Option<&str> = if path.is_empty() { None } else { Some(path) };
+/// value. `path` is an absolute file path; it's normalised against
+/// `music_dir` before storage. Pass an empty string to clear.
+pub fn set_album_cover_path(
+    conn: &Connection,
+    music_dir: &Path,
+    album_id: i64,
+    path: &str,
+) -> Result<()> {
+    let stored = if path.is_empty() {
+        None
+    } else {
+        Some(paths::to_db_path(Path::new(path), music_dir))
+    };
     conn.execute(
         "UPDATE albums SET cover_art_path = ?1 WHERE id = ?2",
-        rusqlite::params![value, album_id],
+        rusqlite::params![stored, album_id],
     )?;
     Ok(())
 }
 
-/// Get the cover-art path for an album, or `None` if unset / album missing.
+/// Get the cover-art path for an album, resolved to an absolute filesystem
+/// path. `None` when unset or the album is missing.
 #[allow(dead_code)] // used by TUI cover preview in PR 2
-pub fn get_album_cover_path(conn: &Connection, album_id: i64) -> Result<Option<String>> {
+pub fn get_album_cover_path(
+    conn: &Connection,
+    music_dir: &Path,
+    album_id: i64,
+) -> Result<Option<String>> {
     let path: Option<Option<String>> = conn
         .query_row(
             "SELECT cover_art_path FROM albums WHERE id = ?1",
@@ -154,7 +180,9 @@ pub fn get_album_cover_path(conn: &Connection, album_id: i64) -> Result<Option<S
             |row| row.get(0),
         )
         .ok();
-    Ok(path.flatten())
+    Ok(path
+        .flatten()
+        .map(|s| paths::from_db_path(&s, music_dir).display().to_string()))
 }
 
 /// Get or create a collection by name. Returns (collection_id, created).
@@ -320,9 +348,11 @@ impl AlbumSort {
     }
 }
 
-/// List albums with pagination and sorting.
+/// List albums with pagination and sorting. Cover-art paths in returned
+/// rows are resolved to absolute filesystem paths against `music_dir`.
 pub fn list_albums(
     conn: &Connection,
+    music_dir: &Path,
     sort: AlbumSort,
     ascending: bool,
     offset: usize,
@@ -344,10 +374,9 @@ pub fn list_albums(
         dir,
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(
-        rusqlite::params![limit as i64, offset as i64],
-        map_album_row,
-    )?;
+    let rows = stmt.query_map(rusqlite::params![limit as i64, offset as i64], |row| {
+        map_album_row(row, music_dir)
+    })?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);
@@ -387,8 +416,14 @@ pub fn list_loose_track_ids(conn: &Connection) -> Result<Vec<i64>> {
     Ok(result)
 }
 
-/// List truly loose tracks with pagination.
-pub fn list_loose_tracks(conn: &Connection, offset: usize, limit: usize) -> Result<Vec<TrackRow>> {
+/// List truly loose tracks with pagination. `file_path` in each returned
+/// row is the resolved absolute path.
+pub fn list_loose_tracks(
+    conn: &Connection,
+    music_dir: &Path,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<TrackRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, title, artist, track_number, disc_number, duration_ms,
                 tag_status, bitrate, file_format, file_path
@@ -400,10 +435,9 @@ pub fn list_loose_tracks(conn: &Connection, offset: usize, limit: usize) -> Resu
          ORDER BY title COLLATE NOCASE
          LIMIT ?1 OFFSET ?2",
     )?;
-    let rows = stmt.query_map(
-        rusqlite::params![limit as i64, offset as i64],
-        map_track_row,
-    )?;
+    let rows = stmt.query_map(rusqlite::params![limit as i64, offset as i64], |row| {
+        map_track_row(row, music_dir)
+    })?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);
@@ -420,7 +454,12 @@ pub fn list_loose_tracks(conn: &Connection, offset: usize, limit: usize) -> Resu
 ///
 /// Multi-word queries are split on whitespace; each term must appear in
 /// at least one of the two fields (terms AND-combined, fields OR'd).
-pub fn search_albums(conn: &Connection, query: &str, limit: usize) -> Result<Vec<AlbumRow>> {
+pub fn search_albums(
+    conn: &Connection,
+    music_dir: &Path,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<AlbumRow>> {
     let terms: Vec<String> = query
         .split_whitespace()
         .map(|w| format!("%{}%", w))
@@ -459,7 +498,7 @@ pub fn search_albums(conn: &Connection, query: &str, limit: usize) -> Result<Vec
         ))
         .collect();
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-    let rows = stmt.query_map(param_refs.as_slice(), map_album_row)?;
+    let rows = stmt.query_map(param_refs.as_slice(), |row| map_album_row(row, music_dir))?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);
@@ -468,7 +507,12 @@ pub fn search_albums(conn: &Connection, query: &str, limit: usize) -> Result<Vec
 }
 
 /// Search tracks using FTS5 or LIKE fallback. Returns up to `limit` results.
-pub fn search_tracks(conn: &Connection, query: &str, limit: usize) -> Result<Vec<TrackRow>> {
+pub fn search_tracks(
+    conn: &Connection,
+    music_dir: &Path,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<TrackRow>> {
     let fts_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM tracks_fts", [], |row| row.get(0))
         .unwrap_or(0);
@@ -488,7 +532,9 @@ pub fn search_tracks(conn: &Connection, query: &str, limit: usize) -> Result<Vec
              ORDER BY rank
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(rusqlite::params![fts_query, limit as i64], map_track_row)?;
+        let rows = stmt.query_map(rusqlite::params![fts_query, limit as i64], |row| {
+            map_track_row(row, music_dir)
+        })?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -504,7 +550,9 @@ pub fn search_tracks(conn: &Connection, query: &str, limit: usize) -> Result<Vec
              ORDER BY title COLLATE NOCASE
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], map_track_row)?;
+        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], |row| {
+            map_track_row(row, music_dir)
+        })?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -513,8 +561,8 @@ pub fn search_tracks(conn: &Connection, query: &str, limit: usize) -> Result<Vec
     }
 }
 
-/// Get an album by ID.
-pub fn get_album(conn: &Connection, album_id: i64) -> Result<Option<AlbumRow>> {
+/// Get an album by ID. Cover-art path is resolved to absolute.
+pub fn get_album(conn: &Connection, music_dir: &Path, album_id: i64) -> Result<Option<AlbumRow>> {
     let row = conn
         .query_row(
             "SELECT a.id, a.title, a.album_artist, a.year,
@@ -527,21 +575,25 @@ pub fn get_album(conn: &Connection, album_id: i64) -> Result<Option<AlbumRow>> {
              WHERE a.id = ?1
              GROUP BY a.id",
             [album_id],
-            map_album_row,
+            |row| map_album_row(row, music_dir),
         )
         .ok();
     Ok(row)
 }
 
-/// Get tracks for an album, ordered by disc/track number.
-pub fn get_album_tracks(conn: &Connection, album_id: i64) -> Result<Vec<TrackRow>> {
+/// Get tracks for an album, ordered by disc/track number. Paths are absolute.
+pub fn get_album_tracks(
+    conn: &Connection,
+    music_dir: &Path,
+    album_id: i64,
+) -> Result<Vec<TrackRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, title, artist, track_number, disc_number, duration_ms,
                 tag_status, bitrate, file_format, file_path
          FROM tracks WHERE album_id = ?1
          ORDER BY disc_number, track_number, title COLLATE NOCASE",
     )?;
-    let rows = stmt.query_map([album_id], map_track_row)?;
+    let rows = stmt.query_map([album_id], |row| map_track_row(row, music_dir))?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);
@@ -613,14 +665,15 @@ struct CollectionTrackSortRow {
     album_id: Option<i64>,
 }
 
-/// Get tracks in a collection.
+/// Get tracks in a collection. Paths in returned rows are absolute.
 pub fn get_collection_tracks(
     conn: &Connection,
+    music_dir: &Path,
     collection_id: i64,
     offset: usize,
     limit: usize,
 ) -> Result<Vec<TrackRow>> {
-    let rows = load_collection_track_sort_rows(conn, collection_id)?;
+    let rows = load_collection_track_sort_rows(conn, music_dir, collection_id)?;
     let items: Vec<CollectionOrderItem> = rows
         .iter()
         .enumerate()
@@ -648,6 +701,7 @@ pub fn get_collection_tracks(
 
 fn load_collection_track_sort_rows(
     conn: &Connection,
+    music_dir: &Path,
     collection_id: i64,
 ) -> Result<Vec<CollectionTrackSortRow>> {
     let mut stmt = conn.prepare(
@@ -660,6 +714,10 @@ fn load_collection_track_sort_rows(
          ORDER BY ct.added_at, t.id",
     )?;
     let rows = stmt.query_map([collection_id], |row| {
+        let stored: Option<String> = row.get(9)?;
+        let file_path = stored
+            .map(|s| paths::from_db_path(&s, music_dir).display().to_string())
+            .unwrap_or_default();
         Ok(CollectionTrackSortRow {
             track: TrackRow {
                 id: row.get(0)?,
@@ -671,7 +729,7 @@ fn load_collection_track_sort_rows(
                 tag_status: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
                 bitrate: row.get(7)?,
                 file_format: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
-                file_path: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                file_path,
             },
             explicit_position: row.get(10)?,
             album_id: row.get(11)?,
@@ -686,9 +744,10 @@ fn load_collection_track_sort_rows(
 
 fn get_collection_effective_positions(
     conn: &Connection,
+    music_dir: &Path,
     collection_id: i64,
 ) -> Result<HashMap<i64, u32>> {
-    let rows = load_collection_track_sort_rows(conn, collection_id)?;
+    let rows = load_collection_track_sort_rows(conn, music_dir, collection_id)?;
     let items: Vec<CollectionOrderItem> = rows
         .iter()
         .enumerate()
@@ -717,8 +776,10 @@ fn get_collection_effective_positions(
 /// Load every `collection_file_path` for a collection, keyed by track_id.
 /// Used by the TUI collection detail view to show where each track
 /// physically lives (organized collection copy vs the track's main path).
+/// Paths are resolved to absolute against `music_dir`.
 pub fn get_collection_file_paths(
     conn: &Connection,
+    music_dir: &Path,
     collection_id: i64,
 ) -> Result<std::collections::HashMap<i64, String>> {
     let mut stmt = conn.prepare(
@@ -730,8 +791,8 @@ pub fn get_collection_file_paths(
     })?;
     let mut map = std::collections::HashMap::new();
     for row in rows {
-        let (id, path) = row?;
-        map.insert(id, path);
+        let (id, stored) = row?;
+        map.insert(id, paths::from_db_path(&stored, music_dir).display().to_string());
     }
     Ok(map)
 }
@@ -761,15 +822,15 @@ pub fn remove_track_from_collection(
     Ok(())
 }
 
-/// Get a single track by ID.
-pub fn get_track(conn: &Connection, track_id: i64) -> Result<Option<TrackRow>> {
+/// Get a single track by ID. `file_path` in the returned row is absolute.
+pub fn get_track(conn: &Connection, music_dir: &Path, track_id: i64) -> Result<Option<TrackRow>> {
     let row = conn
         .query_row(
             "SELECT id, title, artist, track_number, disc_number, duration_ms,
                     tag_status, bitrate, file_format, file_path
              FROM tracks WHERE id = ?1",
             [track_id],
-            map_track_row,
+            |row| map_track_row(row, music_dir),
         )
         .ok();
     Ok(row)
@@ -831,6 +892,7 @@ pub fn find_collection_by_name(conn: &Connection, name: &str) -> Result<Option<i
 
 /// Track in a collection with information about its other "homes".
 /// Used by collection deletion to decide which tracks would be orphaned.
+/// File paths are resolved to absolute against `music_dir`.
 #[derive(Debug, Clone)]
 pub struct CollectionTrackHomes {
     pub track_id: i64,
@@ -844,6 +906,7 @@ pub struct CollectionTrackHomes {
 /// "homes" it has (an album, or other collection memberships).
 pub fn get_collection_tracks_with_other_homes(
     conn: &Connection,
+    music_dir: &Path,
     collection_id: i64,
 ) -> Result<Vec<CollectionTrackHomes>> {
     let mut stmt = conn.prepare(
@@ -859,10 +922,15 @@ pub fn get_collection_tracks_with_other_homes(
          WHERE ct.collection_id = ?1",
     )?;
     let rows = stmt.query_map([collection_id], |row| {
+        let track_path: String = row.get(1)?;
+        let coll_path: Option<String> = row.get(2)?;
         Ok(CollectionTrackHomes {
             track_id: row.get(0)?,
-            track_file_path: row.get(1)?,
-            collection_file_path: row.get(2)?,
+            track_file_path: paths::from_db_path(&track_path, music_dir)
+                .display()
+                .to_string(),
+            collection_file_path: coll_path
+                .map(|s| paths::from_db_path(&s, music_dir).display().to_string()),
             has_album: row.get::<_, i64>(3)? != 0,
             other_collection_count: row.get::<_, i64>(4)? as u32,
         })
@@ -900,6 +968,7 @@ pub fn clear_track_album(conn: &Connection, track_id: i64) -> Result<()> {
 
 /// Info about a track needed when computing a delete plan — the primary file
 /// path, album (if any), and every collection-copy path the track owns.
+/// All paths are absolute (resolved against `music_dir`).
 #[derive(Debug, Clone)]
 pub struct TrackDeleteInfo {
     pub track_id: i64,
@@ -913,6 +982,7 @@ pub struct TrackDeleteInfo {
 /// Load delete-planning info for a set of track ids.
 pub fn get_tracks_delete_info(
     conn: &Connection,
+    music_dir: &Path,
     track_ids: &[i64],
 ) -> Result<Vec<TrackDeleteInfo>> {
     if track_ids.is_empty() {
@@ -932,9 +1002,13 @@ pub fn get_tracks_delete_info(
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params.as_slice(), |row| {
+        let stored: Option<String> = row.get(1)?;
+        let file_path = stored
+            .map(|s| paths::from_db_path(&s, music_dir).display().to_string())
+            .unwrap_or_default();
         Ok(TrackDeleteInfo {
             track_id: row.get(0)?,
-            file_path: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            file_path,
             album_id: row.get(2)?,
             collection_count: row.get::<_, i64>(3)? as u32,
             collection_copies: Vec::new(),
@@ -952,7 +1026,8 @@ pub fn get_tracks_delete_info(
     for info in &mut result {
         let copies = cstmt.query_map([info.track_id], |row| row.get::<_, String>(0))?;
         for c in copies {
-            info.collection_copies.push(c?);
+            info.collection_copies
+                .push(paths::from_db_path(&c?, music_dir).display().to_string());
         }
     }
     Ok(result)
@@ -1066,8 +1141,10 @@ pub struct OrganizeTrackRow {
 }
 
 /// Get all tracks with album + collection info for organizing.
+/// `file_path` on returned rows is absolute.
 pub fn get_all_tracks_for_organize(
     conn: &Connection,
+    music_dir: &Path,
     filter: &crate::core::organizer::OrganizeFilter,
 ) -> Result<Vec<OrganizeTrackRow>> {
     use crate::core::organizer::OrganizeFilter;
@@ -1088,8 +1165,11 @@ pub fn get_all_tracks_for_organize(
         ),
         OrganizeFilter::Loose => ("t.album_id IS NULL".to_string(), vec![]),
         OrganizeFilter::Path(p) => (
+            // Path filter is matched against the DB-stored form, so the
+            // caller's absolute path must be normalised to relative when
+            // it falls under music_dir.
             "t.file_path LIKE ?1 || '%'".to_string(),
-            vec![Box::new(p.display().to_string())],
+            vec![Box::new(paths::to_db_path(p, music_dir))],
         ),
         OrganizeFilter::Collection(name) => (
             "EXISTS (SELECT 1 FROM collection_tracks ct2 JOIN collections c2 ON c2.id = ct2.collection_id WHERE ct2.track_id = t.id AND c2.name = ?1)".to_string(),
@@ -1111,13 +1191,14 @@ pub fn get_all_tracks_for_organize(
     let mut stmt = conn.prepare(&sql)?;
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        let stored: String = row.get(5)?;
         Ok(OrganizeTrackRow {
             id: row.get(0)?,
             title: row.get(1)?,
             artist: row.get(2)?,
             track_number: row.get::<_, Option<u32>>(3)?,
             disc_number: row.get::<_, Option<u32>>(4)?.unwrap_or(1),
-            file_path: row.get(5)?,
+            file_path: paths::from_db_path(&stored, music_dir).display().to_string(),
             album_id: row.get(6)?,
             album_title: row.get(7)?,
             album_artist: row.get(8)?,
@@ -1156,7 +1237,7 @@ pub fn get_all_tracks_for_organize(
         for c in colls {
             let (id, name, path_template, position) = c?;
             if let std::collections::hash_map::Entry::Vacant(entry) = effective_cache.entry(id) {
-                entry.insert(get_collection_effective_positions(conn, id)?);
+                entry.insert(get_collection_effective_positions(conn, music_dir, id)?);
             }
             let effective_position = effective_cache
                 .get(&id)
@@ -1175,13 +1256,16 @@ pub fn get_all_tracks_for_organize(
     Ok(tracks)
 }
 
-/// Update a track's file_path in the database.
 /// List every (track_id, file_path) currently in the library.
-/// Used by the organizer for collision detection.
-pub fn list_all_track_paths(conn: &Connection) -> Result<Vec<(i64, String)>> {
+/// Used by the organizer for collision detection. Paths are absolute.
+pub fn list_all_track_paths(conn: &Connection, music_dir: &Path) -> Result<Vec<(i64, String)>> {
     let mut stmt = conn.prepare("SELECT id, file_path FROM tracks")?;
     let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        let stored: String = row.get(1)?;
+        Ok((
+            row.get::<_, i64>(0)?,
+            paths::from_db_path(&stored, music_dir).display().to_string(),
+        ))
     })?;
     let mut result = Vec::new();
     for row in rows {
@@ -1190,25 +1274,36 @@ pub fn list_all_track_paths(conn: &Connection) -> Result<Vec<(i64, String)>> {
     Ok(result)
 }
 
-pub fn update_track_path(conn: &Connection, track_id: i64, new_path: &str) -> Result<()> {
+/// Update a track's file_path. `new_path` is an absolute path; we normalise
+/// against `music_dir` before storage.
+pub fn update_track_path(
+    conn: &Connection,
+    music_dir: &Path,
+    track_id: i64,
+    new_path: &str,
+) -> Result<()> {
+    let stored = paths::to_db_path(Path::new(new_path), music_dir);
     conn.execute(
         "UPDATE tracks SET file_path = ?1, modified_date = datetime('now') WHERE id = ?2",
-        rusqlite::params![new_path, track_id],
+        rusqlite::params![stored, track_id],
     )?;
     Ok(())
 }
 
-/// Update a collection track's file path.
+/// Update a collection track's file path. `path` is absolute; normalised
+/// against `music_dir` before storage.
 pub fn update_collection_track_path(
     conn: &Connection,
+    music_dir: &Path,
     collection_id: i64,
     track_id: i64,
     path: &str,
 ) -> Result<()> {
+    let stored = paths::to_db_path(Path::new(path), music_dir);
     conn.execute(
         "UPDATE collection_tracks SET collection_file_path = ?1
          WHERE collection_id = ?2 AND track_id = ?3",
-        rusqlite::params![path, collection_id, track_id],
+        rusqlite::params![stored, collection_id, track_id],
     )?;
     Ok(())
 }
@@ -1224,7 +1319,8 @@ pub fn rebuild_fts_index(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn map_album_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AlbumRow> {
+fn map_album_row(row: &rusqlite::Row<'_>, music_dir: &Path) -> rusqlite::Result<AlbumRow> {
+    let cover: Option<String> = row.get(10)?;
     Ok(AlbumRow {
         id: row.get(0)?,
         title: row.get(1)?,
@@ -1236,11 +1332,16 @@ fn map_album_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AlbumRow> {
         mbid: row.get(7)?,
         label: row.get(8)?,
         genre: row.get(9)?,
-        cover_art_path: row.get(10)?,
+        cover_art_path: cover
+            .map(|s| paths::from_db_path(&s, music_dir).display().to_string()),
     })
 }
 
-fn map_track_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRow> {
+fn map_track_row(row: &rusqlite::Row<'_>, music_dir: &Path) -> rusqlite::Result<TrackRow> {
+    let stored: Option<String> = row.get(9)?;
+    let file_path = stored
+        .map(|s| paths::from_db_path(&s, music_dir).display().to_string())
+        .unwrap_or_default();
     Ok(TrackRow {
         id: row.get(0)?,
         title: row.get(1)?,
@@ -1251,7 +1352,7 @@ fn map_track_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRow> {
         tag_status: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
         bitrate: row.get::<_, Option<u32>>(7)?,
         file_format: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
-        file_path: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+        file_path,
     })
 }
 
@@ -1279,7 +1380,14 @@ pub struct ExistingTrackRef {
     pub tag_status: String,
 }
 
-fn map_existing_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExistingTrackRef> {
+fn map_existing_track(
+    row: &rusqlite::Row<'_>,
+    music_dir: &Path,
+) -> rusqlite::Result<ExistingTrackRef> {
+    let stored: Option<String> = row.get(10)?;
+    let file_path = stored
+        .map(|s| paths::from_db_path(&s, music_dir).display().to_string())
+        .unwrap_or_default();
     Ok(ExistingTrackRef {
         id: row.get(0)?,
         album_id: row.get(1)?,
@@ -1291,7 +1399,7 @@ fn map_existing_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExistingTrack
         duration_ms: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
         bitrate: row.get(8)?,
         file_format: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
-        file_path: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+        file_path,
         file_size: row.get(11)?,
         mbid: row.get(12)?,
         tag_status: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
@@ -1308,9 +1416,15 @@ const EXISTING_TRACK_SELECT: &str = "SELECT \
 /// first hit if duplicate MBIDs ever slipped in (shouldn't, but the DB has
 /// no unique constraint there so we don't fail hard). Used by the MBID
 /// pass in `dup_detect::detect`.
-pub fn find_track_by_mbid(conn: &Connection, mbid: &str) -> Result<Option<ExistingTrackRef>> {
+pub fn find_track_by_mbid(
+    conn: &Connection,
+    music_dir: &Path,
+    mbid: &str,
+) -> Result<Option<ExistingTrackRef>> {
     let sql = format!("{} WHERE t.mbid = ?1 LIMIT 1", EXISTING_TRACK_SELECT);
-    let row = conn.query_row(&sql, [mbid], map_existing_track).ok();
+    let row = conn
+        .query_row(&sql, [mbid], |row| map_existing_track(row, music_dir))
+        .ok();
     Ok(row)
 }
 
@@ -1319,6 +1433,7 @@ pub fn find_track_by_mbid(conn: &Connection, mbid: &str) -> Result<Option<Existi
 ///   aren't available on one or both sides.
 pub fn find_track_by_album_slot(
     conn: &Connection,
+    music_dir: &Path,
     album_id: i64,
     disc_number: u32,
     track_number: u32,
@@ -1331,7 +1446,7 @@ pub fn find_track_by_album_slot(
         .query_row(
             &sql,
             rusqlite::params![album_id, disc_number, track_number],
-            map_existing_track,
+            |row| map_existing_track(row, music_dir),
         )
         .ok();
     Ok(row)
@@ -1341,14 +1456,17 @@ pub fn find_track_by_album_slot(
 
 /// Record a file as orphaned — its DB row is gone (or about to go) but the
 /// file itself is still on disk, pending cleanup by the organize step.
+/// `file_path` is absolute; normalised against `music_dir` before storage.
 pub fn insert_orphan(
     conn: &Connection,
+    music_dir: &Path,
     file_path: &str,
     title: Option<&str>,
     artist: Option<&str>,
     album_title: Option<&str>,
     reason: &str,
 ) -> Result<()> {
+    let stored = paths::to_db_path(Path::new(file_path), music_dir);
     // Same path might already be tracked as an orphan from an earlier run
     // — OR IGNORE keeps the older row (first-wins), which preserves the
     // original reason/timestamp.
@@ -1356,7 +1474,7 @@ pub fn insert_orphan(
         "INSERT OR IGNORE INTO orphaned_files \
             (file_path, title, artist, album_title, reason) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![file_path, title, artist, album_title, reason],
+        rusqlite::params![stored, title, artist, album_title, reason],
     )?;
     Ok(())
 }
@@ -1384,16 +1502,17 @@ pub struct OrphanFileRow {
 
 /// List every file currently tracked as orphaned. Order is insertion
 /// order (via `id`) so the preview presents them in the order they
-/// were created.
-pub fn list_orphans(conn: &Connection) -> Result<Vec<OrphanFileRow>> {
+/// were created. `file_path` is absolute.
+pub fn list_orphans(conn: &Connection, music_dir: &Path) -> Result<Vec<OrphanFileRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, file_path, title, artist, album_title, reason \
          FROM orphaned_files ORDER BY id",
     )?;
     let rows = stmt.query_map([], |row| {
+        let stored: String = row.get(1)?;
         Ok(OrphanFileRow {
             id: row.get(0)?,
-            file_path: row.get(1)?,
+            file_path: paths::from_db_path(&stored, music_dir).display().to_string(),
             title: row.get(2)?,
             artist: row.get(3)?,
             album_title: row.get(4)?,
@@ -1421,6 +1540,12 @@ mod tests {
     use crate::db;
     use crate::db::models::{AudioFormat, TagStatus};
     use std::path::PathBuf;
+
+    /// Tests use an empty music_dir — every absolute path stays absolute,
+    /// preserving the pre-refactor behaviour these tests were written against.
+    fn no_root() -> &'static Path {
+        Path::new("")
+    }
 
     fn test_track() -> Track {
         Track {
@@ -1452,16 +1577,16 @@ mod tests {
     #[test]
     fn test_track_exists_by_path_empty_db() {
         let conn = db::open_memory().unwrap();
-        assert!(!track_exists_by_path(&conn, "/some/path.mp3").unwrap());
+        assert!(!track_exists_by_path(&conn, no_root(), "/some/path.mp3").unwrap());
     }
 
     #[test]
     fn test_insert_and_find_track() {
         let conn = db::open_memory().unwrap();
         let track = test_track();
-        let id = insert_track(&conn, &track, None, Some(5000)).unwrap();
+        let id = insert_track(&conn, no_root(), &track, None, Some(5000)).unwrap();
         assert!(id > 0);
-        assert!(track_exists_by_path(&conn, "/test/song.mp3").unwrap());
+        assert!(track_exists_by_path(&conn, no_root(), "/test/song.mp3").unwrap());
     }
 
     #[test]
@@ -1471,7 +1596,7 @@ mod tests {
             get_or_create_album(&conn, "Test Album", Some("Artist"), Some(2024), None, 10).unwrap();
         assert!(created);
         let track = test_track();
-        let track_id = insert_track(&conn, &track, Some(album_id), None).unwrap();
+        let track_id = insert_track(&conn, no_root(), &track, Some(album_id), None).unwrap();
         assert!(album_id > 0);
 
         // Same album again — should return existing
@@ -1499,7 +1624,7 @@ mod tests {
 
         // Add a track
         let track = test_track();
-        let track_id = insert_track(&conn, &track, None, None).unwrap();
+        let track_id = insert_track(&conn, no_root(), &track, None, None).unwrap();
         assert!(add_track_to_collection(&conn, coll_id, track_id).unwrap());
 
         // Adding again should not error or report a new membership.
@@ -1512,6 +1637,7 @@ mod tests {
         let (coll_id, _) = get_or_create_collection(&conn, "Mix").unwrap();
         let t1 = insert_track(
             &conn,
+            no_root(),
             &test_track_with("/test/one.mp3", "One", Some(1)),
             None,
             None,
@@ -1519,6 +1645,7 @@ mod tests {
         .unwrap();
         let t2 = insert_track(
             &conn,
+            no_root(),
             &test_track_with("/test/two.mp3", "Two", Some(2)),
             None,
             None,
@@ -1548,6 +1675,7 @@ mod tests {
         let (coll_id, _) = get_or_create_collection(&conn, "Mix").unwrap();
         let t1 = insert_track(
             &conn,
+            no_root(),
             &test_track_with("/test/a.mp3", "A", Some(1)),
             None,
             None,
@@ -1555,6 +1683,7 @@ mod tests {
         .unwrap();
         let t2 = insert_track(
             &conn,
+            no_root(),
             &test_track_with("/test/b.mp3", "B", Some(2)),
             None,
             None,
@@ -1569,7 +1698,7 @@ mod tests {
         )
         .unwrap();
 
-        let tracks = get_collection_tracks(&conn, coll_id, 0, 10).unwrap();
+        let tracks = get_collection_tracks(&conn, no_root(), coll_id, 0, 10).unwrap();
         assert_eq!(
             tracks.iter().map(|t| t.id).collect::<Vec<_>>(),
             vec![t2, t1]
@@ -1584,6 +1713,7 @@ mod tests {
         let (coll_id, _) = get_or_create_collection(&conn, "Mix").unwrap();
         let t2 = insert_track(
             &conn,
+            no_root(),
             &test_track_with("/test/two.mp3", "Two", Some(2)),
             Some(album_id),
             None,
@@ -1591,6 +1721,7 @@ mod tests {
         .unwrap();
         let t1 = insert_track(
             &conn,
+            no_root(),
             &test_track_with("/test/one.mp3", "One", Some(1)),
             Some(album_id),
             None,
@@ -1603,7 +1734,7 @@ mod tests {
         )
         .unwrap();
 
-        let tracks = get_collection_tracks(&conn, coll_id, 0, 10).unwrap();
+        let tracks = get_collection_tracks(&conn, no_root(), coll_id, 0, 10).unwrap();
         assert_eq!(
             tracks.iter().map(|t| t.id).collect::<Vec<_>>(),
             vec![t1, t2]
@@ -1616,6 +1747,7 @@ mod tests {
         let (coll_id, _) = get_or_create_collection(&conn, "Mix").unwrap();
         let zulu = insert_track(
             &conn,
+            no_root(),
             &test_track_with("/test/z.mp3", "Zulu", Some(7)),
             None,
             None,
@@ -1623,6 +1755,7 @@ mod tests {
         .unwrap();
         let alpha = insert_track(
             &conn,
+            no_root(),
             &test_track_with("/test/a.mp3", "Alpha", Some(2)),
             None,
             None,
@@ -1635,7 +1768,7 @@ mod tests {
         )
         .unwrap();
 
-        let tracks = get_collection_tracks(&conn, coll_id, 0, 10).unwrap();
+        let tracks = get_collection_tracks(&conn, no_root(), coll_id, 0, 10).unwrap();
         assert_eq!(
             tracks.iter().map(|t| t.id).collect::<Vec<_>>(),
             vec![zulu, alpha]
@@ -1648,7 +1781,7 @@ mod tests {
         assert_eq!(count_tracks(&conn).unwrap(), 0);
 
         let track = test_track();
-        insert_track(&conn, &track, None, None).unwrap();
+        insert_track(&conn, no_root(), &track, None, None).unwrap();
         assert_eq!(count_tracks(&conn).unwrap(), 1);
     }
 }

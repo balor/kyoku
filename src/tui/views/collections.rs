@@ -113,6 +113,7 @@ impl CollectionsView {
         conn: &Connection,
         settings: &Settings,
     ) -> CollectionsAction {
+        let music_dir = settings.library.music_dir.as_path();
         let file_delete_roots = organizer::file_delete_roots(settings);
         // Organize popup captures input
         if self.organize_plan.is_some() {
@@ -200,6 +201,7 @@ impl CollectionsView {
                     ConfirmAction::Confirm { delete_files } => {
                         organizer::apply_delete_collection_with_roots(
                             conn,
+                            music_dir,
                             plan,
                             delete_files,
                             &file_delete_roots,
@@ -223,6 +225,7 @@ impl CollectionsView {
                         for plan in plans.iter() {
                             organizer::apply_delete_collection_with_roots(
                                 conn,
+                                music_dir,
                                 plan,
                                 delete_files,
                                 &file_delete_roots,
@@ -316,7 +319,7 @@ impl CollectionsView {
             if ids.len() == 1 {
                 // Single-collection delete — preserve the existing rich popup.
                 if let Ok(plan) =
-                    organizer::plan_delete_collection_with_roots(conn, ids[0], &file_delete_roots)
+                    organizer::plan_delete_collection_with_roots(conn, music_dir, ids[0], &file_delete_roots)
                 {
                     let mut widget = ConfirmDelete::new(
                         "Confirm Delete",
@@ -355,7 +358,7 @@ impl CollectionsView {
                 let mut plans = Vec::with_capacity(ids.len());
                 for id in &ids {
                     if let Ok(plan) =
-                        organizer::plan_delete_collection_with_roots(conn, *id, &file_delete_roots)
+                        organizer::plan_delete_collection_with_roots(conn, music_dir, *id, &file_delete_roots)
                     {
                         plans.push(plan);
                     }
@@ -643,9 +646,9 @@ impl CollectionDetailView {
         // Get collection info
         let collections = queries::list_collections(conn)?;
         self.collection = collections.into_iter().find(|c| c.id == collection_id);
-        self.tracks = queries::get_collection_tracks(conn, collection_id, 0, 500)?;
+        self.tracks = queries::get_collection_tracks(conn, music_dir, collection_id, 0, 500)?;
         self.collection_paths =
-            queries::get_collection_file_paths(conn, collection_id).unwrap_or_default();
+            queries::get_collection_file_paths(conn, music_dir, collection_id).unwrap_or_default();
         self.music_dir = music_dir.to_path_buf();
         self.filter.clear();
         self.selected = 0;
@@ -668,11 +671,12 @@ impl CollectionDetailView {
     fn reload_tracks(&mut self, conn: &Connection) {
         if let Some(coll) = &self.collection {
             let coll_id = coll.id;
-            if let Ok(tracks) = queries::get_collection_tracks(conn, coll_id, 0, 500) {
+            let music_dir = self.music_dir.clone();
+            if let Ok(tracks) = queries::get_collection_tracks(conn, &music_dir, coll_id, 0, 500) {
                 self.tracks = tracks;
             }
             self.collection_paths =
-                queries::get_collection_file_paths(conn, coll_id).unwrap_or_default();
+                queries::get_collection_file_paths(conn, &music_dir, coll_id).unwrap_or_default();
             // Refresh collection metadata for track count/duration in header
             if let Ok(collections) = queries::list_collections(conn) {
                 self.collection = collections.into_iter().find(|c| c.id == coll_id);
@@ -705,8 +709,13 @@ impl CollectionDetailView {
                     let file_delete_roots = organizer::file_delete_roots(settings);
                     let plan = plan.clone();
                     self.pending_delete = None;
-                    let _ =
-                        pruner::apply_delete_plan(conn, &plan, delete_files, &file_delete_roots);
+                    let _ = pruner::apply_delete_plan(
+                        conn,
+                        &settings.library.music_dir,
+                        &plan,
+                        delete_files,
+                        &file_delete_roots,
+                    );
                     self.selection.clear();
                     self.reload_tracks(conn);
                     return CollectionDetailAction::Deleted;
@@ -882,7 +891,7 @@ impl CollectionDetailView {
                 return CollectionDetailAction::None;
             }
             let file_delete_roots = organizer::file_delete_roots(settings);
-            match pruner::plan_delete_tracks(conn, &ids, &file_delete_roots) {
+            match pruner::plan_delete_tracks(conn, &settings.library.music_dir, &ids, &file_delete_roots) {
                 Ok(plan) => {
                     if plan.is_empty() {
                         return CollectionDetailAction::None;
@@ -907,8 +916,12 @@ impl CollectionDetailView {
                 && let Some(coll) = &self.collection
             {
                 // Look up the collection_file_path and other-homes info
-                let homes = queries::get_collection_tracks_with_other_homes(conn, coll.id)
-                    .unwrap_or_default();
+                let homes = queries::get_collection_tracks_with_other_homes(
+                    conn,
+                    &settings.library.music_dir,
+                    coll.id,
+                )
+                .unwrap_or_default();
                 let info = homes.iter().find(|h| h.track_id == track.id);
                 let will_orphan = info
                     .map(|i| !i.has_album && i.other_collection_count == 0)
