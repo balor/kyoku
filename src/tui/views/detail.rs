@@ -1024,12 +1024,7 @@ impl AlbumDetailView {
                 .get(self.selected)
                 .and_then(|&i| self.tracks.get(i));
             if let Some(track) = selected_track {
-                let p = Paragraph::new(Span::styled(
-                    format!(" {}", track.file_path),
-                    Style::default().fg(theme.fg_muted),
-                ))
-                .style(Style::default().bg(theme.bg_alt));
-                frame.render_widget(p, chunks[1]);
+                crate::tui::widgets::path_footer::render(frame, chunks[1], theme, &track.file_path);
             } else {
                 let p = Paragraph::new("").style(Style::default().bg(theme.bg_alt));
                 frame.render_widget(p, chunks[1]);

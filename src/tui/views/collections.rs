@@ -1148,12 +1148,12 @@ impl CollectionDetailView {
                 .get(&selected_track.id)
                 .cloned()
                 .unwrap_or_else(|| selected_track.file_path.clone());
-            let p = Paragraph::new(Span::styled(
-                format!(" {}", path_display),
-                Style::default().fg(theme.fg_muted),
-            ))
-            .style(Style::default().bg(theme.bg_alt));
-            frame.render_widget(p, footer_chunks[1]);
+            crate::tui::widgets::path_footer::render(
+                frame,
+                footer_chunks[1],
+                theme,
+                &path_display,
+            );
         }
 
         // Rename popup

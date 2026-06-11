@@ -3,6 +3,7 @@ pub mod confirm_delete;
 pub mod cover_preview;
 pub mod input;
 pub mod organize_popup;
+pub mod path_footer;
 pub mod pick_collection;
 pub mod popup;
 pub mod status_bar;
