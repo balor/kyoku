@@ -64,3 +64,58 @@ fn is_missing(path: &str) -> bool {
         result
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+
+    use super::*;
+    use crate::tui::themes::TOKYO_NIGHT;
+
+    fn render_buffer(path: &str) -> Buffer {
+        let width = (path.chars().count() + 4).max(8) as u16;
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &TOKYO_NIGHT, path))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_line(buffer: &Buffer) -> String {
+        let mut out = String::new();
+        for x in 0..buffer.area.width {
+            out.push_str(buffer[(x, 0)].symbol());
+        }
+        out.trim_end().to_string()
+    }
+
+    #[test]
+    fn existing_path_renders_without_warning() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+
+        let buffer = render_buffer(&path);
+
+        assert_eq!(buffer_line(&buffer), format!(" {path}"));
+        assert_eq!(buffer[(0, 0)].fg, TOKYO_NIGHT.fg_muted);
+        assert_eq!(buffer[(1, 0)].fg, TOKYO_NIGHT.fg_muted);
+    }
+
+    #[test]
+    fn missing_path_renders_warning_and_yellow_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("missing.flac");
+        let path = path.to_string_lossy().to_string();
+
+        let buffer = render_buffer(&path);
+
+        assert_eq!(buffer_line(&buffer), format!(" ⚠ {path}"));
+        assert_eq!(buffer[(1, 0)].symbol(), "⚠");
+        assert_eq!(buffer[(1, 0)].fg, TOKYO_NIGHT.yellow);
+        assert!(buffer[(1, 0)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(3, 0)].fg, TOKYO_NIGHT.yellow);
+        assert!(!buffer[(3, 0)].modifier.contains(Modifier::BOLD));
+    }
+}
