@@ -9,6 +9,12 @@ finding's `Status` (and add the commit hash). Statuses: `open`, `in-progress`,
 
 Finding IDs are stable — reference them in commit messages (e.g. `fix(organizer): ... [ORG-1]`).
 
+**Step-by-step fix instructions for every open finding live in
+[2026-06-12-fix-instructions.md](2026-06-12-fix-instructions.md)**, grouped
+into self-contained work packages (WP-A … WP-I) with suggested sequencing.
+Pick up a package from there; this file stays the findings index / status
+tracker.
+
 ---
 
 ## Verdict
