@@ -25,7 +25,7 @@ data-loss scenario, several genuine file/DB-loss bugs, and two systemic habits**
 ## Critical
 
 ### ORG-1 — Unmounted/missing `music_dir` wipes the entire DB on organize
-**Status:** fixed (pending commit, 2026-06-12) · **Confidence:** certain
+**Status:** fixed (240157a) · **Confidence:** certain
 `plan_organize` classifies any track whose file fails `exists()` as an orphaned
 row (`src/core/organizer.rs:188`), and `apply_organize` unconditionally deletes
 those rows (`src/core/organizer.rs:580-584`). An unmounted NAS/drive — or a
@@ -46,7 +46,7 @@ prune errors instead of `.is_ok()`-swallowing.
 ## High
 
 ### ORG-2 — Organize moves silently overwrite untracked files at the destination
-**Status:** fixed (pending commit, 2026-06-12) · **Confidence:** certain
+**Status:** fixed (240157a) · **Confidence:** certain
 Collision avoidance consults only DB paths, never disk; `fs::rename`/`fs::copy`
 clobber on POSIX (`src/core/organizer.rs:437-450`, covers `:540-552`). Reachable
 via kyoku's own flows: delete-rows-keep-files leaves files at canonical paths;
@@ -59,7 +59,7 @@ paths; final dest-exists guard at apply (canonicalize-equality exemption for
 case-only renames). Covers keep overwrite behavior by design.
 
 ### ORG-3 — Order-dependent slot collision destroys one track's audio
-**Status:** fixed (pending commit, 2026-06-12) · **Confidence:** likely
+**Status:** fixed (240157a) · **Confidence:** likely
 The "already in place" branch claims a path without checking whether a moving
 track already reserved it (`src/core/organizer.rs:262-283`). When two tracks
 render the same template path, SQL row order decides between correct
@@ -321,7 +321,7 @@ alias documented in spec but unimplemented.
 | L-5 | No index on `tracks.mbid` (scan per track during dup detect); none on `(title, album_artist)`; `idx_tracks_path` redundant with UNIQUE | `migrations/001_initial.sql` | open |
 | L-6 | Cross-device fallback fires on *any* rename error, masking cause — match `ErrorKind::CrossesDevices` (stable 1.85) | `organizer.rs:445-449, 547-551` | open |
 | L-7 | `q` quits from a dirty editor, no prompt (import view got one for this reason) | `app.rs:140-146` | open |
-| L-8 | `missing_sources` not re-checked at apply (stale plan) — folded into ORG-1c | `organizer.rs:580-584` | fixed (pending commit, 2026-06-12) |
+| L-8 | `missing_sources` not re-checked at apply (stale plan) — folded into ORG-1c | `organizer.rs:580-584` | fixed (240157a) |
 | L-9 | Setup writes unescaped paths into TOML (a `"` in a path produces the broken config that trips EXT-1); inbox entries unvalidated | `setup.rs:226-301` | open |
 | L-10 | All-punctuation artist → malformed Lucene query → hard error instead of fallback chain | `musicbrainz.rs:96, 114-117` | open |
 | L-11 | `scripts_of` misses CJK Ext-B (U+20000+) — rare-kanji titles defeat the script-mismatch guard | `matching.rs:239-270` | open |
