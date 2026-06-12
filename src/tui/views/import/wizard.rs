@@ -398,7 +398,10 @@ impl ImportView {
         let client = self.mb_client.as_ref().unwrap().clone();
 
         std::thread::spawn(move || {
-            let mut client = client.lock().unwrap();
+            // Recover a poisoned lock: a panic in one MB thread must not
+            // cascade into panics in every later search thread. The client
+            // holds no state worth protecting beyond the throttle timestamp.
+            let mut client = client.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             match client.fetch_release(&mbid) {
                 Ok(release) => {
                     let score = matching::score_release(
@@ -582,7 +585,8 @@ impl ImportView {
 
             // All MB I/O for this thread happens under the shared lock so
             // the client's throttler serializes requests across prefetches.
-            let mut client = client.lock().unwrap();
+            // Poison recovery: see fetch-by-MBID thread above.
+            let mut client = client.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut search_error: Option<String> = None;
             let mut candidates: Vec<MbCandidate> =
                 match client.search_releases(&artist, &album, track_count, limit) {
@@ -753,7 +757,10 @@ impl ImportView {
 
         std::thread::spawn(move || {
             let release = {
-                let mut client = client.lock().unwrap();
+                // Poison recovery: see fetch-by-MBID thread above.
+                let mut client = client
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 match client.fetch_release(&mbid_for_thread) {
                     Ok(r) => Some(r),
                     Err(e) => {

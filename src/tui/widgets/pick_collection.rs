@@ -71,13 +71,15 @@ impl PickCollectionPopup {
             return PickAction::Cancel;
         }
 
-        if keys::is_up(&key) {
+        // Arrow-only navigation: the name input is live, so `j`/`k` must
+        // insert ("Jazz", "J-Pop"), not move the selection.
+        if keys::is_up_arrow(&key) {
             if self.selected > 0 {
                 self.selected -= 1;
             }
             return PickAction::None;
         }
-        if keys::is_down(&key) {
+        if keys::is_down_arrow(&key) {
             let max = self.visible_count();
             if max > 0 && self.selected + 1 < max {
                 self.selected += 1;
@@ -257,4 +259,28 @@ enum Entry {
     NewDefault,
     /// Pick an existing collection by index into `suggestions`
     Existing(usize),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    #[test]
+    fn j_and_k_insert_into_the_input_instead_of_navigating() {
+        // Regression: is_up/is_down match bare j/k, and checking them before
+        // forwarding to the text input made "Jazz"/"junjou" untypeable.
+        let conn = crate::db::open_memory().unwrap();
+        let mut popup = PickCollectionPopup::open("title", "default", "", &conn);
+
+        for c in ['j', 'a', 'z', 'z', 'k'] {
+            popup.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(popup.input.value, "jazzk");
+
+        // Arrow keys still navigate, not insert.
+        popup.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        popup.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(popup.input.value, "jazzk");
+    }
 }

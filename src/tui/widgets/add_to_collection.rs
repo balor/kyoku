@@ -46,13 +46,15 @@ impl AddToCollectionPopup {
             return PopupAction::Closed(None);
         }
 
-        if keys::is_up(&key) {
+        // Arrow-only navigation: the name input is live, so `j`/`k` must
+        // insert ("Jazz", "J-Pop"), not move the suggestion cursor.
+        if keys::is_up_arrow(&key) {
             if self.suggestion_selected > 0 {
                 self.suggestion_selected -= 1;
             }
             return PopupAction::None;
         }
-        if keys::is_down(&key) {
+        if keys::is_down_arrow(&key) {
             let max = self.filtered_indices().len();
             if max > 0 && self.suggestion_selected < max.saturating_sub(1) {
                 self.suggestion_selected += 1;

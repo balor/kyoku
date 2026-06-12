@@ -29,6 +29,18 @@ pub fn is_down(key: &KeyEvent) -> bool {
     key.code == KeyCode::Down || key.code == KeyCode::Char('j')
 }
 
+/// Navigation matchers for contexts where a text input is capturing
+/// characters: only the arrow keys count, so `j`/`k` insert into the
+/// input instead of moving the selection ("Jazz", "junjou" must be
+/// typeable in search bars and name fields).
+pub fn is_up_arrow(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Up
+}
+
+pub fn is_down_arrow(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Down
+}
+
 pub fn is_confirm(key: &KeyEvent) -> bool {
     key.code == KeyCode::Enter
 }

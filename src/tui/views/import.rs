@@ -392,9 +392,15 @@ impl ImportView {
     }
 
     pub fn can_cancel(&self) -> bool {
+        // Scanning is cancellable: the scan thread is read-only, so
+        // abandoning it is safe (it finishes in the background and its
+        // sends fail harmlessly). Importing stays locked — the worker is
+        // writing files + DB rows, and a dead worker is detected in
+        // `tick` (Disconnected → Complete), so it cannot hang forever.
         matches!(
             self.step,
             ImportStep::SelectSource
+                | ImportStep::Scanning
                 | ImportStep::Review
                 | ImportStep::ResolveDuplicates
                 | ImportStep::Complete

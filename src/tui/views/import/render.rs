@@ -16,18 +16,30 @@ use super::{GroupAction, ImportMessage, ImportStep, ImportView, MbMatchState, Sc
 
 impl ImportView {
     pub fn tick(&mut self, conn: &Connection) {
-        // Process scan messages
+        use std::sync::mpsc::TryRecvError;
+
+        // Process scan messages. `Disconnected` without a prior `Complete`
+        // means the scan thread died (panicked) — it owns the only sender.
+        // Treating it like `Empty` would leave the wizard stuck on the
+        // Scanning screen forever, with q/Ctrl+C suppressed and no way out
+        // short of killing the process.
         let mut scan_done = false;
+        let mut scan_dead = false;
         if let Some(rx) = &self.scan_rx {
-            while let Ok(msg) = rx.try_recv() {
-                match msg {
-                    ScanMessage::Progress(done, total) => {
+            loop {
+                match rx.try_recv() {
+                    Ok(ScanMessage::Progress(done, total)) => {
                         self.scan_progress = (done, total);
                     }
-                    ScanMessage::Complete(groups) => {
+                    Ok(ScanMessage::Complete(groups)) => {
                         self.groups = groups;
                         self.current_group = 0;
                         scan_done = true;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        scan_dead = !scan_done;
+                        break;
                     }
                 }
             }
@@ -41,6 +53,14 @@ impl ImportView {
             for i in 0..=3 {
                 self.search_mb_for_group(i);
             }
+        } else if scan_dead {
+            self.scan_rx = None;
+            self.result_summary = Some(
+                "Scan failed: the scan worker stopped unexpectedly. \
+                 Nothing was imported — check the log and try again."
+                    .to_string(),
+            );
+            self.step = ImportStep::Complete;
         }
 
         // Drain any MB results that completed since the last tick. With
@@ -108,8 +128,13 @@ impl ImportView {
             }
         }
         // If new MBIDs arrived and the user is already parked on the
-        // summary, re-run detection so the MBID pass can see them.
-        if release_fetch_landed && self.is_in_summary() {
+        // summary, re-run detection so the MBID pass can see them. The
+        // step check is load-bearing: `is_in_summary()` stays true during
+        // ResolveDuplicates (entering the resolver doesn't change
+        // current_group), and rebuilding the preview there would wipe the
+        // user's keep/replace decisions mid-flight and snap the cursor
+        // back to the first conflict.
+        if release_fetch_landed && self.step == ImportStep::Review && self.is_in_summary() {
             self.refresh_conflict_preview(conn);
         }
 
@@ -137,24 +162,40 @@ impl ImportView {
             self.mbid_fetch_rx = None;
         }
 
-        // Process import worker messages
+        // Process import worker messages. Same dead-thread handling as the
+        // scan channel above — the worker owns the only sender.
         let mut import_done = false;
+        let mut import_dead = false;
         if let Some(rx) = &self.import_rx {
-            while let Ok(msg) = rx.try_recv() {
-                match msg {
-                    ImportMessage::Progress(d, t) => {
+            loop {
+                match rx.try_recv() {
+                    Ok(ImportMessage::Progress(d, t)) => {
                         self.import_progress = (d, t);
                     }
-                    ImportMessage::Complete(summary) => {
+                    Ok(ImportMessage::Complete(summary)) => {
                         self.result_summary = Some(summary);
                         self.step = ImportStep::Complete;
                         import_done = true;
                     }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        import_dead = !import_done;
+                        break;
+                    }
                 }
             }
         }
-        if import_done {
+        if import_done || import_dead {
             self.import_rx = None;
+        }
+        if import_dead {
+            self.result_summary = Some(
+                "Import stopped unexpectedly — it may have been partially \
+                 applied. Check the log, then re-run the scan to see the \
+                 current state."
+                    .to_string(),
+            );
+            self.step = ImportStep::Complete;
         }
     }
 

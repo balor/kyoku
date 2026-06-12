@@ -87,11 +87,13 @@ impl GlobalSearchView {
             return GlobalSearchAction::None;
         }
 
-        if keys::is_up(&key) && self.selected > 0 {
+        // Arrow-only navigation: the search input is live, so `j`/`k`
+        // must insert (think "junjou", "jazz"), not move the selection.
+        if keys::is_up_arrow(&key) && self.selected > 0 {
             self.selected -= 1;
             return GlobalSearchAction::None;
         }
-        if keys::is_down(&key)
+        if keys::is_down_arrow(&key)
             && !self.results.is_empty()
             && self.selected < self.results.len() - 1
         {
