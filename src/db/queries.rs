@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::core::collection_order::{self, CollectionOrderItem};
 use crate::core::paths;
@@ -73,7 +73,7 @@ pub fn get_track_id_by_path(
             [&stored],
             |row| row.get(0),
         )
-        .ok();
+        .optional()?;
     Ok(id)
 }
 
@@ -130,7 +130,7 @@ pub fn get_or_create_album(
             rusqlite::params![title, album_artist],
             |row| row.get(0),
         )
-        .ok();
+        .optional()?;
 
     if let Some(id) = existing {
         return Ok((id, false));
@@ -179,7 +179,7 @@ pub fn get_album_cover_path(
             [album_id],
             |row| row.get(0),
         )
-        .ok();
+        .optional()?;
     Ok(path
         .flatten()
         .map(|s| paths::from_db_path(&s, music_dir).display().to_string()))
@@ -193,7 +193,7 @@ pub fn get_or_create_collection(conn: &Connection, name: &str) -> Result<(i64, b
             [name],
             |row| row.get(0),
         )
-        .ok();
+        .optional()?;
 
     if let Some(id) = existing {
         return Ok((id, false));
@@ -577,7 +577,7 @@ pub fn get_album(conn: &Connection, music_dir: &Path, album_id: i64) -> Result<O
             [album_id],
             |row| map_album_row(row, music_dir),
         )
-        .ok();
+        .optional()?;
     Ok(row)
 }
 
@@ -832,7 +832,7 @@ pub fn get_track(conn: &Connection, music_dir: &Path, track_id: i64) -> Result<O
             [track_id],
             |row| map_track_row(row, music_dir),
         )
-        .ok();
+        .optional()?;
     Ok(row)
 }
 
@@ -851,13 +851,34 @@ pub fn update_track_fields(
             continue;
         }
         let sql = format!("UPDATE tracks SET {} = ?1 WHERE id = ?2", field);
-        conn.execute(&sql, rusqlite::params![value, track_id])?;
+        // track_number/disc_number are INTEGER columns; bind a parsed
+        // integer (or NULL) instead of the raw string. SQLite's column
+        // affinity stores non-numeric strings like "3/12" or "" as TEXT,
+        // after which every read of the row fails with InvalidColumnType.
+        if matches!(*field, "track_number" | "disc_number") {
+            let parsed = parse_leading_u32(value);
+            conn.execute(&sql, rusqlite::params![parsed, track_id])?;
+        } else {
+            conn.execute(&sql, rusqlite::params![value, track_id])?;
+        }
     }
     conn.execute(
         "UPDATE tracks SET modified_date = datetime('now') WHERE id = ?1",
         [track_id],
     )?;
     Ok(())
+}
+
+/// Parse the leading integer of a tag-style numeric field. Handles plain
+/// numbers ("7") and "track/total" values ("3/12"). Anything without
+/// leading digits (including empty) maps to None → SQL NULL.
+fn parse_leading_u32(value: &str) -> Option<u32> {
+    let digits: String = value
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }
 
 /// Rename an album (update its title).
@@ -886,7 +907,7 @@ pub fn find_collection_by_name(conn: &Connection, name: &str) -> Result<Option<i
             [name],
             |row| row.get(0),
         )
-        .ok();
+        .optional()?;
     Ok(id)
 }
 
@@ -1061,7 +1082,7 @@ pub fn get_album_label(conn: &Connection, album_id: i64) -> Result<Option<(Strin
             [album_id],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         )
-        .ok();
+        .optional()?;
     Ok(row)
 }
 
@@ -1457,7 +1478,7 @@ pub fn find_track_by_mbid(
     let sql = format!("{} WHERE t.mbid = ?1 LIMIT 1", EXISTING_TRACK_SELECT);
     let row = conn
         .query_row(&sql, [mbid], |row| map_existing_track(row, music_dir))
-        .ok();
+        .optional()?;
     Ok(row)
 }
 
@@ -1481,7 +1502,7 @@ pub fn find_track_by_album_slot(
             rusqlite::params![album_id, disc_number, track_number],
             |row| map_existing_track(row, music_dir),
         )
-        .ok();
+        .optional()?;
     Ok(row)
 }
 
@@ -1611,6 +1632,46 @@ mod tests {
     fn test_track_exists_by_path_empty_db() {
         let conn = db::open_memory().unwrap();
         assert!(!track_exists_by_path(&conn, no_root(), "/some/path.mp3").unwrap());
+    }
+
+    #[test]
+    fn update_track_fields_stores_numeric_columns_as_integers() {
+        // ID3-style "3/12" and emptied fields used to be bound as TEXT,
+        // poisoning the INTEGER column: every later map_track_row read of
+        // the row (and thus the whole album) failed with InvalidColumnType.
+        let conn = db::open_memory().unwrap();
+        let id = insert_track(&conn, no_root(), &test_track(), None, None).unwrap();
+
+        update_track_fields(&conn, id, &[("track_number", "3/12"), ("disc_number", "")])
+            .unwrap();
+
+        let row = get_track(&conn, no_root(), id)
+            .unwrap()
+            .expect("row must stay readable after a tag-style numeric update");
+        assert_eq!(row.track_number, Some(3), "leading integer of '3/12'");
+
+        // Plain numbers and junk round-trip sanely too.
+        update_track_fields(&conn, id, &[("track_number", " 7 ")]).unwrap();
+        assert_eq!(
+            get_track(&conn, no_root(), id).unwrap().unwrap().track_number,
+            Some(7)
+        );
+        update_track_fields(&conn, id, &[("track_number", "n/a")]).unwrap();
+        assert_eq!(
+            get_track(&conn, no_root(), id).unwrap().unwrap().track_number,
+            None,
+            "non-numeric input must become NULL, not TEXT"
+        );
+    }
+
+    #[test]
+    fn parse_leading_u32_cases() {
+        assert_eq!(parse_leading_u32("7"), Some(7));
+        assert_eq!(parse_leading_u32("3/12"), Some(3));
+        assert_eq!(parse_leading_u32(" 04 "), Some(4));
+        assert_eq!(parse_leading_u32(""), None);
+        assert_eq!(parse_leading_u32("A1"), None);
+        assert_eq!(parse_leading_u32("99999999999999999999"), None, "overflow → NULL");
     }
 
     #[test]

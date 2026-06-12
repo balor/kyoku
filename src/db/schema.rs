@@ -16,6 +16,11 @@ const SCHEMA_VERSION: i32 = 7;
 pub fn initialize(conn: &Connection, music_dir: &Path) -> Result<()> {
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+    // Two connections write concurrently (TUI thread + import worker).
+    // rusqlite's default busy timeout is 0 ms, so without this the first
+    // write-lock collision fails instantly with SQLITE_BUSY instead of
+    // waiting out the other writer's short hold.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
     let version = get_schema_version(conn)?;
     if version < 1 {

@@ -83,10 +83,13 @@ impl AddToCollectionPopup {
             }
             match queries::find_collection_by_name(conn, &name) {
                 Ok(Some(id)) => (id, name),
-                _ => match queries::create_collection(conn, &name) {
+                Ok(None) => match queries::create_collection(conn, &name) {
                     Ok(id) => (id, name),
                     Err(_) => return "Failed to create collection".to_string(),
                 },
+                // A failed lookup is NOT "doesn't exist" — creating here
+                // would duplicate the collection on a transient DB error.
+                Err(_) => return "Failed to look up collection".to_string(),
             }
         };
 
