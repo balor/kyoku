@@ -56,6 +56,11 @@ pub struct OrganizePlan {
     /// deleted; `apply_organize` unlinks each file and clears the
     /// tracking row from `orphaned_files`.
     pub file_orphans: Vec<FileOrphanEntry>,
+    /// Set when the missing-source count looks like an unavailable volume
+    /// (unmounted drive leaving an empty mount point) rather than genuinely
+    /// deleted files. While set, `apply_organize` refuses to prune the
+    /// missing-source rows; everything else in the plan still applies.
+    pub prune_blocked_reason: Option<String>,
 }
 
 /// One pending orphan file pulled from the `orphaned_files` table.
@@ -82,6 +87,9 @@ pub struct OrganizeResult {
     /// Number of `orphaned_files` entries fully handled (file deleted
     /// or already missing, tracking row cleared).
     pub file_orphans_removed: u32,
+    /// Copied from the plan when the missing-source prune was skipped,
+    /// so callers can surface it after apply.
+    pub prune_blocked_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +103,109 @@ pub enum OrganizeFilter {
     Collection(String),
 }
 
+/// Per-track template-rendering context. Built once per track and shared by
+/// the reservation pre-pass and the assignment pass in [`plan_organize`] so
+/// both compute identical raw target paths.
+struct TrackTargets {
+    from: PathBuf,
+    has_album: bool,
+    single_disc: bool,
+    metadata_starved: bool,
+    vars: TemplateVars,
+    /// Memberships sorted by collection ID (oldest first) — deterministic
+    /// primary-home selection for loose tracks.
+    collections: Vec<queries::OrganizeCollectionMembership>,
+}
+
+impl TrackTargets {
+    fn new(t: &queries::OrganizeTrackRow) -> Self {
+        let vars = TemplateVars {
+            artist: t.artist.clone().unwrap_or_default(),
+            album_artist: t.album_artist.clone().unwrap_or_default(),
+            album: t.album_title.clone().unwrap_or_default(),
+            year: t.year.map(|y| y.to_string()).unwrap_or_default(),
+            title: t.title.clone(),
+            track: t.track_number.unwrap_or(0),
+            disc: t.disc_number,
+            genre: t.genre.clone().unwrap_or_default(),
+            ext: Path::new(&t.file_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("mp3")
+                .to_lowercase(),
+            label: t.label.clone().unwrap_or_default(),
+            collection: String::new(),
+            position: 0,
+        };
+        // Metadata-starved tracks (no track number, no artist, no album_artist)
+        // would render as garbage like "00 Unknown - <stem>.ext" — keep the
+        // original filename instead while still honouring the template's directory.
+        let metadata_starved = t.track_number.unwrap_or(0) == 0
+            && t.artist.as_deref().unwrap_or("").trim().is_empty()
+            && t.album_artist.as_deref().unwrap_or("").trim().is_empty();
+        let mut collections = t.collections.clone();
+        collections.sort_by_key(|c| c.id);
+        TrackTargets {
+            from: PathBuf::from(&t.file_path),
+            has_album: t.album_title.is_some(),
+            single_disc: t.disc_total.unwrap_or(1) <= 1,
+            metadata_starved,
+            vars,
+            collections,
+        }
+    }
+
+    fn preserve_filename(&self, target: PathBuf) -> PathBuf {
+        if !self.metadata_starved {
+            return target;
+        }
+        match (target.parent(), self.from.file_name()) {
+            (Some(dir), Some(name)) => dir.join(name),
+            _ => target,
+        }
+    }
+
+    /// Raw (pre-disambiguation) target for one collection membership.
+    /// Collection templates use `{position}` for collection order while
+    /// `{track}` stays the source track-number tag.
+    fn collection_target(
+        &self,
+        coll: &queries::OrganizeCollectionMembership,
+        settings: &Settings,
+        music_dir: &Path,
+    ) -> PathBuf {
+        let tmpl = coll
+            .path_template
+            .as_deref()
+            .unwrap_or(&settings.library.collection_path_template);
+        let mut coll_vars = self.vars.clone();
+        coll_vars.collection = coll.name.clone();
+        coll_vars.position = coll.effective_position;
+        self.preserve_filename(music_dir.join(template::render_path(tmpl, &coll_vars)))
+    }
+
+    /// Raw target of the track's PRIMARY file: album hierarchy for album
+    /// tracks, first collection's folder for loose tracks in collections,
+    /// the loose template otherwise.
+    fn primary_target(&self, settings: &Settings, music_dir: &Path) -> PathBuf {
+        if self.has_album {
+            let tmpl = if self.single_disc {
+                &settings.library.path_template_single_disc
+            } else {
+                &settings.library.path_template
+            };
+            self.preserve_filename(music_dir.join(template::render_path(tmpl, &self.vars)))
+        } else if let Some(first) = self.collections.first() {
+            self.collection_target(first, settings, music_dir)
+        } else {
+            self.preserve_filename(music_dir.join(template::render_path(
+                &settings.library.loose_path_template,
+                &self.vars,
+            )))
+        }
+    }
+}
+
 /// Compute an organize plan without any side effects.
 pub fn plan_organize(
     conn: &Connection,
@@ -102,6 +213,20 @@ pub fn plan_organize(
     filter: OrganizeFilter,
 ) -> Result<OrganizePlan> {
     let music_dir = &settings.library.music_dir;
+
+    // Refuse to plan against an unavailable library root. Every stored track
+    // resolves below music_dir, so a missing/unreadable dir (unmounted drive,
+    // or EACCES — where `exists()` also returns false) would classify the
+    // ENTIRE library as missing sources, and apply would prune every row.
+    // read_dir instead of exists() so permission failures are caught too.
+    if let Err(e) = std::fs::read_dir(music_dir) {
+        return Err(crate::error::KyokuError::Config(format!(
+            "music directory {} is not accessible ({}) — is the drive mounted?",
+            music_dir.display(),
+            e
+        )));
+    }
+
     let mut plan = OrganizePlan::default();
 
     // Pending file orphans are a property of the library as a whole, not
@@ -140,11 +265,51 @@ pub fn plan_organize(
         used_paths.remove(&PathBuf::from(&t.file_path));
     }
 
-    // Helper: return a variant of `target` that isn't already in `used`,
-    // appending " (2)", " (3)", … before the extension. Inserts the final
-    // chosen path into `used` as a side effect.
-    let disambiguate = |target: PathBuf, used: &mut HashSet<PathBuf>| -> PathBuf {
-        if !used.contains(&target) {
+    // Also claim every collection copy recorded in the DB — a move target
+    // could otherwise collide with another track's collection copy that
+    // exists in the DB but not (yet) on disk. A planned track's own
+    // membership slots are exempt: if its recorded copy is missing on disk,
+    // the plan should re-copy to that same path, not get pushed to a " (2)"
+    // variant of it.
+    let planned_memberships: HashSet<(i64, i64)> = tracks
+        .iter()
+        .flat_map(|t| t.collections.iter().map(move |c| (t.id, c.id)))
+        .collect();
+    for (track_id, coll_id, p) in queries::list_all_collection_paths(conn, music_dir)? {
+        if !planned_memberships.contains(&(track_id, coll_id)) {
+            used_paths.insert(PathBuf::from(p));
+        }
+    }
+
+    // Pending orphan paths are the one kind of on-disk file a move may land
+    // on: dup-replace imports plan that overwrite deliberately, and apply
+    // resolves it via its `occupied` guard.
+    let orphan_paths: HashSet<PathBuf> =
+        plan.file_orphans.iter().map(|e| e.path.clone()).collect();
+
+    let same_file = |a: &Path, b: &Path| -> bool {
+        matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(x), Ok(y)) if x == y
+        )
+    };
+    let slot_free = |candidate: &Path, from: &Path, used: &HashSet<PathBuf>| -> bool {
+        if used.contains(candidate) {
+            return false;
+        }
+        // A file already on disk blocks the slot — rename/copy would
+        // silently clobber it. Exceptions: pending orphans (deliberate
+        // overwrite, see above) and the track's own file under a different
+        // spelling (case-only rename on a case-insensitive filesystem).
+        !candidate.exists() || orphan_paths.contains(candidate) || same_file(candidate, from)
+    };
+
+    // Helper: return a variant of `target` whose slot is free — not claimed
+    // by another planned destination (`used`) and not an unrelated file
+    // already on disk. Appends " (2)", " (3)", … before the extension.
+    // Inserts the final chosen path into `used` as a side effect.
+    let disambiguate = |from: &Path, target: PathBuf, used: &mut HashSet<PathBuf>| -> PathBuf {
+        if slot_free(&target, from, used) {
             used.insert(target.clone());
             return target;
         }
@@ -169,7 +334,7 @@ pub fn plan_organize(
                 Some(p) => p.join(&new_name),
                 None => PathBuf::from(&new_name),
             };
-            if !used.contains(&candidate) {
+            if slot_free(&candidate, from, used) {
                 used.insert(candidate.clone());
                 return candidate;
             }
@@ -179,94 +344,58 @@ pub fn plan_organize(
         target
     };
 
-    for t in &tracks {
-        // Detect orphaned DB rows: tracks whose source file no longer exists.
+    // Build each track's render context (and primary target) up front.
+    // `None` marks a missing source — detected here so the reservation
+    // pre-pass below skips them, handled in the assignment loop.
+    let contexts: Vec<Option<(TrackTargets, PathBuf)>> = tracks
+        .iter()
+        .map(|t| {
+            let ctx = TrackTargets::new(t);
+            if !ctx.from.exists() {
+                return None;
+            }
+            let primary = ctx.primary_target(settings, music_dir);
+            Some((ctx, primary))
+        })
+        .collect();
+
+    // Reservation pre-pass: a track that is already at its rendered target
+    // owns that slot, full stop. Claim those slots BEFORE assigning move
+    // destinations so the outcome can't depend on SQL row order — without
+    // this, a mover processed first could claim an in-place track's path
+    // and apply would rename right over its file.
+    for (ctx, primary) in contexts.iter().flatten() {
+        if &ctx.from == primary {
+            used_paths.insert(primary.clone());
+        }
+    }
+
+    for (t, entry) in tracks.iter().zip(&contexts) {
+        // Orphaned DB rows: tracks whose source file no longer exists.
         // These happen when a previous organize run partially succeeded and
         // left the DB pointing at gone files, or when the user deleted files
-        // manually. We collect them and clean up the rows during apply.
-        let from_check = PathBuf::from(&t.file_path);
-        if !from_check.exists() {
+        // manually. Collected for pruning during apply (subject to the
+        // prune_blocked_reason guard below).
+        let Some((ctx, primary)) = entry else {
             plan.missing_sources
-                .push((t.id, from_check, t.title.clone()));
+                .push((t.id, PathBuf::from(&t.file_path), t.title.clone()));
             continue;
-        }
-
-        let vars = TemplateVars {
-            artist: t.artist.clone().unwrap_or_default(),
-            album_artist: t.album_artist.clone().unwrap_or_default(),
-            album: t.album_title.clone().unwrap_or_default(),
-            year: t.year.map(|y| y.to_string()).unwrap_or_default(),
-            title: t.title.clone(),
-            track: t.track_number.unwrap_or(0),
-            disc: t.disc_number,
-            genre: t.genre.clone().unwrap_or_default(),
-            ext: Path::new(&t.file_path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("mp3")
-                .to_lowercase(),
-            label: t.label.clone().unwrap_or_default(),
-            collection: String::new(),
-            position: 0,
         };
+        let from = &ctx.from;
 
-        let has_album = t.album_title.is_some();
-        let from = PathBuf::from(&t.file_path);
-
-        // Metadata-starved tracks (no track number, no artist, no album_artist)
-        // would render as garbage like "00 Unknown - <stem>.ext" — keep the
-        // original filename instead while still honouring the template's directory.
-        let metadata_starved = t.track_number.unwrap_or(0) == 0
-            && t.artist.as_deref().unwrap_or("").trim().is_empty()
-            && t.album_artist.as_deref().unwrap_or("").trim().is_empty();
-        let preserve_filename = |target: PathBuf| -> PathBuf {
-            if !metadata_starved {
-                return target;
-            }
-            match (target.parent(), from.file_name()) {
-                (Some(dir), Some(name)) => dir.join(name),
-                _ => target,
-            }
-        };
-
-        // Sort collections deterministically by ID (oldest first). Each
-        // collection carries its own effective position; collection templates
-        // should use `{position}` for collection order while `{track}` stays
-        // the source track-number tag.
-        let mut collections = t.collections.clone();
-        collections.sort_by_key(|c| c.id);
-
-        // Helper to compute a collection's raw target path (pre-disambiguation)
-        let collection_target = |coll: &queries::OrganizeCollectionMembership| -> PathBuf {
-            let tmpl = coll
-                .path_template
-                .as_deref()
-                .unwrap_or(&settings.library.collection_path_template);
-            let mut coll_vars = vars.clone();
-            coll_vars.collection = coll.name.clone();
-            coll_vars.position = coll.effective_position;
-            preserve_filename(music_dir.join(template::render_path(tmpl, &coll_vars)))
-        };
-
-        if has_album {
+        if ctx.has_album {
             // Album track: move to album hierarchy + copy to each collection
-            let tmpl = if t.disc_total.unwrap_or(1) <= 1 {
-                &settings.library.path_template_single_disc
-            } else {
-                &settings.library.path_template
-            };
-            let raw_target = preserve_filename(music_dir.join(template::render_path(tmpl, &vars)));
+            let raw_target = primary.clone();
 
             // Copies must read from the post-move location because apply_organize
             // runs moves before copies — by then `from` has been renamed.
-            let copy_source: PathBuf = if from == raw_target {
-                // Already in place — reserve the slot so nothing else takes it
-                used_paths.insert(raw_target.clone());
+            let copy_source: PathBuf = if from == &raw_target {
+                // Already in place — slot was claimed in the pre-pass.
                 plan.skipped += 1;
                 raw_target
             } else {
-                let target = disambiguate(raw_target, &mut used_paths);
-                if from == target {
+                let target = disambiguate(from, raw_target, &mut used_paths);
+                if from == &target {
                     // Disambiguation handed us back our own path (e.g. another
                     // track now owns the un-suffixed slot). Already in place.
                     plan.skipped += 1;
@@ -294,13 +423,13 @@ pub fn plan_organize(
 
             // One copy per collection — skip if the target already exists on disk
             // (collection was already organized).
-            for coll in &collections {
-                let raw = collection_target(coll);
+            for coll in &ctx.collections {
+                let raw = ctx.collection_target(coll, settings, music_dir);
                 if raw.exists() {
                     used_paths.insert(raw);
                     plan.skipped += 1;
                 } else {
-                    let target = disambiguate(raw, &mut used_paths);
+                    let target = disambiguate(&copy_source, raw, &mut used_paths);
                     plan.copies.push(FileCopy {
                         track_id: t.id,
                         collection_id: coll.id,
@@ -310,19 +439,18 @@ pub fn plan_organize(
                     });
                 }
             }
-        } else if !collections.is_empty() {
+        } else if !ctx.collections.is_empty() {
             // Loose track in collections: MOVE to first collection's folder
-            let first = &collections[0];
-            let raw_primary = collection_target(first);
+            let first = &ctx.collections[0];
+            let raw_primary = primary.clone();
 
             // Same post-move-location rule as above.
-            let copy_source: PathBuf = if from == raw_primary {
-                used_paths.insert(raw_primary.clone());
+            let copy_source: PathBuf = if from == &raw_primary {
                 plan.skipped += 1;
                 raw_primary
             } else {
-                let primary_target = disambiguate(raw_primary, &mut used_paths);
-                if from == primary_target {
+                let primary_target = disambiguate(from, raw_primary, &mut used_paths);
+                if from == &primary_target {
                     plan.skipped += 1;
                     primary_target
                 } else {
@@ -337,13 +465,13 @@ pub fn plan_organize(
             };
 
             // COPY to each additional collection's folder — skip if already exists
-            for coll in &collections[1..] {
-                let raw = collection_target(coll);
+            for coll in &ctx.collections[1..] {
+                let raw = ctx.collection_target(coll, settings, music_dir);
                 if raw.exists() {
                     used_paths.insert(raw);
                     plan.skipped += 1;
                 } else {
-                    let target = disambiguate(raw, &mut used_paths);
+                    let target = disambiguate(&copy_source, raw, &mut used_paths);
                     plan.copies.push(FileCopy {
                         track_id: t.id,
                         collection_id: coll.id,
@@ -355,26 +483,39 @@ pub fn plan_organize(
             }
         } else {
             // Loose track, no collections: move to _loose/ folder
-            let tmpl = &settings.library.loose_path_template;
-            let raw_target = preserve_filename(music_dir.join(template::render_path(tmpl, &vars)));
-
-            if from == raw_target {
-                used_paths.insert(raw_target);
+            let raw_target = primary.clone();
+            if from == &raw_target {
                 plan.skipped += 1;
             } else {
-                let target = disambiguate(raw_target, &mut used_paths);
-                if from == target {
+                let target = disambiguate(from, raw_target, &mut used_paths);
+                if from == &target {
                     plan.skipped += 1;
                 } else {
                     plan.moves.push(FileMove {
                         track_id: t.id,
-                        from,
+                        from: from.clone(),
                         to: target,
                         also_collection: None,
                     });
                 }
             }
         }
+    }
+
+    // Prune guard: when a large share of the candidate tracks are "missing",
+    // the likely cause is an unavailable volume (an unmounted drive leaves an
+    // empty mount point that passes the read_dir check above), not a mass
+    // deletion. Block the prune step; moves/copies for files that ARE present
+    // still apply. Genuinely gone files can be removed via the explicit
+    // delete flows, or organize re-run once the volume is back.
+    let missing = plan.missing_sources.len();
+    if missing >= 100 || (missing >= 5 && missing * 5 > tracks.len()) {
+        plan.prune_blocked_reason = Some(format!(
+            "{} of {} source files are missing — this looks like an unavailable \
+             volume, so their DB rows will NOT be pruned",
+            missing,
+            tracks.len()
+        ));
     }
 
     // Cover-art moves: for every album with a recorded destination dir and a
@@ -434,7 +575,45 @@ pub fn apply_organize(
     // symlink variants on macOS don't slip past the guard.
     let mut occupied: HashSet<String> = HashSet::new();
 
+    // Orphan destinations are the one kind of existing file a move may
+    // overwrite (dup-replace flow). Pre-expand literal + canonical forms,
+    // mirroring `mark_occupied`.
+    let mut orphan_exempt: HashSet<String> = HashSet::new();
+    for e in &plan.file_orphans {
+        orphan_exempt.insert(e.path.display().to_string());
+        if let Ok(canon) = std::fs::canonicalize(&e.path) {
+            orphan_exempt.insert(canon.display().to_string());
+        }
+    }
+    let same_file = |a: &Path, b: &Path| -> bool {
+        matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(x), Ok(y)) if x == y
+        )
+    };
+    let path_in = |p: &Path, set: &HashSet<String>| -> bool {
+        set.contains(&p.display().to_string())
+            || std::fs::canonicalize(p)
+                .map(|c| set.contains(&c.display().to_string()))
+                .unwrap_or(false)
+    };
+
     for m in &plan.moves {
+        // Backstop for stale plans: destinations were vetted against disk at
+        // plan time, but a file may have appeared since. Never clobber it —
+        // error and continue. Exceptions match plan-time `slot_free`: pending
+        // orphans (deliberate overwrite) and the source file itself under a
+        // different spelling (case-only rename on case-insensitive fs).
+        if m.to.exists() && !path_in(&m.to, &orphan_exempt) && !same_file(&m.from, &m.to) {
+            result.errors.push((
+                m.from.display().to_string(),
+                format!(
+                    "destination {} already exists — skipped to avoid overwriting it",
+                    m.to.display()
+                ),
+            ));
+            continue;
+        }
         if let Some(parent) = m.to.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -504,6 +683,18 @@ pub fn apply_organize(
     }
 
     for c in &plan.copies {
+        // Same stale-plan backstop as moves. Copies are never planned onto
+        // an existing file (plan skips those), so anything here is a race.
+        if c.to.exists() && !same_file(&c.from, &c.to) {
+            result.errors.push((
+                c.from.display().to_string(),
+                format!(
+                    "copy destination {} already exists — skipped",
+                    c.to.display()
+                ),
+            ));
+            continue;
+        }
         if let Some(parent) = c.to.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -576,10 +767,24 @@ pub fn apply_organize(
         }
     }
 
-    // Delete orphaned DB rows (tracks whose source file no longer exists)
-    for (track_id, _, _) in &plan.missing_sources {
-        if queries::delete_track(conn, *track_id).is_ok() {
-            result.orphans_cleaned += 1;
+    // Prune orphaned DB rows (tracks whose source file no longer exists) —
+    // unless planning flagged the batch as a probably-unavailable volume.
+    if let Some(reason) = &plan.prune_blocked_reason {
+        result.prune_blocked_reason = Some(reason.clone());
+    } else {
+        for (track_id, path, title) in &plan.missing_sources {
+            // Re-check at apply time: a remount or restore between plan and
+            // apply means the row is live again — keep it.
+            if path.exists() {
+                continue;
+            }
+            match queries::delete_track(conn, *track_id) {
+                Ok(()) => result.orphans_cleaned += 1,
+                Err(e) => result.errors.push((
+                    path.display().to_string(),
+                    format!("failed to prune DB row for missing '{}': {}", title, e),
+                )),
+            }
         }
     }
 

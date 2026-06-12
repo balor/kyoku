@@ -1280,6 +1280,33 @@ pub fn list_all_track_paths(conn: &Connection, music_dir: &Path) -> Result<Vec<(
     Ok(result)
 }
 
+/// List every recorded collection copy location as
+/// `(track_id, collection_id, absolute_path)`. Used by the organizer for
+/// collision detection so a move target can't claim another track's
+/// collection copy.
+pub fn list_all_collection_paths(
+    conn: &Connection,
+    music_dir: &Path,
+) -> Result<Vec<(i64, i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT track_id, collection_id, collection_file_path FROM collection_tracks
+         WHERE collection_file_path IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let stored: String = row.get(2)?;
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            paths::from_db_path(&stored, music_dir).display().to_string(),
+        ))
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
 /// Update a track's file_path. `new_path` is an absolute path; we normalise
 /// against `music_dir` before storage.
 pub fn update_track_path(

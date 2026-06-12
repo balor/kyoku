@@ -1023,4 +1023,204 @@ fn remove_empty_parents_stops_at_root_boundary() {
     assert!(tmp.path().exists(), "walk must not climb above root");
 }
 
+// ── Safety guards: missing-volume prune block, overwrite refusal, ───
+// ── in-place slot reservation (review findings ORG-1/2/3) ───────────
+
+#[test]
+fn plan_errors_when_music_dir_is_missing() {
+    let (_tmp, src, music, conn) = fresh_world();
+    add_album_track(
+        &conn,
+        src.join("song.mp3"),
+        "Artist",
+        "Album",
+        1,
+        "Song",
+        Some(2024),
+    );
+    std::fs::remove_dir_all(&music).unwrap();
+
+    let result = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All);
+    assert!(
+        result.is_err(),
+        "plan must refuse to run against a missing music_dir"
+    );
+}
+
+#[test]
+fn prune_is_blocked_when_most_sources_are_missing() {
+    let (_tmp, src, music, conn) = fresh_world();
+    // 5 tracks, all files gone — indistinguishable from an unmounted volume
+    // whose empty mount point still passes the music_dir accessibility check.
+    for i in 1..=5u32 {
+        let p = src.join(format!("song{i}.mp3"));
+        add_album_track(&conn, p.clone(), "Artist", "Album", i, &format!("Song {i}"), Some(2024));
+        std::fs::remove_file(&p).unwrap();
+    }
+
+    let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
+    assert_eq!(plan.missing_sources.len(), 5);
+    assert!(
+        plan.prune_blocked_reason.is_some(),
+        "mass-missing sources must block the prune"
+    );
+
+    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    assert_eq!(result.orphans_cleaned, 0, "no rows may be pruned while blocked");
+    assert!(result.prune_blocked_reason.is_some(), "block must surface in the result");
+    let remaining: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(remaining, 5, "every track row must survive");
+}
+
+#[test]
+fn missing_minority_is_still_pruned() {
+    let (_tmp, src, music, conn) = fresh_world();
+    // 5 missing of 30 (17%) sits below the 20% block threshold — these are
+    // genuinely deleted files and the prune must keep working.
+    for i in 1..=30u32 {
+        let p = src.join(format!("song{i}.mp3"));
+        add_album_track(&conn, p.clone(), "Artist", "Album", i, &format!("Song {i:02}"), Some(2024));
+        if i <= 5 {
+            std::fs::remove_file(&p).unwrap();
+        }
+    }
+
+    let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
+    assert_eq!(plan.missing_sources.len(), 5);
+    assert!(
+        plan.prune_blocked_reason.is_none(),
+        "minority-missing must not trip the volume guard"
+    );
+
+    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    assert_eq!(result.orphans_cleaned, 5);
+}
+
+#[test]
+fn restored_source_survives_apply_recheck() {
+    let (_tmp, src, music, conn) = fresh_world();
+    let p = src.join("song.mp3");
+    let tid = add_album_track(&conn, p.clone(), "Artist", "Album", 1, "Song", Some(2024));
+    std::fs::remove_file(&p).unwrap();
+
+    let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
+    assert_eq!(plan.missing_sources.len(), 1);
+
+    // File comes back (remount, restore, sync finishing) between plan and apply.
+    touch(&p);
+
+    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    assert_eq!(result.orphans_cleaned, 0, "restored source must not be pruned");
+    let exists: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tracks WHERE id = ?1", [tid], |r| r.get(0))
+        .unwrap();
+    assert_eq!(exists, 1, "row must survive the stale plan");
+}
+
+#[test]
+fn plan_disambiguates_away_from_untracked_file_at_target() {
+    let (_tmp, src, music, conn) = fresh_world();
+    add_album_track(
+        &conn,
+        src.join("song.mp3"),
+        "Artist",
+        "Album",
+        1,
+        "Song",
+        Some(2024),
+    );
+    // An untracked file (no DB row, no orphan entry) already sits at the
+    // rendered target — e.g. left behind by a rows-only delete.
+    touch(&music.join("Artist/Album (2024)/01 Song.mp3"));
+
+    let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
+    assert_eq!(plan.moves.len(), 1);
+    assert_eq!(
+        plan.moves[0].to,
+        music.join("Artist/Album (2024)/01 Song (2).mp3"),
+        "plan must step around the untracked file, not claim its path"
+    );
+}
+
+#[test]
+fn apply_refuses_to_overwrite_file_appearing_after_plan() {
+    let (_tmp, src, music, conn) = fresh_world();
+    add_album_track(
+        &conn,
+        src.join("song.mp3"),
+        "Artist",
+        "Album",
+        1,
+        "Song",
+        Some(2024),
+    );
+    let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
+    assert_eq!(plan.moves.len(), 1);
+    let target = plan.moves[0].to.clone();
+
+    // A file lands on the destination between plan and apply (stale preview,
+    // concurrent import, manual copy).
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, b"untracked bytes").unwrap();
+
+    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    assert_eq!(result.moved, 0);
+    assert_eq!(result.errors.len(), 1, "skip must be reported as an error");
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"untracked bytes",
+        "existing file must be untouched"
+    );
+    assert!(src.join("song.mp3").exists(), "source must remain in place");
+}
+
+#[test]
+fn in_place_track_keeps_slot_regardless_of_row_order() {
+    // Two tracks render the identical target (duplicate metadata); one is
+    // already organized, the other waits in the inbox. Whichever order SQL
+    // returns them, the in-place track must keep its slot and its file, and
+    // the mover must take the " (2)" suffix. Before the reservation
+    // pre-pass, the mover-first order let it claim the in-place track's
+    // path and apply renamed right over its audio.
+    for in_place_first in [true, false] {
+        let (_tmp, src, music, conn) = fresh_world();
+        let organized = music.join("Artist/Album (2024)/01 Song.mp3");
+        let inboxed = src.join("song.mp3");
+        let order: [&PathBuf; 2] = if in_place_first {
+            [&organized, &inboxed]
+        } else {
+            [&inboxed, &organized]
+        };
+        for p in order {
+            add_album_track(&conn, p.clone(), "Artist", "Album", 1, "Song", Some(2024));
+        }
+        std::fs::write(&organized, b"in-place audio").unwrap();
+
+        let plan =
+            plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
+        assert_eq!(
+            plan.skipped, 1,
+            "in-place track must be skipped (in_place_first={in_place_first})"
+        );
+        assert_eq!(plan.moves.len(), 1);
+        assert_eq!(plan.moves[0].from, inboxed);
+        assert_eq!(
+            plan.moves[0].to,
+            music.join("Artist/Album (2024)/01 Song (2).mp3"),
+            "mover must be disambiguated away (in_place_first={in_place_first})"
+        );
+
+        let result =
+            apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            std::fs::read(&organized).unwrap(),
+            b"in-place audio",
+            "in-place track's audio must be intact (in_place_first={in_place_first})"
+        );
+    }
+}
+
 // Deletion (DeletePlan/apply_delete_plan) tests live in `pruner_tests.rs`.

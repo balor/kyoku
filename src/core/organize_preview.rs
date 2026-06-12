@@ -367,14 +367,7 @@ mod tests {
     use crate::core::organizer::{FileMove, FileOrphanEntry, OrganizePlan};
 
     fn empty_plan() -> OrganizePlan {
-        OrganizePlan {
-            moves: Vec::new(),
-            copies: Vec::new(),
-            cover_moves: Vec::new(),
-            skipped: 0,
-            missing_sources: Vec::new(),
-            file_orphans: Vec::new(),
-        }
+        OrganizePlan::default()
     }
 
     fn move_entry(from: &str, to: &str) -> FileMove {

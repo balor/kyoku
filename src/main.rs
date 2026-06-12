@@ -311,6 +311,33 @@ fn main() -> anyhow::Result<()> {
                 core::organizer::OrganizeFilter::All
             };
 
+            // Validate music_dir BEFORE planning: planning against a missing
+            // dir would classify the entire library as missing sources (the
+            // planner refuses to run in that state — see plan_organize).
+            if !settings.library.music_dir.exists() {
+                if !apply {
+                    eprintln!(
+                        "Music directory {} does not exist — nothing to organize.",
+                        settings.library.music_dir.display()
+                    );
+                    eprintln!("(Re-run with --apply to be offered to create it.)");
+                    std::process::exit(1);
+                }
+                print!(
+                    "Music directory {} does not exist. Create it? [y/N] ",
+                    settings.library.music_dir.display()
+                );
+                use std::io::Write;
+                std::io::stdout().flush()?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    println!("Aborted.");
+                    std::process::exit(0);
+                }
+                std::fs::create_dir_all(&settings.library.music_dir)?;
+            }
+
             let plan = core::organizer::plan_organize(&conn, &settings, filter)?;
 
             if plan.moves.is_empty()
@@ -361,10 +388,12 @@ fn main() -> anyhow::Result<()> {
                         println!();
                     }
                     if !preview.orphans.is_empty() {
-                        println!(
-                            "Orphaned tracks ({} — DB rows will be pruned):",
-                            preview.stats.orphans
-                        );
+                        let fate = if plan.prune_blocked_reason.is_some() {
+                            "prune blocked — rows kept"
+                        } else {
+                            "DB rows will be pruned"
+                        };
+                        println!("Orphaned tracks ({} — {}):", preview.stats.orphans, fate);
                         for o in &preview.orphans {
                             println!("  [{}] {} — {}", o.id, o.title, o.path.display());
                         }
@@ -397,9 +426,15 @@ fn main() -> anyhow::Result<()> {
                     // doesn't bury the rest of the plan. Use --details for the
                     // full list.
                     if !plan.missing_sources.is_empty() {
+                        let fate = if plan.prune_blocked_reason.is_some() {
+                            "prune blocked — rows kept"
+                        } else {
+                            "DB rows will be pruned"
+                        };
                         println!(
-                            "Missing source files ({} — DB rows will be pruned):",
-                            plan.missing_sources.len()
+                            "Missing source files ({} — {}):",
+                            plan.missing_sources.len(),
+                            fate
                         );
                         for (id, path, title) in plan.missing_sources.iter().take(10) {
                             println!("  [{}] {} — {}", id, title, path.display());
@@ -418,25 +453,12 @@ fn main() -> anyhow::Result<()> {
                     plan.skipped,
                     plan.missing_sources.len(),
                 );
+                if let Some(reason) = &plan.prune_blocked_reason {
+                    println!();
+                    println!("⚠ {}", reason);
+                }
 
                 if apply {
-                    // Check music_dir exists
-                    if !settings.library.music_dir.exists() {
-                        print!(
-                            "Music directory {} does not exist. Create it? [y/N] ",
-                            settings.library.music_dir.display()
-                        );
-                        use std::io::Write;
-                        std::io::stdout().flush()?;
-                        let mut input = String::new();
-                        std::io::stdin().read_line(&mut input)?;
-                        if !input.trim().eq_ignore_ascii_case("y") {
-                            println!("Aborted.");
-                            std::process::exit(0);
-                        }
-                        std::fs::create_dir_all(&settings.library.music_dir)?;
-                    }
-
                     let result = core::organizer::apply_organize(
                         &conn,
                         &settings.library.music_dir,
@@ -453,6 +475,9 @@ fn main() -> anyhow::Result<()> {
                         result.orphans_cleaned,
                         result.file_orphans_removed,
                     );
+                    if let Some(reason) = &result.prune_blocked_reason {
+                        println!("⚠ {}", reason);
+                    }
                     if !result.errors.is_empty() {
                         println!("Errors:");
                         for (path, err) in &result.errors {

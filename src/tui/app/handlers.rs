@@ -172,6 +172,12 @@ impl App {
                                 if !result.errors.is_empty() {
                                     parts.push(format!("{} errors", result.errors.len()));
                                 }
+                                if result.prune_blocked_reason.is_some() {
+                                    parts.push(
+                                        "missing-source prune blocked (volume unavailable?)"
+                                            .to_string(),
+                                    );
+                                }
                                 if !parts.is_empty() {
                                     self.library.notice =
                                         Some(format!("Organized: {}", parts.join(", ")));

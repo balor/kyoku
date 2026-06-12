@@ -53,9 +53,14 @@ pub fn render(
     hint: &str,
     width_pct: u16,
 ) -> usize {
+    let blocked = plan.prune_blocked_reason.as_deref();
     let all_lines = match view {
-        OrganizeView::Summary => build_summary_lines(&organize_preview::build_summary(plan), theme),
-        OrganizeView::Details => build_detail_lines(&organize_preview::build_details(plan), theme),
+        OrganizeView::Summary => {
+            build_summary_lines(&organize_preview::build_summary(plan), blocked, theme)
+        }
+        OrganizeView::Details => {
+            build_detail_lines(&organize_preview::build_details(plan), blocked, theme)
+        }
     };
 
     // Pinned footer: stats line + hint line, always visible. Zero counts are
@@ -185,8 +190,35 @@ pub fn format_stats_line(stats: PlanStats) -> String {
     parts.join(" · ")
 }
 
-fn build_summary_lines<'a>(preview: &SummaryPreview, theme: &Theme) -> Vec<Line<'a>> {
+/// Warning block shown at the top of both views when the missing-source
+/// prune is blocked (probably-unavailable volume — see `plan_organize`).
+/// Placed first so it survives the "nothing to do" early return: an
+/// unmounted volume often means the plan contains ONLY missing sources.
+fn blocked_warning_lines<'a>(reason: &str, theme: &Theme) -> Vec<Line<'a>> {
+    vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            " ⚠ missing-source prune blocked".to_string(),
+            Style::default()
+                .fg(theme.yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("   {}", reason),
+            Style::default().fg(theme.fg_muted),
+        )),
+    ]
+}
+
+fn build_summary_lines<'a>(
+    preview: &SummaryPreview,
+    blocked: Option<&str>,
+    theme: &Theme,
+) -> Vec<Line<'a>> {
     let mut lines: Vec<Line<'a>> = Vec::new();
+    if let Some(reason) = blocked {
+        lines.extend(blocked_warning_lines(reason, theme));
+    }
     lines.push(Line::from(""));
 
     let nothing_to_do = preview.stats.moves_total == 0
@@ -302,8 +334,15 @@ fn build_summary_lines<'a>(preview: &SummaryPreview, theme: &Theme) -> Vec<Line<
     lines
 }
 
-fn build_detail_lines<'a>(preview: &DetailPreview, theme: &Theme) -> Vec<Line<'a>> {
+fn build_detail_lines<'a>(
+    preview: &DetailPreview,
+    blocked: Option<&str>,
+    theme: &Theme,
+) -> Vec<Line<'a>> {
     let mut lines: Vec<Line<'a>> = Vec::new();
+    if let Some(reason) = blocked {
+        lines.extend(blocked_warning_lines(reason, theme));
+    }
 
     let nothing_to_do = preview.stats.moves_total == 0
         && preview.stats.copies_total == 0
@@ -406,8 +445,13 @@ fn build_detail_lines<'a>(preview: &DetailPreview, theme: &Theme) -> Vec<Line<'a
     if preview.stats.orphans > 0 {
         lines.push(Line::from(Span::styled(
             format!(
-                " Orphaned tracks ({} — will be pruned):",
-                preview.stats.orphans
+                " Orphaned tracks ({} — {}):",
+                preview.stats.orphans,
+                if blocked.is_some() {
+                    "prune blocked, rows kept"
+                } else {
+                    "will be pruned"
+                }
             ),
             Style::default()
                 .fg(theme.yellow)
