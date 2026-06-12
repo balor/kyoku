@@ -95,7 +95,7 @@ immediately — then get swallowed by DB-2's `.ok()`s. Fix: `busy_timeout(5s)` a
 open. (Pairs with DB-2; one PR kills the class.)
 
 ### TUI-1 — `j`/`k` can't be typed into popup text inputs or global search
-**Status:** open · **Confidence:** certain
+**Status:** fixed (930419f) · **Confidence:** certain
 `is_up`/`is_down` match bare `k`/`j` (`src/tui/keybindings.rs:24-30`) and are
 checked before `TextInput::handle_key` in `global_search.rs:90-100`,
 `add_to_collection.rs:49-61`, `pick_collection.rs:74-86`. "Jazz", "J-Pop",
@@ -103,7 +103,7 @@ checked before `TextInput::handle_key` in `global_search.rs:90-100`,
 directly, so behavior is inconsistent between inputs.
 
 ### TUI-2 — Import wizard hard-locks if the scan/import worker thread dies
-**Status:** open · **Confidence:** likely
+**Status:** fixed (930419f) · **Confidence:** likely
 `tick` treats `Disconnected` like `Empty` (`src/tui/views/import/render.rs:18-44`);
 Scanning/Importing aren't in `can_cancel()` (`import.rs:394-402`); `q`/Ctrl+C
 suppressed in the import view (`app.rs:141`); raw mode blocks SIGINT — only
@@ -112,7 +112,7 @@ suppressed in the import view (`app.rs:141`); raw mode blocks SIGINT — only
 as failed completion; allow cancel from Scanning/Importing.
 
 ### TUI-3 — Duplicate-resolver decisions silently wiped by a late release fetch
-**Status:** open · **Confidence:** certain
+**Status:** fixed (930419f) · **Confidence:** certain
 `tick` re-runs `refresh_conflict_preview` when a fetch lands and `is_in_summary()`
 — which is still true during `ImportStep::ResolveDuplicates`
 (`src/tui/views/import/render.rs:111-114`, `wizard.rs:460-462`). All keep/replace
