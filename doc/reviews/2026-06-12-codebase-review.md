@@ -71,7 +71,7 @@ lost, one DB row lost.
 all in-place slots; pass 2 assigns move targets. Regression test in both row orders.
 
 ### DB-1 — Tag editor poisons `track_number`/`disc_number` as TEXT
-**Status:** open · **Confidence:** likely
+**Status:** fixed (a7ffd13) · **Confidence:** likely
 `update_track_fields` binds every value as `&str` (`src/db/queries.rs:844-855`);
 the editor mirrors typed values straight through (`src/tui/views/edit.rs:529-538`).
 SQLite INTEGER affinity stores `3/12` or `""` as TEXT; `map_track_row`'s
@@ -79,7 +79,7 @@ SQLite INTEGER affinity stores `3/12` or `""` as TEXT; `map_track_row`'s
 for the whole album until hand-fixed. Fix: parse to integer/NULL before binding.
 
 ### DB-2 — `.ok()` on `query_row` conflates DB errors with "not found" (~10 sites)
-**Status:** open · **Confidence:** certain
+**Status:** fixed (a7ffd13) · **Confidence:** certain
 `src/db/queries.rs:70, 127, 176, 190, 566, 826, 883, 1058, 1430, 1451`. A
 `SQLITE_BUSY`/IO error reads as "no row": `get_or_create_album` then creates
 duplicate albums; `find_track_by_mbid`/`find_track_by_album_slot` make dup
@@ -87,7 +87,7 @@ detection silently miss; `add_to_collection.rs:84` treats `Err` as "create new
 collection". Fix: `rusqlite::OptionalExtension::optional()` throughout.
 
 ### DB-3 — No `busy_timeout` on two concurrent write connections
-**Status:** open · **Confidence:** likely
+**Status:** fixed (a7ffd13) · **Confidence:** likely
 Import worker opens its own connection on a background thread while the TUI
 thread writes through another; neither sets `busy_timeout` (`src/db/schema.rs:16-18`,
 `src/tui/views/import/worker.rs:32`), so collisions return `SQLITE_BUSY`
