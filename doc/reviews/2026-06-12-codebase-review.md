@@ -126,13 +126,13 @@ decisions reset, cursor jumps to conflict 1. Fix: guard must also require
 `step == ImportStep::Review`.
 
 ### EXT-1 — Malformed config.toml bricks `kyoku setup` and `kyoku paths`
-**Status:** open · **Confidence:** certain
+**Status:** fixed (6575900) · **Confidence:** certain
 `Settings::load(&config_path)?` runs before command dispatch (`src/main.rs:71`),
 so the recovery commands die on a TOML error too. Contradicts spec rule 18.
 Fix: dispatch Setup/Paths before loading settings.
 
 ### EXT-2 — MusicBrainz disc/medium info flattened away
-**Status:** open · **Confidence:** likely
+**Status:** fixed (6575900) · **Confidence:** likely
 `parse_full_release` merges all media keeping per-disc positions
 (`src/external/musicbrainz.rs:733-770`); `MbTrack` has no medium field. On
 multi-disc releases: local disc-2 track 1 can greedily claim the disc-1 MB track
@@ -249,7 +249,7 @@ Collection deletion promotes to any non-NULL `collection_file_path` with no
 swallows query errors into "no candidate".
 
 ### EXT-3 — Re-running `kyoku setup` discards customizations; writes dead `user_agent` key
-**Status:** open · `src/cli/setup.rs:130-156, 233-301`
+**Status:** fixed (6575900) · `src/cli/setup.rs:130-156, 233-301`
 inbox_dirs not offered back; templates/thresholds/`write_tags` reset to
 hardcoded defaults. Generated config contains `user_agent` (settings has no such
 field; serde drops it) with a stale version and a URL differing from the
@@ -309,7 +309,7 @@ Spec §11 promises fixtures in every supported format. Missing fixture should
 fail (pattern repeated 5×, plus `import_organize_e2e.rs:22-25`).
 
 ### EXT-5 — CLI organize `--apply` lacks the confirmation its help text promises
-**Status:** open · `src/main.rs:422-446`, `cli/mod.rs:51`
+**Status:** fixed (6575900) · `src/main.rs:422-446`, `cli/mod.rs:51`
 (Also listed under SYS-3.) Spec §6.6: "always shows a preview first and requires
 explicit confirmation". Only the music_dir-creation prompt exists. `--pretend`
 alias documented in spec but unimplemented.
@@ -328,7 +328,7 @@ alias documented in spec but unimplemented.
 | L-6 | Cross-device fallback fires on *any* rename error, masking cause — match `ErrorKind::CrossesDevices` (stable 1.85) | `organizer.rs:445-449, 547-551` | open |
 | L-7 | `q` quits from a dirty editor, no prompt (import view got one for this reason) | `app.rs:140-146` | open |
 | L-8 | `missing_sources` not re-checked at apply (stale plan) — folded into ORG-1c | `organizer.rs:580-584` | fixed (240157a) |
-| L-9 | Setup writes unescaped paths into TOML (a `"` in a path produces the broken config that trips EXT-1); inbox entries unvalidated | `setup.rs:226-301` | open |
+| L-9 | Setup writes unescaped paths into TOML (a `"` in a path produces the broken config that trips EXT-1); inbox entries unvalidated | `setup.rs:226-301` | fixed (6575900) |
 | L-10 | All-punctuation artist → malformed Lucene query → hard error instead of fallback chain | `musicbrainz.rs:96, 114-117` | open |
 | L-11 | `scripts_of` misses CJK Ext-B (U+20000+) — rare-kanji titles defeat the script-mismatch guard | `matching.rs:239-270` | open |
 | L-12 | Empty local artist scores 0.0 at full 0.15 weight instead of being excluded → silently disables auto-accept | `matching.rs:49-53, 289-298` | open |
@@ -345,7 +345,7 @@ alias documented in spec but unimplemented.
 | L-23 | Byte-slice of album MBID would panic on non-ASCII (`chars().take(8)` is free) | `detail.rs:825` | open |
 | L-24 | Resolver hint drift: comment promises `S` skip key that doesn't exist; hint hardcodes "1-5" while handler takes 1-9 and `match_candidates` is configurable | `wizard.rs:891-899`, `import/render.rs:195` | open |
 | L-25 | Collection-detail organize notice built then discarded (`let _notice`) | `handlers.rs:439-444` | open |
-| L-26 | Organize CLI filter flags silently non-exclusive (artist wins) — clap `ArgGroup` | `cli/mod.rs:59-72`, `main.rs:302-312` | open |
+| L-26 | Organize CLI filter flags silently non-exclusive (artist wins) — clap `ArgGroup` | `cli/mod.rs:59-72`, `main.rs:302-312` | fixed (6575900) |
 | L-27 | flake.nix installs `stable.latest` while claiming to match mise's 1.94.1 | `flake.nix:31-32` | open |
 | L-28 | Doc comment for `escape_lucene` sits on `error_chain` | `musicbrainz.rs:880-884` | open |
 | L-29 | ~20 clippy warnings (`cargo clippy --fix` clears about half) | various | open |
