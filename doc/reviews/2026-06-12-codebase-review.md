@@ -209,14 +209,14 @@ non-UTF-8 stem to `""` → `" (2).mp3"` (`organizer.rs:152-161`).
 ## Medium
 
 ### DB-4 — Migrations neither atomic nor re-runnable; mid-chain failure bricks the DB
-**Status:** open · `src/db/schema.rs:16-45`, `migrations/002_fts_triggers.sql`
+**Status:** fixed (b06f8a2) · `src/db/schema.rs:16-45`, `migrations/002_fts_triggers.sql`
 `user_version` stamped once at the end; `execute_batch` not transactional. A
 mid-chain failure re-runs earlier migrations on next open → "trigger already
 exists" forever. Fix: stamp per-step inside transactions. Also guard against
 down-stamping a newer DB (`schema.rs:42` writes unconditionally).
 
 ### DB-5 — FTS `album_title` goes permanently stale after album rename
-**Status:** open · `queries.rs:864-870, 1087-1103`, `src/tui/mod.rs:39-45`
+**Status:** fixed (b06f8a2) · `queries.rs:864-870, 1087-1103`, `src/tui/mod.rs:39-45`
 Triggers only on `tracks`; rebuild only runs when FTS is completely empty.
 `rename_album` (result `.ok()`ed at `detail.rs:353`) leaves search matching the
 old title.
@@ -256,7 +256,7 @@ field; serde drops it) with a stale version and a URL differing from the
 compiled-in constant (`musicbrainz.rs:10` says kyoku-project, setup says balor).
 
 ### EXT-4 — Wizard tiebreaker rescoring biased by hardcoded `api_score = 100`
-**Status:** open · `wizard.rs:647-665`, `musicbrainz.rs:787`
+**Status:** fixed (b06f8a2) · `wizard.rs:647-665`, `musicbrainz.rs:787`
 Real search score restored *after* `new_score` is computed — refetched candidates
 get a flat 1.0 on the 0.10-weight API factor exactly when candidates are near-tied.
 
@@ -324,19 +324,19 @@ alias documented in spec but unimplemented.
 | L-2 | Tag *write* failures reported as `TagRead` (and point at the tmp path) | `tagger.rs:466-471` | open |
 | L-3 | Cover art written non-atomically; tag editor's copy-tmp-rename pattern exists to reuse; `to_string_lossy` into DB | `detail.rs:649-652` | open |
 | L-4 | LIKE patterns don't escape `%`/`_`; all-`"` FTS term is a syntax error; `fts_count` errors `unwrap_or(0)`; LIKE fallback inconsistently skips album titles | `queries.rs:463-466, 518-544, 634` | open |
-| L-5 | No index on `tracks.mbid` (scan per track during dup detect); none on `(title, album_artist)`; `idx_tracks_path` redundant with UNIQUE | `migrations/001_initial.sql` | open |
+| L-5 | No index on `tracks.mbid` (scan per track during dup detect); none on `(title, album_artist)`; `idx_tracks_path` redundant with UNIQUE | `migrations/001_initial.sql` | fixed (b06f8a2) |
 | L-6 | Cross-device fallback fires on *any* rename error, masking cause — match `ErrorKind::CrossesDevices` (stable 1.85) | `organizer.rs:445-449, 547-551` | open |
 | L-7 | `q` quits from a dirty editor, no prompt (import view got one for this reason) | `app.rs:140-146` | open |
 | L-8 | `missing_sources` not re-checked at apply (stale plan) — folded into ORG-1c | `organizer.rs:580-584` | fixed (240157a) |
 | L-9 | Setup writes unescaped paths into TOML (a `"` in a path produces the broken config that trips EXT-1); inbox entries unvalidated | `setup.rs:226-301` | fixed (6575900) |
-| L-10 | All-punctuation artist → malformed Lucene query → hard error instead of fallback chain | `musicbrainz.rs:96, 114-117` | open |
+| L-10 | All-punctuation artist → malformed Lucene query → hard error instead of fallback chain | `musicbrainz.rs:96, 114-117` | fixed (b06f8a2) |
 | L-11 | `scripts_of` misses CJK Ext-B (U+20000+) — rare-kanji titles defeat the script-mismatch guard | `matching.rs:239-270` | open |
 | L-12 | Empty local artist scores 0.0 at full 0.15 weight instead of being excluded → silently disables auto-accept | `matching.rs:49-53, 289-298` | open |
 | L-13 | Duration tolerance scales with `local_track_titles.len()` not `local_track_count` (latent) | `matching.rs:137` | open |
 | L-14 | `score_release` doc weights wrong on 3 of 7 factors | `matching.rs:22-30` | open |
-| L-15 | Tiebreaker `fetch_release` failure swallowed with no log | `wizard.rs:647` | open |
-| L-16 | `insert_track` silently drops `Track.mbid` (compensated by separate update); `channels`/`acoustid`/`chromaprint` are dead columns | `queries.rs:84-115` | open |
-| L-17 | `initialize` can down-stamp a newer DB — folded into DB-4 | `schema.rs:42` | open |
+| L-15 | Tiebreaker `fetch_release` failure swallowed with no log | `wizard.rs:647` | fixed (b06f8a2) |
+| L-16 | `insert_track` silently drops `Track.mbid` (compensated by separate update); `channels`/`acoustid`/`chromaprint` are dead columns | `queries.rs:84-115` | fixed (b06f8a2) |
+| L-17 | `initialize` can down-stamp a newer DB — folded into DB-4 | `schema.rs:42` | fixed (b06f8a2) |
 | L-18 | Collection-copy lifecycle: existing-on-disk skip never backfills NULL `collection_file_path`; template change strands old copies | `organizer.rs:297-301, 339-344` | open |
 | L-19 | `DeletePlan::deletable_file_count` double-counts when collection copy *is* the primary | `pruner.rs:101-137` | open |
 | L-20 | Importer parses every file twice with lofty (doubles I/O on large imports) | `importer.rs:219-224` | open |
