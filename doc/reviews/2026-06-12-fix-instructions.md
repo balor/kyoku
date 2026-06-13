@@ -239,8 +239,11 @@ read it back.
    first.
 
 ### CORE-2 — copy mode repoints DB at the copy; original re-importable (MEDIUM)
-**Needs a design decision from the owner before implementing.** The two
-coherent designs:
+**Owner decision (2026-06-13): accepted / not planned.** Copy mode may leave
+original source files eligible for later import; adding an `imported_sources`
+tracker is considered too much model complexity for now.
+
+Original options considered:
 - (a) *Library copy is canonical* (current pointer behavior, recommended):
   keep `update_track_path` to the destination, but record the source path so
   it stops re-surfacing. Add a small `imported_sources(path TEXT PRIMARY
@@ -250,20 +253,15 @@ coherent designs:
   entirely; the plan already skips when the destination exists, so re-runs
   are idempotent. Downside: the organized tree contains files the DB doesn't
   point at, and delete/retag flows operate on the original.
-Present both to the owner; implement (a) unless told otherwise. Test: import
-→ organize in copy mode → `scan_inbox` must return empty.
+Do not implement unless the owner reopens this decision.
 
 ### CORE-3 — importer groups by directory only (MEDIUM)
-In `src/core/importer.rs::group_into_albums`: the per-file album tag is
-available in `tag_data_map` (the "we don't have album on Track" comment is
-stale — delete it). Change the group key from `source_dir` to
-`(source_dir, normalized_album_tag)` where the normalization is
-trim+lowercase, falling back to the directory name when the album tag is
-empty. `ordered_group_indices` already computes a per-item `album_key` —
-reuse that logic, don't duplicate it. Then the insert phase's
-`get_or_create_album` call per group is correct by construction.
-Test: one directory containing files tagged Album A and Album B → two
-groups / two album rows.
+**Owner decision (2026-06-13): accepted / not planned.** Keep directory
+cohesion as the grouping model. Commit `8693f47` made the import wizard more
+informative by annotating review groups with album-tag context, including mixed
+album-tag directories, without changing grouping behavior.
+
+Do not split groups by album tag unless the owner reopens this decision.
 
 ### CORE-4 — deletion promote/detach bugs (MEDIUM)
 Three related fixes:

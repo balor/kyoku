@@ -222,27 +222,34 @@ Triggers only on `tracks`; rebuild only runs when FTS is completely empty.
 old title.
 
 ### CORE-1 — `organize_operation` is a free string; typo silently degrades copy→move
-**Status:** open · `src/config/settings.rs:55`, `organizer.rs:442,544`
+**Status:** fixed (8693f47) · `src/config/settings.rs:55`, `organizer.rs:442,544`
 `if operation == "copy" else move` — `"Copy"`, `"cp"`, any typo moves files the
 user asked to copy. Make it a serde enum (pattern exists in the same file).
 Also unvalidated: `auto_match_threshold` (>1.0 silently disables auto-accept),
 `rate_limit_ms` (0 disables MB throttling).
 
 ### CORE-2 — Copy mode repoints DB at the copy; original becomes re-importable
-**Status:** open · `organizer.rs:442-456`
+**Status:** accepted / not planned · `organizer.rs:442-456`
 `update_track_path` rewrites to the destination even in copy mode, so the kept
 original drops out of known-paths: `scan_inbox` re-surfaces it, re-import creates
 a second row, next organize copies it again with " (2)". Each cycle can duplicate
 the library.
 
+Owner decision: copy mode intentionally leaves the original eligible for later
+import; adding a separate source-path tracker is not worth the added model
+complexity.
+
 ### CORE-3 — Importer groups by directory only; first track's album tag stamps the group
-**Status:** open · `src/core/importer.rs:94-123, 304-345`
+**Status:** accepted / not planned (UI annotated in 8693f47) · `src/core/importer.rs:94-123, 304-345`
 Mixed folders get welded into one wrong album even though per-file album tags
 sit in `tag_data_map` (the "we don't have album on Track" comment is stale).
 `ordered_group_indices` already computes a per-item `album_key` the grouping ignores.
 
+Owner decision: keep directory grouping as-is. The import wizard now annotates
+mixed/source groups with album-tag context so the review step is explicit.
+
 ### CORE-4 — Promotion runs even when `delete_files=false`; collection promote skips disk check
-**Status:** open · `pruner.rs:277-286`, `organizer.rs:770-773, 790-809`
+**Status:** fixed (8693f47) · `pruner.rs:277-286`, `organizer.rs:770-773, 790-809`
 With files kept, the primary file is stranded untracked (not orphan-tracked).
 Collection deletion promotes to any non-NULL `collection_file_path` with no
 `.exists()` check (album deletion checks, `pruner.rs:167-172`); `.ok()` also
@@ -320,12 +327,12 @@ alias documented in spec but unimplemented.
 
 | ID | Finding | Where | Status |
 |----|---------|-------|--------|
-| L-1 | Tagger tmp files keep real audio extensions → re-imported as tracks | `tagger.rs:483-495` | open |
-| L-2 | Tag *write* failures reported as `TagRead` (and point at the tmp path) | `tagger.rs:466-471` | open |
-| L-3 | Cover art written non-atomically; tag editor's copy-tmp-rename pattern exists to reuse; `to_string_lossy` into DB | `detail.rs:649-652` | open |
+| L-1 | Tagger tmp files keep real audio extensions → re-imported as tracks | `tagger.rs:483-495` | fixed (8693f47) |
+| L-2 | Tag *write* failures reported as `TagRead` (and point at the tmp path) | `tagger.rs:466-471` | fixed (8693f47) |
+| L-3 | Cover art written non-atomically; tag editor's copy-tmp-rename pattern exists to reuse; `to_string_lossy` into DB | `detail.rs:649-652` | fixed (8693f47) |
 | L-4 | LIKE patterns don't escape `%`/`_`; all-`"` FTS term is a syntax error; `fts_count` errors `unwrap_or(0)`; LIKE fallback inconsistently skips album titles | `queries.rs:463-466, 518-544, 634` | open |
 | L-5 | No index on `tracks.mbid` (scan per track during dup detect); none on `(title, album_artist)`; `idx_tracks_path` redundant with UNIQUE | `migrations/001_initial.sql` | fixed (b06f8a2) |
-| L-6 | Cross-device fallback fires on *any* rename error, masking cause — match `ErrorKind::CrossesDevices` (stable 1.85) | `organizer.rs:445-449, 547-551` | open |
+| L-6 | Cross-device fallback fires on *any* rename error, masking cause — match `ErrorKind::CrossesDevices` (stable 1.85) | `organizer.rs:445-449, 547-551` | fixed (8693f47) |
 | L-7 | `q` quits from a dirty editor, no prompt (import view got one for this reason) | `app.rs:140-146` | open |
 | L-8 | `missing_sources` not re-checked at apply (stale plan) — folded into ORG-1c | `organizer.rs:580-584` | fixed (240157a) |
 | L-9 | Setup writes unescaped paths into TOML (a `"` in a path produces the broken config that trips EXT-1); inbox entries unvalidated | `setup.rs:226-301` | fixed (6575900) |
@@ -337,10 +344,10 @@ alias documented in spec but unimplemented.
 | L-15 | Tiebreaker `fetch_release` failure swallowed with no log | `wizard.rs:647` | fixed (b06f8a2) |
 | L-16 | `insert_track` silently drops `Track.mbid` (compensated by separate update); `channels`/`acoustid`/`chromaprint` are dead columns | `queries.rs:84-115` | fixed (b06f8a2) |
 | L-17 | `initialize` can down-stamp a newer DB — folded into DB-4 | `schema.rs:42` | fixed (b06f8a2) |
-| L-18 | Collection-copy lifecycle: existing-on-disk skip never backfills NULL `collection_file_path`; template change strands old copies | `organizer.rs:297-301, 339-344` | open |
-| L-19 | `DeletePlan::deletable_file_count` double-counts when collection copy *is* the primary | `pruner.rs:101-137` | open |
-| L-20 | Importer parses every file twice with lofty (doubles I/O on large imports) | `importer.rs:219-224` | open |
-| L-21 | Year read only via `ItemKey::Year` + `parse::<u32>` — TDRC / `YYYY-MM-DD` lose the year → "Album (0000)" | `tagger.rs:76-80` | open |
+| L-18 | Collection-copy lifecycle: existing-on-disk skip never backfills NULL `collection_file_path`; template change strands old copies | `organizer.rs:297-301, 339-344` | partial (8693f47; backfill fixed, template-change move remains TODO) |
+| L-19 | `DeletePlan::deletable_file_count` double-counts when collection copy *is* the primary | `pruner.rs:101-137` | fixed (8693f47) |
+| L-20 | Importer parses every file twice with lofty (doubles I/O on large imports) | `importer.rs:219-224` | fixed (8693f47) |
+| L-21 | Year read only via `ItemKey::Year` + `parse::<u32>` — TDRC / `YYYY-MM-DD` lose the year → "Album (0000)" | `tagger.rs:76-80` | fixed (8693f47) |
 | L-22 | `.expect()` on batch refs in conflict renderer — one refactor from a panic | `import/render.rs:940, 988` | open |
 | L-23 | Byte-slice of album MBID would panic on non-ASCII (`chars().take(8)` is free) | `detail.rs:825` | open |
 | L-24 | Resolver hint drift: comment promises `S` skip key that doesn't exist; hint hardcodes "1-5" while handler takes 1-9 and `match_candidates` is configurable | `wizard.rs:891-899`, `import/render.rs:195` | open |
