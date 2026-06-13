@@ -6,7 +6,7 @@ use crate::core::paths;
 use crate::error::Result;
 
 /// Current schema version.
-const SCHEMA_VERSION: i32 = 7;
+const SCHEMA_VERSION: i32 = 8;
 
 /// Initialize the database schema. Creates tables if they don't exist
 /// and runs any pending migrations. `music_dir` is needed by the v7
@@ -23,28 +23,36 @@ pub fn initialize(conn: &Connection, music_dir: &Path) -> Result<()> {
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
     let version = get_schema_version(conn)?;
+    if version > SCHEMA_VERSION {
+        return Err(crate::error::KyokuError::Config(format!(
+            "database schema v{} is newer than this kyoku supports (v{}) — upgrade kyoku",
+            version, SCHEMA_VERSION
+        )));
+    }
     if version < 1 {
-        apply_v1(conn)?;
+        run_step(conn, 1, apply_v1)?;
     }
     if version < 2 {
-        apply_v2(conn)?;
+        run_step(conn, 2, apply_v2)?;
     }
     if version < 3 {
-        apply_v3(conn)?;
+        run_step(conn, 3, apply_v3)?;
     }
     if version < 4 {
-        apply_v4(conn)?;
+        run_step(conn, 4, apply_v4)?;
     }
     if version < 5 {
-        apply_v5(conn)?;
+        run_step(conn, 5, apply_v5)?;
     }
     if version < 6 {
-        apply_v6(conn)?;
+        run_step(conn, 6, apply_v6)?;
     }
     if version < 7 {
-        apply_v7(conn, music_dir)?;
+        run_step(conn, 7, |conn| apply_v7(conn, music_dir))?;
     }
-    set_schema_version(conn, SCHEMA_VERSION)?;
+    if version < 8 {
+        run_step(conn, 8, apply_v8)?;
+    }
 
     Ok(())
 }
@@ -56,6 +64,18 @@ fn get_schema_version(conn: &Connection) -> Result<i32> {
 
 fn set_schema_version(conn: &Connection, version: i32) -> Result<()> {
     conn.pragma_update(None, "user_version", version)?;
+    Ok(())
+}
+
+fn run_step(
+    conn: &Connection,
+    version: i32,
+    f: impl FnOnce(&Connection) -> Result<()>,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    f(conn)?;
+    set_schema_version(conn, version)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -78,9 +98,7 @@ fn apply_v3(conn: &Connection) -> Result<()> {
     let has_column: bool = {
         let mut stmt = conn.prepare("PRAGMA table_info(albums)")?;
         let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
-        names
-            .filter_map(|r| r.ok())
-            .any(|n| n == "release_mbid")
+        names.filter_map(|r| r.ok()).any(|n| n == "release_mbid")
     };
     if has_column {
         conn.execute_batch(include_str!("../../migrations/003_drop_release_mbid.sql"))?;
@@ -99,7 +117,17 @@ fn apply_v5(conn: &Connection) -> Result<()> {
 }
 
 fn apply_v6(conn: &Connection) -> Result<()> {
-    conn.execute_batch(include_str!("../../migrations/006_fix_fts_delete_trigger.sql"))?;
+    conn.execute_batch(include_str!(
+        "../../migrations/006_fix_fts_delete_trigger.sql"
+    ))?;
+    Ok(())
+}
+
+fn apply_v8(conn: &Connection) -> Result<()> {
+    dedupe_collections_nocase(conn)?;
+    conn.execute_batch(include_str!(
+        "../../migrations/007_indexes_fts_collections.sql"
+    ))?;
     Ok(())
 }
 
@@ -118,19 +146,49 @@ fn apply_v7(conn: &Connection, music_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let tx = conn.unchecked_transaction()?;
-    rewrite_column(&tx, "tracks", "file_path", "id", music_dir, false)?;
+    rewrite_column(conn, "tracks", "file_path", "id", music_dir, false)?;
     rewrite_column(
-        &tx,
+        conn,
         "collection_tracks",
         "collection_file_path",
         "rowid",
         music_dir,
         true,
     )?;
-    rewrite_column(&tx, "albums", "cover_art_path", "id", music_dir, true)?;
-    rewrite_column(&tx, "orphaned_files", "file_path", "id", music_dir, false)?;
-    tx.commit()?;
+    rewrite_column(conn, "albums", "cover_art_path", "id", music_dir, true)?;
+    rewrite_column(conn, "orphaned_files", "file_path", "id", music_dir, false)?;
+    Ok(())
+}
+
+fn dedupe_collections_nocase(conn: &Connection) -> Result<()> {
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare("SELECT id, name FROM collections ORDER BY lower(name), id")?;
+        stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?
+    };
+
+    let mut keep_by_name = std::collections::HashMap::<String, i64>::new();
+    for (id, name) in rows {
+        let key = name.to_lowercase();
+        if let Some(&keep_id) = keep_by_name.get(&key) {
+            conn.execute(
+                "INSERT OR IGNORE INTO collection_tracks
+                 (collection_id, track_id, position, collection_file_path, added_at)
+                 SELECT ?1, track_id, position, collection_file_path, added_at
+                 FROM collection_tracks WHERE collection_id = ?2",
+                rusqlite::params![keep_id, id],
+            )?;
+            conn.execute(
+                "DELETE FROM collection_tracks WHERE collection_id = ?1",
+                [id],
+            )?;
+            conn.execute("DELETE FROM collections WHERE id = ?1", [id])?;
+        } else {
+            keep_by_name.insert(key, id);
+        }
+    }
     Ok(())
 }
 
@@ -193,6 +251,96 @@ mod tests {
 
         let version = get_schema_version(&conn).unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn initialize_rejects_newer_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        set_schema_version(&conn, 99).unwrap();
+
+        let err = initialize(&conn, Path::new("")).unwrap_err().to_string();
+
+        assert!(err.contains("database schema v99 is newer"), "{err}");
+    }
+
+    #[test]
+    fn initialize_half_migrated_db_fails_cleanly() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn, Path::new("")).unwrap();
+        set_schema_version(&conn, 1).unwrap();
+
+        let result = initialize(&conn, Path::new(""));
+
+        assert!(result.is_err());
+        assert_eq!(get_schema_version(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn v8_album_rename_updates_fts_album_title() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn, Path::new("")).unwrap();
+        let (album_id, _) = crate::db::queries::get_or_create_album(
+            &conn,
+            "Old Album",
+            Some("Artist"),
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tracks (album_id, title, artist, file_path, file_format, disc_number, tag_status)
+             VALUES (?1, 'Only Track', 'Artist', '/tmp/only.mp3', 'mp3', 1, 'unmatched')",
+            [album_id],
+        )
+        .unwrap();
+
+        crate::db::queries::rename_album(&conn, album_id, "New Album").unwrap();
+
+        let new_hits =
+            crate::db::queries::search_tracks(&conn, Path::new(""), "New Album", 10).unwrap();
+        let old_hits =
+            crate::db::queries::search_tracks(&conn, Path::new(""), "Old Album", 10).unwrap();
+        assert_eq!(new_hits.len(), 1);
+        assert!(old_hits.is_empty());
+    }
+
+    #[test]
+    fn v8_dedupes_collections_and_enforces_nocase_unique_names() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_v1(&conn).unwrap();
+        conn.execute("INSERT INTO collections (name) VALUES ('Mix'), ('mix')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO tracks (title, file_path, file_format, disc_number, tag_status)
+             VALUES ('A', '/a.mp3', 'mp3', 1, 'unmatched'),
+                    ('B', '/b.mp3', 'mp3', 1, 'unmatched')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO collection_tracks (collection_id, track_id) VALUES (1, 1), (2, 2)",
+            [],
+        )
+        .unwrap();
+
+        apply_v8(&conn).unwrap();
+
+        let collection_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM collections", [], |row| row.get(0))
+            .unwrap();
+        let membership_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM collection_tracks WHERE collection_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(collection_count, 1);
+        assert_eq!(membership_count, 2);
+        assert!(conn
+            .execute("INSERT INTO collections (name) VALUES ('MIX')", [])
+            .is_err());
     }
 
     /// Existing DBs created before v7 hold absolute paths under music_dir.

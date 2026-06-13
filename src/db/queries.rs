@@ -92,9 +92,9 @@ pub fn insert_track(
     conn.execute(
         "INSERT INTO tracks (
             album_id, title, artist, track_number, disc_number,
-            duration_ms, file_path, file_size, file_format,
+            duration_ms, mbid, file_path, file_size, file_format,
             bitrate, sample_rate, source_dir, tag_status
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         rusqlite::params![
             album_id,
             track.title,
@@ -102,6 +102,7 @@ pub fn insert_track(
             track.track_number,
             track.disc_number,
             track.duration_ms.map(|d| d as i64),
+            track.mbid.as_deref(),
             file_path,
             file_size,
             track.file_format.as_str(),
@@ -189,7 +190,7 @@ pub fn get_album_cover_path(
 pub fn get_or_create_collection(conn: &Connection, name: &str) -> Result<(i64, bool)> {
     let existing: Option<i64> = conn
         .query_row(
-            "SELECT id FROM collections WHERE name = ?1",
+            "SELECT id FROM collections WHERE name = ?1 COLLATE NOCASE",
             [name],
             |row| row.get(0),
         )
@@ -792,15 +793,19 @@ pub fn get_collection_file_paths(
     let mut map = std::collections::HashMap::new();
     for row in rows {
         let (id, stored) = row?;
-        map.insert(id, paths::from_db_path(&stored, music_dir).display().to_string());
+        map.insert(
+            id,
+            paths::from_db_path(&stored, music_dir)
+                .display()
+                .to_string(),
+        );
     }
     Ok(map)
 }
 
-/// Create a new collection.
+/// Create a collection, or return the existing case-insensitive match.
 pub fn create_collection(conn: &Connection, name: &str) -> Result<i64> {
-    conn.execute("INSERT INTO collections (name) VALUES (?1)", [name])?;
-    Ok(conn.last_insert_rowid())
+    get_or_create_collection(conn, name).map(|(id, _)| id)
 }
 
 /// Delete a collection (cascade removes track associations).
@@ -1217,7 +1222,9 @@ pub fn get_all_tracks_for_organize(
             artist: row.get(2)?,
             track_number: row.get::<_, Option<u32>>(3)?,
             disc_number: row.get::<_, Option<u32>>(4)?.unwrap_or(1),
-            file_path: paths::from_db_path(&stored, music_dir).display().to_string(),
+            file_path: paths::from_db_path(&stored, music_dir)
+                .display()
+                .to_string(),
             album_id: row.get(6)?,
             album_title: row.get(7)?,
             album_artist: row.get(8)?,
@@ -1280,7 +1287,10 @@ pub fn get_all_tracks_for_organize(
 }
 
 fn path_is_same_or_child(path: &Path, prefix: &Path) -> bool {
-    path == prefix || path.strip_prefix(prefix).is_ok_and(|rel| !rel.as_os_str().is_empty())
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_ok_and(|rel| !rel.as_os_str().is_empty())
 }
 
 /// List every (track_id, file_path) currently in the library.
@@ -1291,7 +1301,9 @@ pub fn list_all_track_paths(conn: &Connection, music_dir: &Path) -> Result<Vec<(
         let stored: String = row.get(1)?;
         Ok((
             row.get::<_, i64>(0)?,
-            paths::from_db_path(&stored, music_dir).display().to_string(),
+            paths::from_db_path(&stored, music_dir)
+                .display()
+                .to_string(),
         ))
     })?;
     let mut result = Vec::new();
@@ -1318,7 +1330,9 @@ pub fn list_all_collection_paths(
         Ok((
             row.get::<_, i64>(0)?,
             row.get::<_, i64>(1)?,
-            paths::from_db_path(&stored, music_dir).display().to_string(),
+            paths::from_db_path(&stored, music_dir)
+                .display()
+                .to_string(),
         ))
     })?;
     let mut result = Vec::new();
@@ -1386,8 +1400,7 @@ fn map_album_row(row: &rusqlite::Row<'_>, music_dir: &Path) -> rusqlite::Result<
         mbid: row.get(7)?,
         label: row.get(8)?,
         genre: row.get(9)?,
-        cover_art_path: cover
-            .map(|s| paths::from_db_path(&s, music_dir).display().to_string()),
+        cover_art_path: cover.map(|s| paths::from_db_path(&s, music_dir).display().to_string()),
     })
 }
 
@@ -1566,7 +1579,9 @@ pub fn list_orphans(conn: &Connection, music_dir: &Path) -> Result<Vec<OrphanFil
         let stored: String = row.get(1)?;
         Ok(OrphanFileRow {
             id: row.get(0)?,
-            file_path: paths::from_db_path(&stored, music_dir).display().to_string(),
+            file_path: paths::from_db_path(&stored, music_dir)
+                .display()
+                .to_string(),
             title: row.get(2)?,
             artist: row.get(3)?,
             album_title: row.get(4)?,
@@ -1642,8 +1657,7 @@ mod tests {
         let conn = db::open_memory().unwrap();
         let id = insert_track(&conn, no_root(), &test_track(), None, None).unwrap();
 
-        update_track_fields(&conn, id, &[("track_number", "3/12"), ("disc_number", "")])
-            .unwrap();
+        update_track_fields(&conn, id, &[("track_number", "3/12"), ("disc_number", "")]).unwrap();
 
         let row = get_track(&conn, no_root(), id)
             .unwrap()
@@ -1653,12 +1667,18 @@ mod tests {
         // Plain numbers and junk round-trip sanely too.
         update_track_fields(&conn, id, &[("track_number", " 7 ")]).unwrap();
         assert_eq!(
-            get_track(&conn, no_root(), id).unwrap().unwrap().track_number,
+            get_track(&conn, no_root(), id)
+                .unwrap()
+                .unwrap()
+                .track_number,
             Some(7)
         );
         update_track_fields(&conn, id, &[("track_number", "n/a")]).unwrap();
         assert_eq!(
-            get_track(&conn, no_root(), id).unwrap().unwrap().track_number,
+            get_track(&conn, no_root(), id)
+                .unwrap()
+                .unwrap()
+                .track_number,
             None,
             "non-numeric input must become NULL, not TEXT"
         );
@@ -1671,7 +1691,11 @@ mod tests {
         assert_eq!(parse_leading_u32(" 04 "), Some(4));
         assert_eq!(parse_leading_u32(""), None);
         assert_eq!(parse_leading_u32("A1"), None);
-        assert_eq!(parse_leading_u32("99999999999999999999"), None, "overflow → NULL");
+        assert_eq!(
+            parse_leading_u32("99999999999999999999"),
+            None,
+            "overflow → NULL"
+        );
     }
 
     #[test]
@@ -1681,6 +1705,22 @@ mod tests {
         let id = insert_track(&conn, no_root(), &track, None, Some(5000)).unwrap();
         assert!(id > 0);
         assert!(track_exists_by_path(&conn, no_root(), "/test/song.mp3").unwrap());
+    }
+
+    #[test]
+    fn insert_track_persists_mbid() {
+        let conn = db::open_memory().unwrap();
+        let mut track = test_track();
+        track.mbid = Some("recording-mbid".to_string());
+
+        let id = insert_track(&conn, no_root(), &track, None, None).unwrap();
+        let stored: Option<String> = conn
+            .query_row("SELECT mbid FROM tracks WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        assert_eq!(stored.as_deref(), Some("recording-mbid"));
     }
 
     #[test]
@@ -1715,6 +1755,11 @@ mod tests {
         let (coll_id2, created2) = get_or_create_collection(&conn, "My Playlist").unwrap();
         assert_eq!(coll_id, coll_id2);
         assert!(!created2);
+
+        // Case-insensitive match returns the existing row too.
+        let (coll_id3, created3) = get_or_create_collection(&conn, "my playlist").unwrap();
+        assert_eq!(coll_id, coll_id3);
+        assert!(!created3);
 
         // Add a track
         let track = test_track();

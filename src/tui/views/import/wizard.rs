@@ -401,7 +401,9 @@ impl ImportView {
             // Recover a poisoned lock: a panic in one MB thread must not
             // cascade into panics in every later search thread. The client
             // holds no state worth protecting beyond the throttle timestamp.
-            let mut client = client.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut client = client
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             match client.fetch_release(&mbid) {
                 Ok(release) => {
                     let score = matching::score_release(
@@ -586,7 +588,9 @@ impl ImportView {
             // All MB I/O for this thread happens under the shared lock so
             // the client's throttler serializes requests across prefetches.
             // Poison recovery: see fetch-by-MBID thread above.
-            let mut client = client.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut client = client
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut search_error: Option<String> = None;
             let mut candidates: Vec<MbCandidate> =
                 match client.search_releases(&artist, &album, track_count, limit) {
@@ -648,25 +652,30 @@ impl ImportView {
                 if tied_count > 1 {
                     for i in 0..tied_count {
                         let mbid = candidates[i].release.id.clone();
-                        if let Ok(full) = client.fetch_release(&mbid) {
-                            let new_score = matching::score_release(
-                                &artist,
-                                &album,
-                                year,
-                                track_count,
-                                &titles,
-                                total_ms,
-                                &full,
-                            );
-                            // Preserve the search-result API score (full release fetch
-                            // returns api_score = 100 because it's not a search hit)
-                            let preserved_api = candidates[i].release.api_score;
-                            let mut full = full;
-                            full.api_score = preserved_api;
-                            candidates[i] = MbCandidate {
-                                release: full,
-                                score: new_score,
-                            };
+                        match client.fetch_release(&mbid) {
+                            Ok(mut full) => {
+                                // Preserve the search-result API score before rescoring:
+                                // full release fetch returns api_score = 100 because it is
+                                // not a search hit, and using that flat score biases ties.
+                                let preserved_api = candidates[i].release.api_score;
+                                full.api_score = preserved_api;
+                                let new_score = matching::score_release(
+                                    &artist,
+                                    &album,
+                                    year,
+                                    track_count,
+                                    &titles,
+                                    total_ms,
+                                    &full,
+                                );
+                                candidates[i] = MbCandidate {
+                                    release: full,
+                                    score: new_score,
+                                };
+                            }
+                            Err(e) => {
+                                tracing::warn!("tied-leader refine fetch {} failed: {}", mbid, e)
+                            }
                         }
                     }
                     // Re-sort after refetching

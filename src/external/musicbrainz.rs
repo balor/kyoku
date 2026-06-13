@@ -5,10 +5,13 @@ use serde::Deserialize;
 
 use crate::config::settings::NameScriptPreference;
 use crate::error::Result;
-use crate::external::name_preference::{AliasKind, MbAlias, pick_preferred_name};
+use crate::external::name_preference::{pick_preferred_name, AliasKind, MbAlias};
 
-const USER_AGENT: &str =
-    concat!("kyoku/", env!("CARGO_PKG_VERSION"), " (https://github.com/kyoku-project/kyoku)");
+const USER_AGENT: &str = concat!(
+    "kyoku/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/kyoku-project/kyoku)"
+);
 const MB_BASE: &str = "https://musicbrainz.org/ws/2";
 
 #[derive(Debug, Clone)]
@@ -115,11 +118,20 @@ impl MbClient {
             None
         };
 
-        // First attempt: artist + album (string match on credit name)
-        let releases =
-            self.run_search_artist(&clean_artist, Some(&clean_album), limit, type_filter)?;
-        if !releases.is_empty() {
-            return Ok(releases);
+        // First attempt: artist + album (string match on credit name).
+        // All-punctuation artists clean down to empty; don't build the
+        // malformed Lucene clause `artist:()` in that case.
+        if !clean_artist.trim().is_empty() {
+            let releases =
+                self.run_search_artist(&clean_artist, Some(&clean_album), limit, type_filter)?;
+            if !releases.is_empty() {
+                return Ok(releases);
+            }
+        } else {
+            let releases = self.run_search_album(&clean_album, limit, type_filter)?;
+            if !releases.is_empty() {
+                return Ok(releases);
+            }
         }
 
         // Resolve the artist to an MBID via the artist endpoint, which indexes
@@ -148,10 +160,17 @@ impl MbClient {
 
         // Fallback 2: artist + album, no type filter (catches misclassified releases)
         if type_filter.is_some() {
-            let releases =
-                self.run_search_artist(&clean_artist, Some(&clean_album), limit, None)?;
-            if !releases.is_empty() {
-                return Ok(releases);
+            if !clean_artist.trim().is_empty() {
+                let releases =
+                    self.run_search_artist(&clean_artist, Some(&clean_album), limit, None)?;
+                if !releases.is_empty() {
+                    return Ok(releases);
+                }
+            } else {
+                let releases = self.run_search_album(&clean_album, limit, None)?;
+                if !releases.is_empty() {
+                    return Ok(releases);
+                }
             }
             if let Some(ref mbid) = arid {
                 let releases = self.run_search_arid(mbid, Some(&clean_album), limit, None)?;
@@ -227,15 +246,19 @@ impl MbClient {
         limit: u32,
         type_filter: Option<&str>,
     ) -> Result<Vec<MbRelease>> {
-        let mut query = if let Some(album) = album {
-            format!(
-                "artist:({}) AND release:({})",
-                escape_lucene(artist),
-                escape_lucene(album),
-            )
-        } else {
-            format!("artist:({})", escape_lucene(artist))
+        let Some(query) = build_artist_search_query(artist, album, type_filter) else {
+            return Ok(Vec::new());
         };
+        self.run_release_query(&query, limit)
+    }
+
+    fn run_search_album(
+        &mut self,
+        album: &str,
+        limit: u32,
+        type_filter: Option<&str>,
+    ) -> Result<Vec<MbRelease>> {
+        let mut query = format!("release:({})", escape_lucene(album));
         if let Some(tf) = type_filter {
             query.push_str(" AND ");
             query.push_str(tf);
@@ -251,11 +274,7 @@ impl MbClient {
         type_filter: Option<&str>,
     ) -> Result<Vec<MbRelease>> {
         let mut query = if let Some(album) = album {
-            format!(
-                "arid:{} AND release:({})",
-                arid,
-                escape_lucene(album),
-            )
+            format!("arid:{} AND release:({})", arid, escape_lucene(album),)
         } else {
             format!("arid:{}", arid)
         };
@@ -313,11 +332,7 @@ impl MbClient {
             match self.fetch_release_group_first_year(&rg_id) {
                 Ok(Some(y)) => r.year = Some(y),
                 Ok(None) => {}
-                Err(e) => tracing::debug!(
-                    "MB release-group {} year lookup failed: {}",
-                    rg_id,
-                    e
-                ),
+                Err(e) => tracing::debug!("MB release-group {} year lookup failed: {}", rg_id, e),
             }
         }
     }
@@ -431,9 +446,7 @@ impl MbClient {
     fn get_artist_aliases(&mut self, mbid: &str, canonical: &str) -> Result<&[MbAlias]> {
         if crate::external::matching::is_pure_latin(canonical) {
             // Still cache an empty slot so repeated lookups don't re-check.
-            self.artist_alias_cache
-                .entry(mbid.to_string())
-                .or_default();
+            self.artist_alias_cache.entry(mbid.to_string()).or_default();
             return Ok(self
                 .artist_alias_cache
                 .get(mbid)
@@ -486,9 +499,10 @@ impl MbClient {
                     }
                 }
             }
-            Err(AttemptError::Permanent(msg)) => Err(crate::error::KyokuError::External(
-                format!("MB {} failed: {}", op, msg),
-            )),
+            Err(AttemptError::Permanent(msg)) => Err(crate::error::KyokuError::External(format!(
+                "MB {} failed: {}",
+                op, msg
+            ))),
         }
     }
 
@@ -695,11 +709,7 @@ fn parse_full_release(v: &serde_json::Value) -> ParsedFullRelease {
 
     let first_credit = v["artist-credit"].as_array().and_then(|ac| ac.first());
     let artist = first_credit
-        .and_then(|c| {
-            c["name"]
-                .as_str()
-                .or_else(|| c["artist"]["name"].as_str())
-        })
+        .and_then(|c| c["name"].as_str().or_else(|| c["artist"]["name"].as_str()))
         .unwrap_or("")
         .to_string();
     let release_artist_mbid = first_credit
@@ -723,9 +733,7 @@ fn parse_full_release(v: &serde_json::Value) -> ParsedFullRelease {
         .and_then(|d| d.get(..4))
         .and_then(|y| y.parse::<i32>().ok());
 
-    let release_group_id = v["release-group"]["id"]
-        .as_str()
-        .map(|s| s.to_string());
+    let release_group_id = v["release-group"]["id"].as_str().map(|s| s.to_string());
 
     let country = v["country"].as_str().map(|s| s.to_string());
 
@@ -761,10 +769,7 @@ fn parse_full_release(v: &serde_json::Value) -> ParsedFullRelease {
                         .and_then(|c| c["artist"]["sort-name"].as_str())
                         .map(|s| s.to_string());
                     let duration_ms = t["length"].as_u64();
-                    let recording_id = t["recording"]["id"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string();
+                    let recording_id = t["recording"]["id"].as_str().unwrap_or("").to_string();
 
                     tracks.push(MbTrack {
                         disc,
@@ -887,6 +892,30 @@ fn strip_parenthesized_suffix(s: &str) -> String {
     s.to_string()
 }
 
+fn build_artist_search_query(
+    artist: &str,
+    album: Option<&str>,
+    type_filter: Option<&str>,
+) -> Option<String> {
+    if artist.trim().is_empty() {
+        return None;
+    }
+    let mut query = if let Some(album) = album {
+        format!(
+            "artist:({}) AND release:({})",
+            escape_lucene(artist),
+            escape_lucene(album),
+        )
+    } else {
+        format!("artist:({})", escape_lucene(artist))
+    };
+    if let Some(tf) = type_filter {
+        query.push_str(" AND ");
+        query.push_str(tf);
+    }
+    Some(query)
+}
+
 /// Escape special Lucene characters in a search query value.
 /// Flatten an error and its `.source()` chain into a single colon-separated
 /// string. reqwest's top-level Display is often just "error sending request",
@@ -904,8 +933,8 @@ fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
 
 fn escape_lucene(s: &str) -> String {
     let special = [
-        '+', '-', '&', '|', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':',
-        '\\', '/',
+        '+', '-', '&', '|', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':', '\\',
+        '/',
     ];
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -921,6 +950,13 @@ fn escape_lucene(s: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn artist_search_query_skips_empty_cleaned_artist() {
+        assert!(build_artist_search_query("", Some("Album"), None).is_none());
+        assert!(build_artist_search_query("   ", Some("Album"), None).is_none());
+        assert_eq!(strip_trailing_punct("..."), "");
+    }
 
     #[test]
     fn parse_full_release_preserves_medium_and_disc_numbers() {
