@@ -127,16 +127,33 @@ pub fn run(current: Settings) -> anyhow::Result<()> {
     println!("Common choices: ~/Downloads, ~/Music/Incoming");
     println!();
 
-    let mut inbox_dirs: Vec<String> = Vec::new();
+    let mut inbox_dirs: Vec<PathBuf> = Vec::new();
+    for existing in &current.library.inbox_dirs {
+        if validate_inbox_dir(existing).is_ok() {
+            println!("Keeping existing inbox: {}", existing.display());
+            inbox_dirs.push(existing.clone());
+        } else {
+            let prompt = format!(
+                "Existing inbox {} is not usable. Keep it anyway?",
+                existing.display()
+            );
+            if Confirm::new(&prompt).with_default(false).prompt()? {
+                inbox_dirs.push(existing.clone());
+            }
+        }
+    }
 
     // Offer any Nicotine+ download directories we can detect.
     for dir in detect_nicotine_download_dirs() {
+        if inbox_dirs.iter().any(|p| p == &dir) {
+            continue;
+        }
         let prompt = format!(
             "Detected Nicotine+ download folder: {}  —  add as inbox?",
             dir.display()
         );
         if Confirm::new(&prompt).with_default(true).prompt()? {
-            inbox_dirs.push(dir.display().to_string());
+            inbox_dirs.push(dir);
         }
     }
 
@@ -152,7 +169,35 @@ pub fn run(current: Settings) -> anyhow::Result<()> {
         if dir.trim().is_empty() {
             break;
         }
-        inbox_dirs.push(dir);
+
+        let expanded = config::paths::expand_tilde(&dir);
+        if !expanded.exists() {
+            let create = Confirm::new(&format!(
+                "{} does not exist. Create it?",
+                expanded.display()
+            ))
+            .with_default(true)
+            .prompt()?;
+            if !create {
+                println!("  → pick a different path.");
+                continue;
+            }
+            if let Err(e) = std::fs::create_dir_all(&expanded) {
+                println!("  Could not create directory: {}", e);
+                continue;
+            }
+        }
+        match validate_inbox_dir(&expanded) {
+            Ok(()) => {
+                if !inbox_dirs.iter().any(|p| p == &expanded) {
+                    inbox_dirs.push(expanded);
+                }
+            }
+            Err(reason) => {
+                println!("  {}", reason);
+                println!("  → pick a different path.");
+            }
+        }
     }
 
     // Name script preference
@@ -175,7 +220,10 @@ pub fn run(current: Settings) -> anyhow::Result<()> {
     let selected_script = Select::new("Name script:", scripts)
         .with_starting_cursor(script_default_idx)
         .prompt()?;
-    let name_script = selected_script.split(' ').next().unwrap_or("native");
+    let name_script = match selected_script.split(' ').next().unwrap_or("native") {
+        "latin" => NameScriptPreference::Latin,
+        _ => NameScriptPreference::Native,
+    };
 
     // Cover Art Archive download size
     println!();
@@ -200,7 +248,12 @@ pub fn run(current: Settings) -> anyhow::Result<()> {
     let selected_size = Select::new("Cover art size:", sizes)
         .with_starting_cursor(size_default_idx)
         .prompt()?;
-    let cover_art_size = selected_size.split_whitespace().next().unwrap_or("500");
+    let cover_art_size = match selected_size.split_whitespace().next().unwrap_or("500") {
+        "250" => CoverArtSize::Px250,
+        "1200" => CoverArtSize::Px1200,
+        "original" => CoverArtSize::Original,
+        _ => CoverArtSize::Px500,
+    };
 
     // Theme
     println!();
@@ -217,88 +270,24 @@ pub fn run(current: Settings) -> anyhow::Result<()> {
     let selected = Select::new("Theme:", themes)
         .with_starting_cursor(default_idx)
         .prompt()?;
-    let theme = selected.split(' ').next().unwrap_or("tokyo-night");
+    let theme = selected
+        .split(' ')
+        .next()
+        .unwrap_or("tokyo-night")
+        .to_string();
 
-    // Build config
-    let inbox_toml = if inbox_dirs.is_empty() {
-        "[]".to_string()
-    } else {
-        let entries: Vec<String> = inbox_dirs
-            .iter()
-            .map(|d| format!("    \"{}\"", d))
-            .collect();
-        format!("[\n{},\n]", entries.join(",\n"))
-    };
+    // Preserve the existing settings and only overwrite fields this wizard
+    // actually asked about. This keeps custom templates, thresholds,
+    // write_tags, show_cover_preview, etc. intact on setup re-runs.
+    let mut next = current.clone();
+    next.library.music_dir = PathBuf::from(&music_dir);
+    next.library.data_dir = PathBuf::from(&db_dir);
+    next.library.inbox_dirs = inbox_dirs;
+    next.musicbrainz.name_script = name_script;
+    next.musicbrainz.cover_art_size = cover_art_size;
+    next.ui.theme = theme;
 
-    let config_content = format!(
-        r#"[library]
-# Root directory for managed music files
-music_dir = "{music_dir}"
-
-# Directory holding library.db. Override the platform default to keep the
-# DB next to the music it indexes (useful for external drives).
-data_dir = "{db_dir}"
-
-# Inbox directories — kyoku scans these for new/unimported files.
-inbox_dirs = {inbox_toml}
-
-# Path template for organizing album files (used by `kyoku organize`)
-# Available variables: {{artist}}, {{album_artist}}, {{album}}, {{year}}, {{track}},
-#                      {{title}}, {{disc}}, {{genre}}, {{label}}, {{ext}}
-path_template = "{{album_artist}}/{{album}} ({{year}})/{{disc:0}}-{{track:02}} {{title}}.{{ext}}"
-
-# Template for single-disc albums (disc_total == 1)
-path_template_single_disc = "{{album_artist}}/{{album}} ({{year}})/{{track:02}} {{title}}.{{ext}}"
-
-# Default template for tracks copied/linked into a collection (when the
-# collection itself doesn't override it). Available variables: same as
-# path_template, plus {{collection}} and {{position}}. Use {{position}}
-# for collection numbering; {{track}} always means the track-number tag.
-collection_path_template = "Collections/{{collection}}/{{position:02}} {{album_artist}} - {{title}}.{{ext}}"
-
-# Template for "loose" tracks — files with no album / not part of a
-# collection. Kept simple on purpose so they're easy to find.
-loose_path_template = "_loose/{{artist}} - {{title}}.{{ext}}"
-
-[import]
-# Options: "move" (move to music_dir), "copy" (copy, keep originals)
-organize_operation = "move"
-
-# Auto-accept MusicBrainz matches at or above this similarity (0.0 - 1.0).
-# Lower = more aggressive auto-selection during the Review step.
-auto_match_threshold = 0.85
-
-# Number of MusicBrainz match candidates fetched per group during search.
-match_candidates = 5
-
-[tagging]
-# Write tags back to files (if false, only updates DB)
-write_tags = true
-
-[musicbrainz]
-user_agent = "kyoku/0.1.0 (https://github.com/balor/kyoku)"
-rate_limit_ms = 1100
-# "native" keeps MB canonical names; "latin" prefers romanised alias when present.
-name_script = "{name_script}"
-# Cover Art Archive download size for the `C` fetch in album detail.
-# Options:
-#   "250"      — tiny thumbnail, ~20 KB
-#   "500"      — default, ~80 KB, plenty for the TUI preview
-#   "1200"     — ~300 KB, good if you also use a media server / web UI
-#   "original" — uploader's full image (often 1-8 MB);
-#                falls back to 1200 then 500 when no original is archived
-cover_art_size = "{cover_art_size}"
-
-[ui]
-# Dark: "tokyo-night", "kanagawa"
-# Light: "tokyo-night-light", "kanagawa-lotus"
-theme = "{theme}"
-# Render the album cover preview in album detail. Set to false on
-# terminal/multiplexer combos that can't draw halfblock graphics
-# cleanly (some zellij + native-protocol terminals show a blank gap).
-show_cover_preview = true
-"#,
-    );
+    let config_content = render_config(&next)?;
 
     // Write config
     if let Some(parent) = config_path.parent() {
@@ -306,7 +295,7 @@ show_cover_preview = true
     }
     std::fs::write(&config_path, config_content)?;
 
-    let db_path = config::paths::expand_tilde(&db_dir);
+    let db_path = config::paths::expand_tilde(&next.library.data_dir);
 
     println!();
     println!("Config written to {}", config_path.display());
@@ -315,6 +304,31 @@ show_cover_preview = true
     println!("You're all set! Run `kyoku` to launch the TUI, or `kyoku --help` for commands.");
 
     Ok(())
+}
+
+fn validate_inbox_dir(path: &std::path::Path) -> std::result::Result<(), String> {
+    if !path.exists() {
+        return Err(format!("does not exist: {}", path.display()));
+    }
+    if !path.is_dir() {
+        return Err(format!("not a directory: {}", path.display()));
+    }
+    Ok(())
+}
+
+fn render_config(settings: &Settings) -> anyhow::Result<String> {
+    let body = toml::to_string_pretty(settings)?;
+    Ok(format!(
+        "# kyoku config.toml\n\
+# Generated by `kyoku setup`. You can edit this file directly.\n\
+#\n\
+# Path templates are used by `kyoku organize`. Available variables include:\n\
+#   {{artist}}, {{album_artist}}, {{album}}, {{year}}, {{track}}, {{title}},\n\
+#   {{disc}}, {{genre}}, {{label}}, {{ext}}, and for collection templates\n\
+#   {{collection}} plus {{position}}.\n\
+#\n\
+# MusicBrainz user-agent is compiled into kyoku; no config key is needed.\n\n{body}"
+    ))
 }
 
 /// Look for a Nicotine+ config file and return any `downloaddir` paths that
@@ -442,4 +456,33 @@ fn resolve_var(name: &str) -> Option<String> {
         _ => return None,
     };
     Some(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_config_escapes_paths_and_omits_dead_user_agent() {
+        let mut settings = Settings::default();
+        settings.library.music_dir = PathBuf::from("/tmp/music with \"quote\"");
+        settings.library.inbox_dirs = vec![PathBuf::from("/tmp/inbox\\slash")];
+        settings.library.path_template = "custom/{artist}/{title}.{ext}".to_string();
+        settings.import.auto_match_threshold = 0.91;
+        settings.import.match_candidates = 9;
+        settings.tagging.write_tags = false;
+        settings.ui.show_cover_preview = false;
+
+        let rendered = render_config(&settings).unwrap();
+
+        assert!(!rendered.contains("user_agent"));
+        assert!(rendered.contains("custom/{artist}/{title}.{ext}"));
+        let parsed: Settings = toml::from_str(&rendered).unwrap();
+        assert_eq!(parsed.library.music_dir, settings.library.music_dir);
+        assert_eq!(parsed.library.inbox_dirs, settings.library.inbox_dirs);
+        assert_eq!(parsed.import.auto_match_threshold, 0.91);
+        assert_eq!(parsed.import.match_candidates, 9);
+        assert!(!parsed.tagging.write_tags);
+        assert!(!parsed.ui.show_cover_preview);
+    }
 }

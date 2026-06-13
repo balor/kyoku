@@ -316,11 +316,13 @@ mod tests {
             country: Some("GB".to_string()),
             label: None,
             track_count: tracks.len() as u32,
+            medium_count: 1,
             release_group_id: None,
             tracks: tracks
                 .iter()
                 .enumerate()
                 .map(|(i, t)| MbTrack {
+                    disc: 1,
                     position: (i + 1) as u32,
                     title: t.to_string(),
                     artist: None,

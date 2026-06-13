@@ -55,12 +55,120 @@ fn main() -> anyhow::Result<()> {
             .init();
     }
 
-    // setup and paths work without a config file; everything else requires one
-    let needs_config = !matches!(
-        cli.command,
-        Some(Command::Setup) | Some(Command::Paths) | Some(Command::Info { .. }) | None
-    );
+    // Recovery / config-free commands must run before parsing the config.
+    // A malformed config is exactly when `kyoku setup` and `kyoku paths`
+    // are needed most, so don't let Settings::load brick them.
+    match &cli.command {
+        Some(Command::Setup) => {
+            let settings = match Settings::load(&config_path) {
+                Ok(settings) => settings,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: could not read existing config at {}: {}",
+                        config_path.display(),
+                        e
+                    );
+                    eprintln!("Setup will start from defaults.");
+                    Settings::default()
+                }
+            };
+            cli::setup::run(settings)?;
+            return Ok(());
+        }
+        Some(Command::Paths) => {
+            let (settings, config_error) = match Settings::load(&config_path) {
+                Ok(settings) => (settings, None),
+                Err(e) => (Settings::default(), Some(e.to_string())),
+            };
+            let config = config::paths::config_file();
+            let db = settings.database_file();
+            let cache = config::paths::cache_dir();
+            let music = &settings.library.music_dir;
+            let inboxes = &settings.library.inbox_dirs;
 
+            println!("config:   {}", config.display());
+            println!("database: {}", db.display());
+            println!("cache:    {}", cache.display());
+            println!("music:    {}", music.display());
+            if inboxes.is_empty() {
+                println!("inboxes:  (none)");
+            } else {
+                let paths: Vec<_> = inboxes.iter().map(|p| p.display().to_string()).collect();
+                println!("inboxes:  {}", paths.join(", "));
+            }
+
+            if let Some(e) = config_error {
+                println!(
+                    "\n(config file exists but could not be read: {} — run `kyoku setup` to repair it)",
+                    e
+                );
+            } else if !config.exists() {
+                println!("\n(config file does not exist yet — using defaults)");
+            }
+            return Ok(());
+        }
+        Some(Command::Info { path }) => {
+            let track = core::tagger::read_track(path)?;
+            println!("File:        {}", track.file_path.display());
+            println!("Format:      {}", track.file_format.as_str());
+            println!("Title:       {}", track.title);
+            println!(
+                "Artist:      {}",
+                track.artist.as_deref().unwrap_or("(none)")
+            );
+            if let Ok(ref tag_data) = core::tagger::read_tags(path) {
+                println!(
+                    "Album:       {}",
+                    tag_data.album.as_deref().unwrap_or("(none)")
+                );
+                println!(
+                    "Album Artist: {}",
+                    tag_data.album_artist.as_deref().unwrap_or("(none)")
+                );
+                println!(
+                    "Year:        {}",
+                    tag_data
+                        .year
+                        .map(|y| y.to_string())
+                        .unwrap_or_else(|| "(none)".to_string())
+                );
+                println!(
+                    "Genre:       {}",
+                    tag_data.genre.as_deref().unwrap_or("(none)")
+                );
+            }
+            println!(
+                "Track:       {}",
+                track
+                    .track_number
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "(none)".to_string())
+            );
+            println!("Disc:        {}", track.disc_number);
+            if let Some(ms) = track.duration_ms {
+                let secs = ms / 1000;
+                println!("Duration:    {}:{:02}", secs / 60, secs % 60);
+            }
+            if let Some(br) = track.bitrate {
+                println!("Bitrate:     {} kbps", br);
+            }
+            if let Some(sr) = track.sample_rate {
+                println!("Sample Rate: {} Hz", sr);
+            }
+            println!("Status:      {}", track.tag_status.as_str());
+            return Ok(());
+        }
+        None if !config_exists => {
+            println!("Welcome to kyoku!");
+            println!();
+            println!("Run `kyoku setup` to get started.");
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Everything past this point needs a readable config file.
+    let needs_config = cli.command.is_some();
     if needs_config && !config_exists {
         eprintln!("No config file found at {}", config_path.display());
         eprintln!();
@@ -68,39 +176,37 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    let settings = Settings::load(&config_path)?;
+    let settings = match Settings::load(&config_path) {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!("Failed to read config at {}", config_path.display());
+            eprintln!("  {}", e);
+            eprintln!();
+            eprintln!("Run `kyoku setup` to repair or recreate the config.");
+            std::process::exit(1);
+        }
+    };
 
     match cli.command {
         None => {
-            if !config_exists {
-                println!("Welcome to kyoku!");
-                println!();
-                println!("Run `kyoku setup` to get started.");
-            } else {
-                // Bail out before opening the DB if the configured library
-                // dir is missing or unwritable — the TUI has no good way to
-                // surface that after boot, and every import/organize action
-                // would just silently fail.
-                if let Err(reason) =
-                    config::paths::validate_library_dir(&settings.library.music_dir)
-                {
-                    eprintln!(
-                        "Library directory unusable: {}",
-                        reason
-                    );
-                    eprintln!(
-                        "  configured path: {}",
-                        settings.library.music_dir.display()
-                    );
-                    eprintln!();
-                    eprintln!(
-                        "Edit the config (`kyoku paths` shows where it lives) or re-run `kyoku setup`."
-                    );
-                    std::process::exit(1);
-                }
-                let conn = db::open_database(settings.database_file(), &settings.library.music_dir)?;
-                tui::run(conn, settings)?;
+            // Bail out before opening the DB if the configured library
+            // dir is missing or unwritable — the TUI has no good way to
+            // surface that after boot, and every import/organize action
+            // would just silently fail.
+            if let Err(reason) = config::paths::validate_library_dir(&settings.library.music_dir) {
+                eprintln!("Library directory unusable: {}", reason);
+                eprintln!(
+                    "  configured path: {}",
+                    settings.library.music_dir.display()
+                );
+                eprintln!();
+                eprintln!(
+                    "Edit the config (`kyoku paths` shows where it lives) or re-run `kyoku setup`."
+                );
+                std::process::exit(1);
             }
+            let conn = db::open_database(settings.database_file(), &settings.library.music_dir)?;
+            tui::run(conn, settings)?;
         }
         Some(Command::Import {
             path,
@@ -169,7 +275,11 @@ fn main() -> anyhow::Result<()> {
                         parts.push(format!(
                             "{} {}",
                             newly_imported,
-                            if newly_imported == 1 { "track" } else { "tracks" }
+                            if newly_imported == 1 {
+                                "track"
+                            } else {
+                                "tracks"
+                            }
                         ));
                     }
                     if existing > 0 {
@@ -193,81 +303,8 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Some(Command::Info { path }) => {
-            let track = core::tagger::read_track(&path)?;
-            println!("File:        {}", track.file_path.display());
-            println!("Format:      {}", track.file_format.as_str());
-            println!("Title:       {}", track.title);
-            println!(
-                "Artist:      {}",
-                track.artist.as_deref().unwrap_or("(none)")
-            );
-            if let Some(ref tag_data) = core::tagger::read_tags(&path).ok() {
-                println!(
-                    "Album:       {}",
-                    tag_data.album.as_deref().unwrap_or("(none)")
-                );
-                println!(
-                    "Album Artist: {}",
-                    tag_data.album_artist.as_deref().unwrap_or("(none)")
-                );
-                println!(
-                    "Year:        {}",
-                    tag_data
-                        .year
-                        .map(|y| y.to_string())
-                        .unwrap_or_else(|| "(none)".to_string())
-                );
-                println!(
-                    "Genre:       {}",
-                    tag_data.genre.as_deref().unwrap_or("(none)")
-                );
-            }
-            println!(
-                "Track:       {}",
-                track
-                    .track_number
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| "(none)".to_string())
-            );
-            println!("Disc:        {}", track.disc_number);
-            if let Some(ms) = track.duration_ms {
-                let secs = ms / 1000;
-                println!("Duration:    {}:{:02}", secs / 60, secs % 60);
-            }
-            if let Some(br) = track.bitrate {
-                println!("Bitrate:     {} kbps", br);
-            }
-            if let Some(sr) = track.sample_rate {
-                println!("Sample Rate: {} Hz", sr);
-            }
-            println!("Status:      {}", track.tag_status.as_str());
-        }
-        Some(Command::Setup) => {
-            cli::setup::run(settings)?;
-        }
-        Some(Command::Paths) => {
-            let config = config::paths::config_file();
-            let db = settings.database_file();
-            let cache = config::paths::cache_dir();
-            let music = &settings.library.music_dir;
-
-            let inboxes = &settings.library.inbox_dirs;
-
-            println!("config:   {}", config.display());
-            println!("database: {}", db.display());
-            println!("cache:    {}", cache.display());
-            println!("music:    {}", music.display());
-            if inboxes.is_empty() {
-                println!("inboxes:  (none)");
-            } else {
-                let paths: Vec<_> = inboxes.iter().map(|p| p.display().to_string()).collect();
-                println!("inboxes:  {}", paths.join(", "));
-            }
-
-            if !config.exists() {
-                println!("\n(config file does not exist yet — using defaults)");
-            }
+        Some(Command::Info { .. }) | Some(Command::Setup) | Some(Command::Paths) => {
+            unreachable!("config-free commands are handled before settings load")
         }
         Some(Command::Scan) => {
             let conn = db::open_database(settings.database_file(), &settings.library.music_dir)?;
@@ -277,7 +314,8 @@ fn main() -> anyhow::Result<()> {
                 println!("No inbox directories configured.");
                 println!("Add inbox_dirs to your config (see `kyoku paths`).");
             } else {
-                let unimported = core::importer::scan_inbox(&conn, &settings.library.music_dir, inbox_dirs)?;
+                let unimported =
+                    core::importer::scan_inbox(&conn, &settings.library.music_dir, inbox_dirs)?;
                 if unimported.is_empty() {
                     println!("No new files found in inbox directories.");
                 } else {
@@ -292,6 +330,8 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Organize {
             apply,
+            yes,
+            pretend: _,
             details,
             artist,
             album,
@@ -459,6 +499,18 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 if apply {
+                    if !yes {
+                        print!("Apply these changes? [y/N] ");
+                        use std::io::Write;
+                        std::io::stdout().flush()?;
+                        let mut input = String::new();
+                        std::io::stdin().read_line(&mut input)?;
+                        if !input.trim().eq_ignore_ascii_case("y") {
+                            println!("Aborted.");
+                            return Ok(());
+                        }
+                    }
+
                     let result = core::organizer::apply_organize(
                         &conn,
                         &settings.library.music_dir,

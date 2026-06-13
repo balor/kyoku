@@ -1,6 +1,6 @@
 pub mod setup;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -46,10 +46,23 @@ pub enum Command {
     Scan,
 
     /// Preview and apply file reorganization
+    #[command(group(
+        ArgGroup::new("organize-filter")
+            .args(["artist", "album", "path", "collection"])
+            .multiple(false)
+    ))]
     Organize {
         /// Actually move files (requires confirmation)
         #[arg(long)]
         apply: bool,
+
+        /// Skip the apply confirmation prompt (for scripts)
+        #[arg(long, short = 'y', requires = "apply")]
+        yes: bool,
+
+        /// Explicit dry run alias (default behavior without --apply)
+        #[arg(long, conflicts_with = "apply")]
+        pretend: bool,
 
         /// Show per-file from/to paths instead of grouped summary
         #[arg(long, short = 'd')]
@@ -71,4 +84,27 @@ pub enum Command {
         #[arg(long)]
         collection: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn organize_filters_are_mutually_exclusive() {
+        assert!(
+            Cli::try_parse_from(["kyoku", "organize", "--artist", "A", "--album", "B",]).is_err()
+        );
+    }
+
+    #[test]
+    fn organize_pretend_conflicts_with_apply() {
+        assert!(Cli::try_parse_from(["kyoku", "organize", "--apply", "--pretend"]).is_err());
+    }
+
+    #[test]
+    fn organize_yes_requires_apply() {
+        assert!(Cli::try_parse_from(["kyoku", "organize", "--yes"]).is_err());
+        assert!(Cli::try_parse_from(["kyoku", "organize", "--apply", "--yes"]).is_ok());
+    }
 }

@@ -20,6 +20,7 @@ pub struct MbRelease {
     pub country: Option<String>,
     pub label: Option<String>,
     pub track_count: u32,
+    pub medium_count: u32,
     pub tracks: Vec<MbTrack>,
     pub api_score: u8,
     /// Release-group MBID, used to look up `first-release-date` when the
@@ -29,6 +30,9 @@ pub struct MbRelease {
 
 #[derive(Debug, Clone)]
 pub struct MbTrack {
+    /// 1-based medium/disc number from the MusicBrainz release payload.
+    pub disc: u32,
+    /// 1-based track position within `disc`.
     pub position: u32,
     pub title: String,
     pub artist: Option<String>,
@@ -662,6 +666,7 @@ fn parse_search_release(r: MbSearchRelease) -> MbRelease {
         country: r.country,
         label,
         track_count: r.track_count.unwrap_or(0),
+        medium_count: 0,
         tracks: Vec::new(), // Search results don't include tracks
         api_score: r.score.unwrap_or(0),
         release_group_id,
@@ -734,9 +739,12 @@ fn parse_full_release(v: &serde_json::Value) -> ParsedFullRelease {
     let mut track_artist_mbids: Vec<Option<String>> = Vec::new();
     let mut track_artist_sorts: Vec<Option<String>> = Vec::new();
     let mut track_count = 0u32;
+    let mut medium_count = 0u32;
 
     if let Some(media) = v["media"].as_array() {
-        for medium in media {
+        medium_count = media.len() as u32;
+        for (medium_idx, medium) in media.iter().enumerate() {
+            let disc = (medium_idx + 1) as u32;
             if let Some(track_list) = medium["tracks"].as_array() {
                 for t in track_list {
                     track_count += 1;
@@ -759,6 +767,7 @@ fn parse_full_release(v: &serde_json::Value) -> ParsedFullRelease {
                         .to_string();
 
                     tracks.push(MbTrack {
+                        disc,
                         position,
                         title: t_title,
                         artist: t_artist,
@@ -783,6 +792,7 @@ fn parse_full_release(v: &serde_json::Value) -> ParsedFullRelease {
             country,
             label,
             track_count,
+            medium_count,
             tracks,
             api_score: 100,
             release_group_id,
@@ -905,4 +915,43 @@ fn escape_lucene(s: &str) -> String {
         out.push(c);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_full_release_preserves_medium_and_disc_numbers() {
+        let raw = json!({
+            "id": "rel-1",
+            "title": "Two Disc Album",
+            "artist-credit": [{
+                "name": "Artist",
+                "artist": { "id": "artist-1", "name": "Artist", "sort-name": "Artist" }
+            }],
+            "release-group": { "id": "rg-1", "first-release-date": "2024-01-01" },
+            "media": [
+                { "position": 1, "tracks": [
+                    { "position": 1, "title": "Disc 1 Track 1", "length": 1000,
+                      "recording": { "id": "rec-1-1" } }
+                ]},
+                { "position": 2, "tracks": [
+                    { "position": 1, "title": "Disc 2 Track 1", "length": 2000,
+                      "recording": { "id": "rec-2-1" } }
+                ]}
+            ]
+        });
+
+        let parsed = parse_full_release(&raw).release;
+
+        assert_eq!(parsed.medium_count, 2);
+        assert_eq!(parsed.track_count, 2);
+        assert_eq!(parsed.tracks[0].disc, 1);
+        assert_eq!(parsed.tracks[0].position, 1);
+        assert_eq!(parsed.tracks[1].disc, 2);
+        assert_eq!(parsed.tracks[1].position, 1);
+        assert_eq!(parsed.tracks[1].recording_id, "rec-2-1");
+    }
 }

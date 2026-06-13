@@ -461,8 +461,12 @@ pub(super) fn match_group_to_mb(
     let mut matches: Vec<Option<usize>> = vec![None; n];
     let mut taken: Vec<bool> = vec![false; mb_tracks.len()];
 
+    let multi_disc = mb_tracks.iter().any(|mt| mt.disc > 1);
+
     // Pass 1: track_number (tag first, filename as fallback only when tag
-    // is absent) → MB position.
+    // is absent) → MB position. On multi-disc releases, MB positions are
+    // per-medium, so include the local disc number in the slot key; otherwise
+    // disc 2 track 1 greedily claims disc 1 track 1.
     for (li, (track, tag_data)) in group_tracks.iter().enumerate() {
         let tag_tn = tag_data.as_ref().and_then(|t| t.track_number);
         let tn = match tag_tn {
@@ -473,11 +477,12 @@ pub(super) fn match_group_to_mb(
                 None => continue,
             },
         };
+        let local_disc = track.disc_number.max(1);
         for (mi, mt) in mb_tracks.iter().enumerate() {
             if taken[mi] {
                 continue;
             }
-            if mt.position == tn {
+            if mt.position == tn && (!multi_disc || mt.disc == local_disc) {
                 matches[li] = Some(mi);
                 taken[mi] = true;
                 break;
@@ -532,17 +537,19 @@ pub(super) fn match_group_to_mb(
 
     // Pass 3: positional fallback — fills remaining gaps for fully
     // tag-less groups. Intentionally last so it can't overwrite a
-    // title-based hit.
+    // title-based hit. For multi-disc releases, keep the same disc-aware
+    // slot rule as the track-number pass.
     for li in 0..n {
         if matches[li].is_some() {
             continue;
         }
         let want = (li + 1) as u32;
+        let local_disc = group_tracks[li].0.disc_number.max(1);
         for (mi, mt) in mb_tracks.iter().enumerate() {
             if taken[mi] {
                 continue;
             }
-            if mt.position == want {
+            if mt.position == want && (!multi_disc || mt.disc == local_disc) {
                 matches[li] = Some(mi);
                 taken[mi] = true;
                 break;
@@ -584,6 +591,11 @@ fn build_mb_tag_changes(mb: &MbRelease, mbt: &MbTrack) -> TagChanges {
         ItemKey::TrackNumber,
         TagValue::Text(mbt.position.to_string()),
     ));
+    if mb.medium_count > 1 {
+        changes
+            .set
+            .push((ItemKey::DiscNumber, TagValue::Text(mbt.disc.to_string())));
+    }
     let total = if mb.track_count > 0 {
         mb.track_count
     } else {
@@ -704,13 +716,31 @@ mod tests {
     }
 
     fn mb(position: u32, title: &str) -> MbTrack {
+        mb_on_disc(1, position, title)
+    }
+
+    fn mb_on_disc(disc: u32, position: u32, title: &str) -> MbTrack {
         MbTrack {
+            disc,
             position,
             title: title.to_string(),
             artist: None,
             duration_ms: None,
             recording_id: String::new(),
         }
+    }
+
+    fn local_on_disc(
+        title: &str,
+        disc_number: u32,
+        track_number: Option<u32>,
+    ) -> (Track, Option<TagData>) {
+        let mut item = local(title, track_number);
+        item.0.disc_number = disc_number;
+        if let Some(td) = item.1.as_mut() {
+            td.disc_number = Some(disc_number);
+        }
+        item
     }
 
     #[test]
@@ -738,6 +768,23 @@ mod tests {
             .map(|m| mb_tracks[m.unwrap()].position)
             .collect();
         assert_eq!(got, vec![5, 6, 7, 8, 9, 10, 11]);
+    }
+
+    #[test]
+    fn multi_disc_track_number_match_uses_disc_and_position() {
+        let group = vec![local_on_disc("Disc 2 Opener", 2, Some(1))];
+        let mb_tracks = vec![
+            mb_on_disc(1, 1, "Disc 1 Opener"),
+            mb_on_disc(2, 1, "Disc 2 Opener"),
+        ];
+
+        let matches = match_group_to_mb(&group, &mb_tracks);
+
+        assert_eq!(
+            matches,
+            vec![Some(1)],
+            "disc 2 track 1 must not claim disc 1 track 1"
+        );
     }
 
     #[test]
@@ -857,6 +904,41 @@ mod tests {
         let matches = match_group_to_mb(&group, &mb_tracks);
         // Honour the wrong tags — pair to MB position 1, not 5.
         assert_eq!(matches, vec![Some(0)]);
+    }
+
+    #[test]
+    fn mb_tag_changes_include_disc_number_only_for_multi_disc_releases() {
+        let mbt = mb_on_disc(2, 1, "Disc 2 Opener");
+        let multi = MbRelease {
+            id: "rel".to_string(),
+            title: "Album".to_string(),
+            artist: "Artist".to_string(),
+            year: None,
+            country: None,
+            label: None,
+            track_count: 2,
+            medium_count: 2,
+            tracks: vec![mbt.clone()],
+            api_score: 100,
+            release_group_id: None,
+        };
+        let single = MbRelease {
+            medium_count: 1,
+            ..multi.clone()
+        };
+
+        let multi_changes = build_mb_tag_changes(&multi, &mbt);
+        assert!(multi_changes.set.iter().any(|(key, value)| {
+            matches!(key, ItemKey::DiscNumber) && matches!(value, TagValue::Text(v) if v == "2")
+        }));
+
+        let single_changes = build_mb_tag_changes(&single, &mbt);
+        assert!(
+            !single_changes
+                .set
+                .iter()
+                .any(|(key, _)| matches!(key, ItemKey::DiscNumber))
+        );
     }
 
     #[test]

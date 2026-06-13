@@ -1068,7 +1068,9 @@ mod tests {
             country: None,
             label: None,
             track_count: 1,
+            medium_count: 1,
             tracks: vec![MbTrack {
+                disc: 1,
                 position: pos,
                 title: format!("Track {}", pos),
                 artist: None,
@@ -1484,6 +1486,7 @@ mod tests {
         for d in 1..=discs {
             for p in 1..=per_disc {
                 tracks.push(MbTrack {
+                    disc: d,
                     position: p,
                     title: format!("D{}T{}", d, p),
                     artist: None,
@@ -1500,6 +1503,7 @@ mod tests {
             country: None,
             label: None,
             track_count: discs * per_disc,
+            medium_count: discs,
             tracks,
             api_score: 0,
             release_group_id: None,
