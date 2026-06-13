@@ -12,6 +12,7 @@ use rusqlite::Connection;
 use crate::config::Settings;
 use crate::core::organizer::{self, OrganizePlan};
 use crate::core::pruner;
+use crate::core::tagger::TMP_MARKER;
 use crate::db::queries::{self, AlbumRow, TrackRow};
 use crate::external::cover_art_archive::{CaaClient, CoverImage};
 use crate::error::Result;
@@ -241,7 +242,7 @@ impl AlbumDetailView {
                         conn,
                         &settings.library.music_dir,
                         &plan,
-                        &settings.import.organize_operation,
+                        settings.import.organize_operation,
                         &organizer::cleanup_roots(settings),
                     ) {
                         Ok(result) => {
@@ -648,8 +649,13 @@ impl AlbumDetailView {
             })?;
         std::fs::create_dir_all(&album_dir)?;
         let dest = album_dir.join(format!("cover.{}", img.extension));
-        std::fs::write(&dest, &img.bytes)?;
-        queries::set_album_cover_path(conn, music_dir, album_id, &dest.to_string_lossy())?;
+        let tmp = album_dir.join(format!("cover.{}{}", img.extension, TMP_MARKER));
+        std::fs::write(&tmp, &img.bytes)?;
+        if let Err(e) = std::fs::rename(&tmp, &dest) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        queries::set_album_cover_path(conn, music_dir, album_id, &dest.display().to_string())?;
         // Refresh the cached row so the header renders with the new path.
         self.album = queries::get_album(conn, music_dir, album_id)?;
         Ok(dest)

@@ -38,12 +38,7 @@ fn e2e_import_album_then_organize_lands_files_under_music_dir() {
 
     // Step 1: import from inbox.
     let result = importer::import(
-        &conn,
-        &music,
-        &inbox,
-        /*loose*/ false,
-        /*pretend*/ false,
-        None,
+        &conn, &music, &inbox, /*loose*/ false, /*pretend*/ false, None,
     )
     .expect("import should succeed");
     assert_eq!(result.imported, 1, "exactly one track should be imported");
@@ -71,7 +66,7 @@ fn e2e_import_album_then_organize_lands_files_under_music_dir() {
         &conn,
         &music,
         &plan,
-        "move",
+        kyoku::config::OrganizeOperation::Move,
         &[music.clone(), inbox.clone()],
     )
     .expect("apply_organize should succeed");

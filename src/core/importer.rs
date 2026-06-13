@@ -73,8 +73,15 @@ pub fn scan_audio_files(path: impl AsRef<Path>) -> Vec<std::path::PathBuf> {
         if !entry.file_type().is_file() {
             continue;
         }
-        let ext = entry
-            .path()
+        let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| name.contains(tagger::TMP_MARKER))
+        {
+            continue;
+        }
+        let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
@@ -216,11 +223,10 @@ pub fn import(
             continue;
         }
 
-        match tagger::read_track(&abs_path) {
-            Ok(mut track) => {
+        match tagger::read_track_with_tags(&abs_path) {
+            Ok((mut track, tag_data)) => {
                 track.file_path = abs_path;
-                let tag_data = tagger::read_tags(file_path).ok();
-                tag_data_map.push(tag_data);
+                tag_data_map.push(Some(tag_data));
                 tracks.push(track);
             }
             Err(e) => {
@@ -583,6 +589,21 @@ mod tests {
         // `random.jpg` is not in COVER_BASENAMES so it must be skipped.
         std::fs::write(tmp.path().join("random.jpg"), b"").unwrap();
         assert!(detect_sibling_cover(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn scan_audio_files_skips_kyoku_tmp_marker() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("real.mp3"), b"").unwrap();
+        std::fs::write(tmp.path().join("real.kyoku-tmp.mp3"), b"").unwrap();
+
+        let files = scan_audio_files(tmp.path());
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].file_name().and_then(|s| s.to_str()),
+            Some("real.mp3")
+        );
     }
 
     #[test]

@@ -24,6 +24,27 @@ use super::{
     ReleaseFetchResult, ScanMessage,
 };
 
+fn display_group_name(
+    source_dir: &str,
+    tracks: &[(crate::db::models::Track, Option<tagger::TagData>)],
+) -> String {
+    let mut albums: Vec<String> = tracks
+        .iter()
+        .filter_map(|(_, tag)| tag.as_ref()?.album.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    albums.sort();
+    albums.dedup();
+
+    match albums.len() {
+        0 => source_dir.to_string(),
+        1 => format!("{source_dir} — {}", albums[0]),
+        n => format!("{source_dir} — mixed album tags ({n})"),
+    }
+}
+
 impl ImportView {
     pub fn handle_key(&mut self, key: KeyEvent, conn: &Connection) {
         match self.step {
@@ -502,11 +523,12 @@ impl ImportView {
                 let abs_path =
                     std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.clone());
 
-                if let Ok(mut track) = tagger::read_track(&abs_path) {
+                if let Ok((mut track, tag_data)) = tagger::read_track_with_tags(&abs_path) {
                     track.file_path = abs_path;
-                    let tag_data = tagger::read_tags(file_path).ok();
 
-                    // Group by source directory
+                    // Group by source directory. Mixed-album directories stay a
+                    // single group by design; the display name below annotates
+                    // them so the review screen is explicit about that choice.
                     let group_key = track
                         .source_dir
                         .as_ref()
@@ -516,7 +538,10 @@ impl ImportView {
                     if !groups.contains_key(&group_key) {
                         group_order.push(group_key.clone());
                     }
-                    groups.entry(group_key).or_default().push((track, tag_data));
+                    groups
+                        .entry(group_key)
+                        .or_default()
+                        .push((track, Some(tag_data)));
                 }
             }
 
@@ -524,7 +549,7 @@ impl ImportView {
                 .into_iter()
                 .filter_map(|name| {
                     groups.remove(&name).map(|tracks| ImportGroup {
-                        name,
+                        name: display_group_name(&name, &tracks),
                         tracks,
                         action: GroupAction::AcceptAsIs,
                         mb_candidates: Vec::new(),

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
-use crate::config::Settings;
+use crate::config::{OrganizeOperation, Settings};
 use crate::core::template::{self, TemplateVars};
 use crate::db::queries;
 use crate::error::Result;
@@ -28,6 +28,13 @@ pub struct FileCopy {
     pub to: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub struct CollectionCopyBackfill {
+    pub track_id: i64,
+    pub collection_id: i64,
+    pub path: PathBuf,
+}
+
 /// Move/rename of an album's sibling cover-art file so it lands alongside
 /// the tracks in their new album directory. Always moves (not copies) — the
 /// source sits in whichever inbox/album directory the user imported from,
@@ -44,6 +51,11 @@ pub struct CoverMove {
 pub struct OrganizePlan {
     pub moves: Vec<FileMove>,
     pub copies: Vec<FileCopy>,
+    /// DB-only repairs for collection copies that already exist at their
+    /// rendered target but whose `collection_tracks.collection_file_path`
+    /// is NULL/stale. Template-change moves of old collection copies are
+    /// still a TODO; this only backfills the already-correct on-disk file.
+    pub copy_backfills: Vec<CollectionCopyBackfill>,
     pub cover_moves: Vec<CoverMove>,
     pub skipped: usize,
     /// Tracks whose source file no longer exists on disk. These rows are
@@ -206,6 +218,22 @@ impl TrackTargets {
     }
 }
 
+fn maybe_backfill_collection_copy(
+    plan: &mut OrganizePlan,
+    track_id: i64,
+    coll: &queries::OrganizeCollectionMembership,
+    target: &Path,
+) {
+    let target_string = target.display().to_string();
+    if coll.collection_file_path.as_deref() != Some(target_string.as_str()) {
+        plan.copy_backfills.push(CollectionCopyBackfill {
+            track_id,
+            collection_id: coll.id,
+            path: target.to_path_buf(),
+        });
+    }
+}
+
 /// Compute an organize plan without any side effects.
 pub fn plan_organize(
     conn: &Connection,
@@ -284,8 +312,7 @@ pub fn plan_organize(
     // Pending orphan paths are the one kind of on-disk file a move may land
     // on: dup-replace imports plan that overwrite deliberately, and apply
     // resolves it via its `occupied` guard.
-    let orphan_paths: HashSet<PathBuf> =
-        plan.file_orphans.iter().map(|e| e.path.clone()).collect();
+    let orphan_paths: HashSet<PathBuf> = plan.file_orphans.iter().map(|e| e.path.clone()).collect();
 
     let same_file = |a: &Path, b: &Path| -> bool {
         matches!(
@@ -422,10 +449,12 @@ pub fn plan_organize(
             }
 
             // One copy per collection — skip if the target already exists on disk
-            // (collection was already organized).
+            // (collection was already organized), but repair the DB pointer if
+            // it is missing or stale.
             for coll in &ctx.collections {
                 let raw = ctx.collection_target(coll, settings, music_dir);
                 if raw.exists() {
+                    maybe_backfill_collection_copy(&mut plan, t.id, coll, &raw);
                     used_paths.insert(raw);
                     plan.skipped += 1;
                 } else {
@@ -464,10 +493,12 @@ pub fn plan_organize(
                 }
             };
 
-            // COPY to each additional collection's folder — skip if already exists
+            // COPY to each additional collection's folder — skip if already exists,
+            // but repair the DB pointer if it is missing or stale.
             for coll in &ctx.collections[1..] {
                 let raw = ctx.collection_target(coll, settings, music_dir);
                 if raw.exists() {
+                    maybe_backfill_collection_copy(&mut plan, t.id, coll, &raw);
                     used_paths.insert(raw);
                     plan.skipped += 1;
                 } else {
@@ -562,7 +593,7 @@ pub fn apply_organize(
     conn: &Connection,
     music_dir: &Path,
     plan: &OrganizePlan,
-    operation: &str,
+    operation: OrganizeOperation,
     cleanup_roots: &[PathBuf],
 ) -> Result<OrganizeResult> {
     let mut result = OrganizeResult::default();
@@ -618,14 +649,10 @@ pub fn apply_organize(
             std::fs::create_dir_all(parent).ok();
         }
 
-        let outcome = if operation == "copy" {
+        let outcome = if matches!(operation, OrganizeOperation::Copy) {
             std::fs::copy(&m.from, &m.to).map(|_| ())
         } else {
-            std::fs::rename(&m.from, &m.to).or_else(|_| {
-                // rename fails across filesystems — fallback to copy+delete
-                std::fs::copy(&m.from, &m.to).map(|_| ())?;
-                std::fs::remove_file(&m.from)
-            })
+            move_file(&m.from, &m.to)
         };
 
         match outcome {
@@ -647,11 +674,7 @@ pub fn apply_organize(
                 // update collection_tracks.collection_file_path so the DB knows.
                 if let Some((coll_id, _)) = &m.also_collection
                     && let Err(e) = queries::update_collection_track_path(
-                        conn,
-                        music_dir,
-                        *coll_id,
-                        m.track_id,
-                        &new_path,
+                        conn, music_dir, *coll_id, m.track_id, &new_path,
                     )
                 {
                     result.errors.push((
@@ -668,7 +691,7 @@ pub fn apply_organize(
                 mark_occupied(&m.to, &mut occupied);
 
                 // Track the source directory for cleanup
-                if operation != "copy"
+                if !matches!(operation, OrganizeOperation::Copy)
                     && let Some(parent) = m.from.parent()
                 {
                     emptied_dirs.push(parent.to_path_buf());
@@ -679,6 +702,22 @@ pub fn apply_organize(
                     .errors
                     .push((m.from.display().to_string(), e.to_string()));
             }
+        }
+    }
+
+    for backfill in &plan.copy_backfills {
+        let new_path = backfill.path.display().to_string();
+        if let Err(e) = queries::update_collection_track_path(
+            conn,
+            music_dir,
+            backfill.collection_id,
+            backfill.track_id,
+            &new_path,
+        ) {
+            result.errors.push((
+                new_path,
+                format!("collection copy exists but DB backfill failed: {e}"),
+            ));
         }
     }
 
@@ -732,19 +771,17 @@ pub fn apply_organize(
         if let Some(parent) = cm.to.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let outcome = if operation == "copy" {
+        let outcome = if matches!(operation, OrganizeOperation::Copy) {
             std::fs::copy(&cm.from, &cm.to).map(|_| ())
         } else {
-            std::fs::rename(&cm.from, &cm.to).or_else(|_| {
-                // Cross-filesystem rename — fallback to copy + delete.
-                std::fs::copy(&cm.from, &cm.to).map(|_| ())?;
-                std::fs::remove_file(&cm.from)
-            })
+            move_file(&cm.from, &cm.to)
         };
         match outcome {
             Ok(()) => {
                 let new_path = cm.to.display().to_string();
-                if let Err(e) = queries::set_album_cover_path(conn, music_dir, cm.album_id, &new_path) {
+                if let Err(e) =
+                    queries::set_album_cover_path(conn, music_dir, cm.album_id, &new_path)
+                {
                     result.errors.push((
                         cm.from.display().to_string(),
                         format!("cover moved to {new_path} but DB update failed: {e}"),
@@ -753,7 +790,7 @@ pub fn apply_organize(
                 }
                 result.covers_moved += 1;
                 mark_occupied(&cm.to, &mut occupied);
-                if operation != "copy"
+                if !matches!(operation, OrganizeOperation::Copy)
                     && let Some(parent) = cm.from.parent()
                 {
                     emptied_dirs.push(parent.to_path_buf());
@@ -874,6 +911,16 @@ fn mark_occupied(p: &Path, occupied: &mut HashSet<String>) {
     }
 }
 
+fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+            std::fs::copy(from, to).map(|_| ())?;
+            std::fs::remove_file(from)
+        }
+        result => result,
+    }
+}
+
 // ── Collection deletion ──────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -905,12 +952,7 @@ pub fn plan_delete_collection(
     collection_id: i64,
     music_dir: &Path,
 ) -> Result<DeleteCollectionPlan> {
-    plan_delete_collection_with_roots(
-        conn,
-        music_dir,
-        collection_id,
-        &[music_dir.to_path_buf()],
-    )
+    plan_delete_collection_with_roots(conn, music_dir, collection_id, &[music_dir.to_path_buf()])
 }
 
 pub fn plan_delete_collection_with_roots(
@@ -971,9 +1013,9 @@ pub fn plan_delete_collection_with_roots(
             && !h.has_album
         {
             // No album to fall back on, but other collection(s) exist.
-            // Find one of those other collection_file_path values.
-            if let Ok(Some(new_path)) =
-                find_other_collection_path(conn, music_dir, h.track_id, collection_id)
+            // Find one existing collection_file_path value to promote.
+            if let Some(new_path) =
+                find_other_collection_path(conn, music_dir, h.track_id, collection_id)?
             {
                 promote_paths.push((h.track_id, new_path));
             }
@@ -998,19 +1040,24 @@ fn find_other_collection_path(
     track_id: i64,
     exclude_collection_id: i64,
 ) -> Result<Option<String>> {
-    let path: Option<String> = conn
-        .query_row(
-            "SELECT collection_file_path FROM collection_tracks
-             WHERE track_id = ?1 AND collection_id != ?2
-                AND collection_file_path IS NOT NULL
-             LIMIT 1",
-            rusqlite::params![track_id, exclude_collection_id],
-            |row| row.get(0),
-        )
-        .ok();
-    // promote_paths carries absolute paths (rest of the codebase deals in
-    // absolute and the `update_track_path` boundary re-normalises).
-    Ok(path.map(|s| crate::core::paths::from_db_path(&s, music_dir).display().to_string()))
+    let mut stmt = conn.prepare(
+        "SELECT collection_file_path FROM collection_tracks
+         WHERE track_id = ?1 AND collection_id != ?2
+            AND collection_file_path IS NOT NULL",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![track_id, exclude_collection_id], |row| {
+        row.get::<_, String>(0)
+    })?;
+    for row in rows {
+        let stored = row?;
+        let path = crate::core::paths::from_db_path(&stored, music_dir);
+        if path.exists() {
+            // promote_paths carries absolute paths (rest of the codebase deals in
+            // absolute and the `update_track_path` boundary re-normalises).
+            return Ok(Some(path.display().to_string()));
+        }
+    }
+    Ok(None)
 }
 
 /// Execute a collection deletion plan. Orphaned tracks are removed from the
@@ -1065,20 +1112,38 @@ pub fn apply_delete_collection_with_roots(
         }
     }
 
-    // Promote alternate file_paths for tracks that survive (have another home).
-    // Done before the cascade so we don't accidentally end up pointing at a deleted file.
-    for (track_id, new_path) in &plan.promote_paths {
-        queries::update_track_path(conn, music_dir, *track_id, new_path)?;
+    // Promote alternate file_paths for tracks that survive only when the
+    // current primary file was actually deleted. With delete_files=false the
+    // primary file stays on disk and should remain canonical.
+    if delete_files {
+        for (track_id, new_path) in &plan.promote_paths {
+            if let Err(e) = queries::update_track_path(conn, music_dir, *track_id, new_path) {
+                result.errors.push((
+                    new_path.clone(),
+                    format!("failed to promote surviving track path: {e}"),
+                ));
+            }
+        }
     }
 
     // Delete orphaned tracks entirely so they do not silently become loose.
     for &track_id in &plan.orphaned_track_ids {
-        queries::delete_track(conn, track_id)?;
-        result.tracks_orphaned_removed += 1;
+        match queries::delete_track(conn, track_id) {
+            Ok(()) => result.tracks_orphaned_removed += 1,
+            Err(e) => result.errors.push((
+                format!("track #{track_id}"),
+                format!("failed to delete orphaned track row: {e}"),
+            )),
+        }
     }
 
     // Finally, drop the collection (cascade removes collection_tracks rows)
-    queries::delete_collection(conn, plan.collection_id)?;
+    if let Err(e) = queries::delete_collection(conn, plan.collection_id) {
+        result.errors.push((
+            plan.collection_name.clone(),
+            format!("failed to delete collection row: {e}"),
+        ));
+    }
 
     // Clean up empty parent dirs
     if delete_files {

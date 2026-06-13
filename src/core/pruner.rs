@@ -125,8 +125,13 @@ pub fn plan_delete_tracks(
                 false,
             );
         }
+        let primary_path = PathBuf::from(&info.file_path);
         for copy in &info.collection_copies {
-            classify_file(&mut plan, PathBuf::from(copy), managed_roots, true);
+            let copy_path = PathBuf::from(copy);
+            if !info.file_path.is_empty() && copy_path == primary_path {
+                continue;
+            }
+            classify_file(&mut plan, copy_path, managed_roots, true);
         }
         if let Some(aid) = info.album_id {
             *album_counts.entry(aid).or_insert(0) += 1;
@@ -273,29 +278,50 @@ pub fn apply_delete_plan(
         }
     }
 
-    // Promote surviving collection tracks before detaching/deleting album rows.
-    // This prevents a surviving track from pointing at an album file that the
-    // user opted to delete when an organized collection copy already exists.
-    for (track_id, new_path) in &plan.promote_paths {
-        let _ = queries::update_track_path(conn, music_dir, *track_id, new_path);
+    // Promote surviving collection tracks before detaching/deleting album rows,
+    // but only when the primary file was actually deleted. With
+    // delete_files=false the primary file stays on disk and should remain
+    // canonical.
+    if delete_files {
+        for (track_id, new_path) in &plan.promote_paths {
+            if let Err(e) = queries::update_track_path(conn, music_dir, *track_id, new_path) {
+                report.errors.push((
+                    new_path.clone(),
+                    format!("failed to promote surviving track path: {e}"),
+                ));
+            }
+        }
     }
 
     // Detach tracks that survive album deletion through collection membership.
     for &tid in &plan.album_survivor_track_ids {
-        let _ = queries::clear_track_album(conn, tid);
+        if let Err(e) = queries::clear_track_album(conn, tid) {
+            report.errors.push((
+                format!("track #{tid}"),
+                format!("failed to detach track from album: {e}"),
+            ));
+        }
     }
 
     // Delete track rows (cascades collection_tracks via FK).
     for &tid in &plan.track_ids {
-        if queries::delete_track(conn, tid).is_ok() {
-            report.tracks_deleted += 1;
+        match queries::delete_track(conn, tid) {
+            Ok(()) => report.tracks_deleted += 1,
+            Err(e) => report.errors.push((
+                format!("track #{tid}"),
+                format!("failed to delete track row: {e}"),
+            )),
         }
     }
 
     // Delete album rows after their tracks have either been deleted or detached.
     for &aid in &plan.album_ids {
-        if queries::delete_album(conn, aid).is_ok() {
-            report.albums_deleted += 1;
+        match queries::delete_album(conn, aid) {
+            Ok(()) => report.albums_deleted += 1,
+            Err(e) => report.errors.push((
+                format!("album #{aid}"),
+                format!("failed to delete album row: {e}"),
+            )),
         }
     }
 

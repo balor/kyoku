@@ -37,6 +37,8 @@ use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagItem};
 use crate::db::models::{AudioFormat, TagStatus, Track};
 use crate::error::{KyokuError, Result};
 
+pub const TMP_MARKER: &str = ".kyoku-tmp";
+
 /// Metadata read from a single audio file.
 #[derive(Debug, Clone)]
 pub struct TagData {
@@ -55,9 +57,7 @@ pub struct TagData {
 ///
 /// Used internally by both [`read_tags`] and [`read_track`] so the file
 /// is only read and parsed once.
-fn tag_data_from_tagged_file(
-    tagged_file: &lofty::file::TaggedFile,
-) -> TagData {
+fn tag_data_from_tagged_file(tagged_file: &lofty::file::TaggedFile) -> TagData {
     let tag = tagged_file
         .primary_tag()
         .or_else(|| tagged_file.first_tag());
@@ -71,13 +71,10 @@ fn tag_data_from_tagged_file(
         album_artist: tag.and_then(|t| {
             // lofty doesn't have a direct album_artist accessor on Accessor trait,
             // so we check common tag items
-            t.get_string(ItemKey::AlbumArtist).map(|s: &str| s.to_string())
+            t.get_string(ItemKey::AlbumArtist)
+                .map(|s: &str| s.to_string())
         }),
-        year: tag.and_then(|t| {
-            // year() was removed in lofty 0.23, use get_string with Year key
-            t.get_string(ItemKey::Year)
-                .and_then(|s: &str| s.parse::<u32>().ok())
-        }),
+        year: tag.and_then(read_year_from_tag),
         track_number: tag.and_then(|t| t.track()),
         disc_number: tag.and_then(|t| t.disk()),
         genre: tag.and_then(|t| t.genre().map(|s: std::borrow::Cow<str>| s.into_owned())),
@@ -97,9 +94,27 @@ pub fn read_tags(path: impl AsRef<Path>) -> Result<TagData> {
     Ok(tag_data_from_tagged_file(&tagged_file))
 }
 
-/// Read a file's tags and audio properties into a Track struct.
-/// The track is not yet associated with an album (album_id = None).
-pub fn read_track(path: impl AsRef<Path>) -> Result<Track> {
+fn read_year_from_tag(tag: &Tag) -> Option<u32> {
+    [ItemKey::Year, ItemKey::RecordingDate, ItemKey::ReleaseDate]
+        .into_iter()
+        .find_map(|key| tag.get_string(key).and_then(parse_year_value))
+}
+
+fn parse_year_value(value: &str) -> Option<u32> {
+    value.parse::<u32>().ok().or_else(|| {
+        let prefix = value.get(..4)?;
+        prefix
+            .chars()
+            .all(|c| c.is_ascii_digit())
+            .then(|| prefix.parse().ok())
+            .flatten()
+    })
+}
+
+/// Read a file's tags and audio properties into a Track struct plus the parsed
+/// tag data used to build it. The track is not yet associated with an album
+/// (album_id = None).
+pub fn read_track_with_tags(path: impl AsRef<Path>) -> Result<(Track, TagData)> {
     let path = path.as_ref();
 
     if !path.exists() {
@@ -125,7 +140,7 @@ pub fn read_track(path: impl AsRef<Path>) -> Result<Track> {
     let properties = tagged_file.properties();
 
     // If title is missing, derive from filename (spec rule #2)
-    let title = tag_data.title.unwrap_or_else(|| {
+    let title = tag_data.title.clone().unwrap_or_else(|| {
         path.file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("Unknown")
@@ -136,7 +151,7 @@ pub fn read_track(path: impl AsRef<Path>) -> Result<Track> {
         id: None,
         album_id: None,
         title,
-        artist: tag_data.artist,
+        artist: tag_data.artist.clone(),
         track_number: tag_data.track_number,
         disc_number: tag_data.disc_number.unwrap_or(1),
         duration_ms: tag_data.duration.map(|d| d.as_millis() as u64),
@@ -149,7 +164,13 @@ pub fn read_track(path: impl AsRef<Path>) -> Result<Track> {
         source_dir: path.parent().map(|p| p.to_path_buf()),
     };
 
-    Ok(track)
+    Ok((track, tag_data))
+}
+
+/// Read a file's tags and audio properties into a Track struct.
+/// The track is not yet associated with an album (album_id = None).
+pub fn read_track(path: impl AsRef<Path>) -> Result<Track> {
+    read_track_with_tags(path).map(|(track, _)| track)
 }
 
 // ---------- Frame read-all ----------
@@ -377,7 +398,7 @@ pub fn write_tags(path: &Path, changes: &TagChanges) -> Result<TagWriteReport> {
     std::fs::copy(path, &tmp_path)?;
 
     // Work on a scope so we can clean up the tmp file on error.
-    let result = apply_and_save(&tmp_path, changes);
+    let result = apply_and_save(path, &tmp_path, changes);
 
     match result {
         Ok(report) => {
@@ -395,12 +416,15 @@ pub fn write_tags(path: &Path, changes: &TagChanges) -> Result<TagWriteReport> {
     }
 }
 
-fn apply_and_save(tmp_path: &Path, changes: &TagChanges) -> Result<TagWriteReport> {
-    let mut tagged_file =
-        lofty::read_from_path(tmp_path).map_err(|e| KyokuError::TagRead {
-            path: tmp_path.to_path_buf(),
-            source: e,
-        })?;
+fn apply_and_save(
+    original_path: &Path,
+    tmp_path: &Path,
+    changes: &TagChanges,
+) -> Result<TagWriteReport> {
+    let mut tagged_file = lofty::read_from_path(tmp_path).map_err(|e| KyokuError::TagRead {
+        path: tmp_path.to_path_buf(),
+        source: e,
+    })?;
 
     // Ensure a primary tag exists. `primary_tag_mut()` returns None on a
     // fresh file; in that case we construct the appropriate tag type
@@ -465,8 +489,8 @@ fn apply_and_save(tmp_path: &Path, changes: &TagChanges) -> Result<TagWriteRepor
 
     tagged_file
         .save_to_path(tmp_path, WriteOptions::default())
-        .map_err(|e| KyokuError::TagRead {
-            path: tmp_path.to_path_buf(),
+        .map_err(|e| KyokuError::TagWrite {
+            path: original_path.to_path_buf(),
             source: e,
         })?;
 
@@ -481,16 +505,10 @@ fn apply_and_save(tmp_path: &Path, changes: &TagChanges) -> Result<TagWriteRepor
 /// so lofty's format detection — which keys off the extension — still
 /// works on the tmp file.
 fn tmp_path_for(path: &Path) -> PathBuf {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("tag");
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("tmp");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("tag");
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("tmp");
     let mut p = path.to_path_buf();
-    p.set_file_name(format!("{}.kyoku-tmp.{}", stem, ext));
+    p.set_file_name(format!("{}{}.{}", stem, TMP_MARKER, ext));
     p
 }
 
@@ -635,6 +653,13 @@ mod tests {
         assert_eq!(after.title.as_deref(), Some("Something Else"));
         assert_eq!(after.artist, before_artist);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_year_accepts_date_prefix() {
+        assert_eq!(parse_year_value("2024"), Some(2024));
+        assert_eq!(parse_year_value("2024-03-01"), Some(2024));
+        assert_eq!(parse_year_value("abcd-03-01"), None);
     }
 
     #[test]

@@ -515,7 +515,7 @@ fn main() -> anyhow::Result<()> {
                         &conn,
                         &settings.library.music_dir,
                         &plan,
-                        &settings.import.organize_operation,
+                        settings.import.organize_operation,
                         &core::organizer::cleanup_roots(&settings),
                     )?;
                     println!();

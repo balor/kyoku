@@ -106,8 +106,7 @@ fn path_filter_matches_music_dir_root_for_relative_db_rows() {
     let target = music.join("Artist/Album (2024)/01 Song.mp3");
     touch(&target);
     let (album_id, _) =
-        queries::get_or_create_album(&conn, "Album", Some("Artist"), Some(2024), None, 1)
-            .unwrap();
+        queries::get_or_create_album(&conn, "Album", Some("Artist"), Some(2024), None, 1).unwrap();
     let track = make_track_struct(target, Some(album_id), "Song", "Artist", 1);
     queries::insert_track(&conn, &music, &track, Some(album_id), None).unwrap();
 
@@ -119,7 +118,10 @@ fn path_filter_matches_music_dir_root_for_relative_db_rows() {
     .unwrap();
 
     assert_eq!(plan.missing_sources.len(), 0);
-    assert_eq!(plan.skipped, 1, "root music_dir filter should match relative DB rows");
+    assert_eq!(
+        plan.skipped, 1,
+        "root music_dir filter should match relative DB rows"
+    );
 }
 
 #[test]
@@ -143,7 +145,10 @@ fn path_filter_uses_component_boundaries() {
     .unwrap();
 
     assert_eq!(plan.missing_sources.len(), 0);
-    assert_eq!(plan.skipped, 1, "Artist filter must not match Artist Backup");
+    assert_eq!(
+        plan.skipped, 1,
+        "Artist filter must not match Artist Backup"
+    );
 }
 
 #[test]
@@ -434,7 +439,14 @@ fn apply_move_relocates_file_and_updates_db_path() {
     );
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    let result = apply_organize(
+        &conn,
+        &music,
+        &plan,
+        crate::config::OrganizeOperation::Move,
+        &[music.clone(), src.clone()],
+    )
+    .unwrap();
 
     assert_eq!(result.moved, 1);
     assert!(result.errors.is_empty());
@@ -467,7 +479,14 @@ fn apply_copy_creates_collection_file_and_updates_collection_tracks_path() {
     let coll_id = ensure_collection(&conn, "Mix", tid);
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    let result = apply_organize(
+        &conn,
+        &music,
+        &plan,
+        crate::config::OrganizeOperation::Move,
+        &[music.clone(), src.clone()],
+    )
+    .unwrap();
 
     assert_eq!(result.copied, 1);
     // Resolved through the queries layer so the relative storage form is
@@ -484,6 +503,35 @@ fn apply_copy_creates_collection_file_and_updates_collection_tracks_path() {
 }
 
 #[test]
+fn apply_backfills_existing_collection_copy_path() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    let source = music.join("Artist/Album (2024)/01 Song.mp3");
+    let tid = add_album_track(&conn, source, "Artist", "Album", 1, "Song", Some(2024));
+    let coll_id = ensure_collection(&conn, "Mix", tid);
+    let existing_copy = music.join("Collections/Mix/01 Artist - Song.mp3");
+    touch(&existing_copy);
+
+    let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
+
+    assert!(plan.copies.is_empty());
+    assert_eq!(plan.copy_backfills.len(), 1);
+    let result = apply_organize(
+        &conn,
+        &music,
+        &plan,
+        crate::config::OrganizeOperation::Move,
+        std::slice::from_ref(&music),
+    )
+    .unwrap();
+    assert!(result.errors.is_empty());
+    let coll_paths = queries::get_collection_file_paths(&conn, &music, coll_id).unwrap();
+    assert_eq!(
+        coll_paths.get(&tid).map(String::as_str),
+        Some(existing_copy.display().to_string().as_str())
+    );
+}
+
+#[test]
 fn apply_move_with_also_collection_updates_both_tracks_and_collection_tracks() {
     let (_tmp, src, music, conn) = fresh_world();
     // Loose track in one collection → move serves as the collection's primary
@@ -491,14 +539,24 @@ fn apply_move_with_also_collection_updates_both_tracks_and_collection_tracks() {
     let coll_id = ensure_collection(&conn, "Mix", tid);
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    let result = apply_organize(
+        &conn,
+        &music,
+        &plan,
+        crate::config::OrganizeOperation::Move,
+        &[music.clone(), src.clone()],
+    )
+    .unwrap();
     assert_eq!(result.moved, 1);
     assert_eq!(
         result.copied, 0,
         "no separate copy expected — the move is the copy"
     );
 
-    let track_path = queries::get_track(&conn, &music, tid).unwrap().unwrap().file_path;
+    let track_path = queries::get_track(&conn, &music, tid)
+        .unwrap()
+        .unwrap()
+        .file_path;
     let coll_paths = queries::get_collection_file_paths(&conn, &music, coll_id).unwrap();
     let coll_path = coll_paths
         .get(&tid)
@@ -526,7 +584,14 @@ fn apply_move_cleans_empty_source_directories_walking_up() {
     );
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    let result = apply_organize(
+        &conn,
+        &music,
+        &plan,
+        crate::config::OrganizeOperation::Move,
+        &[music.clone(), src.clone()],
+    )
+    .unwrap();
     assert_eq!(result.moved, 1);
     assert!(
         result.dirs_cleaned >= 2,
@@ -559,7 +624,14 @@ fn apply_deletes_orphan_track_rows() {
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
     assert_eq!(plan.missing_sources.len(), 1);
 
-    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    let result = apply_organize(
+        &conn,
+        &music,
+        &plan,
+        crate::config::OrganizeOperation::Move,
+        &[music.clone(), src.clone()],
+    )
+    .unwrap();
 
     assert_eq!(result.orphans_cleaned, 1);
     let exists: i64 = conn
@@ -646,7 +718,14 @@ fn apply_unlinks_orphan_file_and_clears_tracking_row() {
     .unwrap();
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone()]).unwrap();
+    let result = apply_organize(
+        &conn,
+        &music,
+        &plan,
+        crate::config::OrganizeOperation::Move,
+        std::slice::from_ref(&music),
+    )
+    .unwrap();
 
     assert_eq!(result.file_orphans_removed, 1);
     assert!(result.errors.is_empty());
@@ -677,7 +756,14 @@ fn apply_treats_already_missing_orphan_as_success() {
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
     assert_eq!(plan.file_orphans.len(), 1);
 
-    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone()]).unwrap();
+    let result = apply_organize(
+        &conn,
+        &music,
+        &plan,
+        crate::config::OrganizeOperation::Move,
+        std::slice::from_ref(&music),
+    )
+    .unwrap();
 
     assert_eq!(result.file_orphans_removed, 1);
     assert!(result.errors.is_empty());
@@ -706,7 +792,14 @@ fn apply_cleans_empty_parent_directories_after_orphan_unlink() {
     .unwrap();
     let plan = plan_organize(&conn, &settings_with_music_dir(&music), OrganizeFilter::All).unwrap();
 
-    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone()]).unwrap();
+    let result = apply_organize(
+        &conn,
+        &music,
+        &plan,
+        crate::config::OrganizeOperation::Move,
+        std::slice::from_ref(&music),
+    )
+    .unwrap();
 
     assert_eq!(result.file_orphans_removed, 1);
     assert!(
@@ -766,7 +859,14 @@ fn apply_skips_orphan_unlink_when_path_was_just_occupied_by_move() {
     assert_eq!(plan.file_orphans.len(), 1, "expected one pending orphan");
     assert_eq!(plan.moves[0].to, dest);
 
-    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone()]).unwrap();
+    let result = apply_organize(
+        &conn,
+        &music,
+        &plan,
+        crate::config::OrganizeOperation::Move,
+        std::slice::from_ref(&music),
+    )
+    .unwrap();
 
     assert_eq!(result.moved, 1);
     assert_eq!(result.file_orphans_removed, 1);
@@ -809,7 +909,8 @@ fn seed_collection_file(
     let abs = music.join(rel_path);
     let tid = add_loose_track(conn, abs.clone(), artist, title);
     let coll_id = ensure_collection(conn, coll, tid);
-    queries::update_collection_track_path(conn, &music, coll_id, tid, &abs.display().to_string()).unwrap();
+    queries::update_collection_track_path(conn, music, coll_id, tid, &abs.display().to_string())
+        .unwrap();
     (tid, coll_id, abs)
 }
 
@@ -838,8 +939,14 @@ fn plan_delete_classifies_files_outside_music_dir_as_skipped() {
     let outside = tmp.path().join("elsewhere/song.mp3");
     let tid = add_loose_track(&conn, outside.clone(), "Artist", "Song");
     let coll_id = ensure_collection(&conn, "Mix", tid);
-    queries::update_collection_track_path(&conn, &music, coll_id, tid, &outside.display().to_string())
-        .unwrap();
+    queries::update_collection_track_path(
+        &conn,
+        &music,
+        coll_id,
+        tid,
+        &outside.display().to_string(),
+    )
+    .unwrap();
 
     let plan = plan_delete_collection(&conn, coll_id, &music).unwrap();
 
@@ -877,6 +984,7 @@ fn plan_delete_promotes_alternate_collection_path_when_track_has_other_home() {
     queries::update_collection_track_path(&conn, &music, coll_a, tid, &abs_a.display().to_string())
         .unwrap();
     let abs_b = music.join("Collections/B/song.mp3");
+    touch(&abs_b);
     queries::update_collection_track_path(&conn, &music, coll_b, tid, &abs_b.display().to_string())
         .unwrap();
 
@@ -891,6 +999,59 @@ fn plan_delete_promotes_alternate_collection_path_when_track_has_other_home() {
         vec![(tid, abs_b.display().to_string())],
         "should promote B's path to be the new tracks.file_path",
     );
+}
+
+#[test]
+fn plan_delete_skips_missing_alternate_collection_path() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    let abs_a = music.join("Collections/A/song.mp3");
+    let tid = add_loose_track(&conn, abs_a.clone(), "Artist", "Song");
+    let (coll_a, _) = queries::get_or_create_collection(&conn, "A").unwrap();
+    let (coll_b, _) = queries::get_or_create_collection(&conn, "B").unwrap();
+    queries::add_track_to_collection(&conn, coll_a, tid).unwrap();
+    queries::add_track_to_collection(&conn, coll_b, tid).unwrap();
+    queries::update_collection_track_path(&conn, &music, coll_a, tid, &abs_a.display().to_string())
+        .unwrap();
+    let missing_b = music.join("Collections/B/missing.mp3");
+    queries::update_collection_track_path(
+        &conn,
+        &music,
+        coll_b,
+        tid,
+        &missing_b.display().to_string(),
+    )
+    .unwrap();
+
+    let plan = plan_delete_collection(&conn, coll_a, &music).unwrap();
+
+    assert!(plan.promote_paths.is_empty());
+}
+
+#[test]
+fn apply_delete_collection_without_file_delete_does_not_promote() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    let abs_a = music.join("Collections/A/song.mp3");
+    let tid = add_loose_track(&conn, abs_a.clone(), "Artist", "Song");
+    let (coll_a, _) = queries::get_or_create_collection(&conn, "A").unwrap();
+    let (coll_b, _) = queries::get_or_create_collection(&conn, "B").unwrap();
+    queries::add_track_to_collection(&conn, coll_a, tid).unwrap();
+    queries::add_track_to_collection(&conn, coll_b, tid).unwrap();
+    queries::update_collection_track_path(&conn, &music, coll_a, tid, &abs_a.display().to_string())
+        .unwrap();
+    let abs_b = music.join("Collections/B/song.mp3");
+    touch(&abs_b);
+    queries::update_collection_track_path(&conn, &music, coll_b, tid, &abs_b.display().to_string())
+        .unwrap();
+    let plan = plan_delete_collection(&conn, coll_a, &music).unwrap();
+    assert_eq!(plan.promote_paths, vec![(tid, abs_b.display().to_string())]);
+
+    let result = apply_delete_collection(&conn, &music, &plan, false).unwrap();
+
+    assert!(result.errors.is_empty());
+    let row = queries::get_track(&conn, &music, tid).unwrap().unwrap();
+    assert_eq!(row.file_path, abs_a.display().to_string());
+    assert!(abs_a.exists());
+    assert!(abs_b.exists());
 }
 
 #[test]
@@ -995,7 +1156,7 @@ fn remove_empty_parents_never_deletes_root_itself() {
     let child = root.join("Artist/Album");
     std::fs::create_dir_all(&child).unwrap();
 
-    let cleaned = remove_empty_parents(&child, &[root.clone()]);
+    let cleaned = remove_empty_parents(&child, std::slice::from_ref(&root));
 
     // Both Album and Artist are inside the root and empty → cleaned.
     // But the root itself must survive even though it is empty.
@@ -1015,7 +1176,7 @@ fn remove_empty_parents_stops_at_root_boundary() {
     std::fs::create_dir_all(&child).unwrap();
     std::fs::create_dir_all(&sibling).unwrap();
 
-    let _ = remove_empty_parents(&child, &[root.clone()]);
+    let _ = remove_empty_parents(&child, std::slice::from_ref(&root));
 
     assert!(!child.exists(), "empty child inside root should be cleaned");
     assert!(root.exists(), "root preserved");
@@ -1054,7 +1215,15 @@ fn prune_is_blocked_when_most_sources_are_missing() {
     // whose empty mount point still passes the music_dir accessibility check.
     for i in 1..=5u32 {
         let p = src.join(format!("song{i}.mp3"));
-        add_album_track(&conn, p.clone(), "Artist", "Album", i, &format!("Song {i}"), Some(2024));
+        add_album_track(
+            &conn,
+            p.clone(),
+            "Artist",
+            "Album",
+            i,
+            &format!("Song {i}"),
+            Some(2024),
+        );
         std::fs::remove_file(&p).unwrap();
     }
 
@@ -1065,9 +1234,22 @@ fn prune_is_blocked_when_most_sources_are_missing() {
         "mass-missing sources must block the prune"
     );
 
-    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
-    assert_eq!(result.orphans_cleaned, 0, "no rows may be pruned while blocked");
-    assert!(result.prune_blocked_reason.is_some(), "block must surface in the result");
+    let result = apply_organize(
+        &conn,
+        &music,
+        &plan,
+        crate::config::OrganizeOperation::Move,
+        &[music.clone(), src.clone()],
+    )
+    .unwrap();
+    assert_eq!(
+        result.orphans_cleaned, 0,
+        "no rows may be pruned while blocked"
+    );
+    assert!(
+        result.prune_blocked_reason.is_some(),
+        "block must surface in the result"
+    );
     let remaining: i64 = conn
         .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
         .unwrap();
@@ -1081,7 +1263,15 @@ fn missing_minority_is_still_pruned() {
     // genuinely deleted files and the prune must keep working.
     for i in 1..=30u32 {
         let p = src.join(format!("song{i}.mp3"));
-        add_album_track(&conn, p.clone(), "Artist", "Album", i, &format!("Song {i:02}"), Some(2024));
+        add_album_track(
+            &conn,
+            p.clone(),
+            "Artist",
+            "Album",
+            i,
+            &format!("Song {i:02}"),
+            Some(2024),
+        );
         if i <= 5 {
             std::fs::remove_file(&p).unwrap();
         }
@@ -1094,7 +1284,14 @@ fn missing_minority_is_still_pruned() {
         "minority-missing must not trip the volume guard"
     );
 
-    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    let result = apply_organize(
+        &conn,
+        &music,
+        &plan,
+        crate::config::OrganizeOperation::Move,
+        &[music.clone(), src.clone()],
+    )
+    .unwrap();
     assert_eq!(result.orphans_cleaned, 5);
 }
 
@@ -1111,10 +1308,22 @@ fn restored_source_survives_apply_recheck() {
     // File comes back (remount, restore, sync finishing) between plan and apply.
     touch(&p);
 
-    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
-    assert_eq!(result.orphans_cleaned, 0, "restored source must not be pruned");
+    let result = apply_organize(
+        &conn,
+        &music,
+        &plan,
+        crate::config::OrganizeOperation::Move,
+        &[music.clone(), src.clone()],
+    )
+    .unwrap();
+    assert_eq!(
+        result.orphans_cleaned, 0,
+        "restored source must not be pruned"
+    );
     let exists: i64 = conn
-        .query_row("SELECT COUNT(*) FROM tracks WHERE id = ?1", [tid], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM tracks WHERE id = ?1", [tid], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(exists, 1, "row must survive the stale plan");
 }
@@ -1165,7 +1374,14 @@ fn apply_refuses_to_overwrite_file_appearing_after_plan() {
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
     std::fs::write(&target, b"untracked bytes").unwrap();
 
-    let result = apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+    let result = apply_organize(
+        &conn,
+        &music,
+        &plan,
+        crate::config::OrganizeOperation::Move,
+        &[music.clone(), src.clone()],
+    )
+    .unwrap();
     assert_eq!(result.moved, 0);
     assert_eq!(result.errors.len(), 1, "skip must be reported as an error");
     assert_eq!(
@@ -1212,8 +1428,14 @@ fn in_place_track_keeps_slot_regardless_of_row_order() {
             "mover must be disambiguated away (in_place_first={in_place_first})"
         );
 
-        let result =
-            apply_organize(&conn, &music, &plan, "move", &[music.clone(), src.clone()]).unwrap();
+        let result = apply_organize(
+            &conn,
+            &music,
+            &plan,
+            crate::config::OrganizeOperation::Move,
+            &[music.clone(), src.clone()],
+        )
+        .unwrap();
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(
             std::fs::read(&organized).unwrap(),

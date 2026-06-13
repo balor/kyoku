@@ -53,8 +53,8 @@ pub struct LibrarySettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportSettings {
-    #[serde(default = "default_organize_operation")]
-    pub organize_operation: String,
+    #[serde(default)]
+    pub organize_operation: OrganizeOperation,
 
     /// Auto-accept MusicBrainz matches at or above this similarity (0.0 - 1.0).
     /// Applied to the top candidate during the Review step.
@@ -183,8 +183,12 @@ fn default_loose_path_template() -> String {
     "_loose/{artist} - {title}.{ext}".to_string()
 }
 
-fn default_organize_operation() -> String {
-    "move".to_string()
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OrganizeOperation {
+    #[default]
+    Move,
+    Copy,
 }
 
 fn default_auto_match_threshold() -> f64 {
@@ -267,6 +271,24 @@ impl Settings {
             .map(|p| crate::config::paths::expand_tilde(&p))
             .collect();
 
+        if !(0.0..=1.0).contains(&settings.import.auto_match_threshold) {
+            let original = settings.import.auto_match_threshold;
+            settings.import.auto_match_threshold = original.clamp(0.0, 1.0);
+            tracing::warn!(
+                "import.auto_match_threshold {} is outside 0.0..=1.0; clamped to {}",
+                original,
+                settings.import.auto_match_threshold
+            );
+        }
+        if settings.musicbrainz.rate_limit_ms < 1000 {
+            let original = settings.musicbrainz.rate_limit_ms;
+            settings.musicbrainz.rate_limit_ms = 1000;
+            tracing::warn!(
+                "musicbrainz.rate_limit_ms {} is below MusicBrainz policy floor; using 1000",
+                original
+            );
+        }
+
         Ok(settings)
     }
 }
@@ -274,7 +296,7 @@ impl Settings {
 impl Default for ImportSettings {
     fn default() -> Self {
         Self {
-            organize_operation: default_organize_operation(),
+            organize_operation: OrganizeOperation::default(),
             auto_match_threshold: default_auto_match_threshold(),
             match_candidates: default_match_candidates(),
         }
@@ -355,7 +377,7 @@ theme = "kanagawa"
         let settings: Settings = toml::from_str(toml).unwrap();
         assert_eq!(settings.library.music_dir, PathBuf::from("/data/music"));
         assert_eq!(settings.library.inbox_dirs.len(), 1);
-        assert_eq!(settings.import.organize_operation, "copy");
+        assert_eq!(settings.import.organize_operation, OrganizeOperation::Copy);
         assert_eq!(settings.import.match_candidates, 3);
         assert!(!settings.tagging.write_tags);
         assert_eq!(settings.ui.theme, "kanagawa");
@@ -365,5 +387,37 @@ theme = "kanagawa"
     fn test_load_nonexistent_file() {
         let settings = Settings::load("/nonexistent/config.toml").unwrap();
         assert_eq!(settings.ui.theme, "tokyo-night");
+    }
+
+    #[test]
+    fn load_clamps_out_of_range_values() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[import]
+auto_match_threshold = 1.5
+
+[musicbrainz]
+rate_limit_ms = 0
+"#,
+        )
+        .unwrap();
+
+        let settings = Settings::load(&path).unwrap();
+
+        assert_eq!(settings.import.auto_match_threshold, 1.0);
+        assert_eq!(settings.musicbrainz.rate_limit_ms, 1000);
+    }
+
+    #[test]
+    fn invalid_organize_operation_rejects_config() {
+        let toml = r#"
+[import]
+organize_operation = "cp"
+"#;
+
+        assert!(toml::from_str::<Settings>(toml).is_err());
     }
 }

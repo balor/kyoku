@@ -84,15 +84,27 @@ fn plan_delete_tracks_collects_collection_copies() {
     let (coll_a, _) = queries::get_or_create_collection(&conn, "A").unwrap();
     queries::add_track_to_collection(&conn, coll_a, tid).unwrap();
     let copy_a = music.join("Collections/A/track.mp3");
-    queries::update_collection_track_path(&conn, &music, coll_a, tid, &copy_a.display().to_string())
-        .unwrap();
+    queries::update_collection_track_path(
+        &conn,
+        &music,
+        coll_a,
+        tid,
+        &copy_a.display().to_string(),
+    )
+    .unwrap();
     let (coll_b, _) = queries::get_or_create_collection(&conn, "B").unwrap();
     queries::add_track_to_collection(&conn, coll_b, tid).unwrap();
     let copy_b = music.join("Collections/B/track.mp3");
-    queries::update_collection_track_path(&conn, &music, coll_b, tid, &copy_b.display().to_string())
-        .unwrap();
+    queries::update_collection_track_path(
+        &conn,
+        &music,
+        coll_b,
+        tid,
+        &copy_b.display().to_string(),
+    )
+    .unwrap();
 
-    let plan = plan_delete_tracks(&conn, &music, &[tid], &[music.clone()]).unwrap();
+    let plan = plan_delete_tracks(&conn, &music, &[tid], std::slice::from_ref(&music)).unwrap();
 
     assert_eq!(plan.track_ids, vec![tid]);
     assert!(
@@ -121,7 +133,7 @@ fn plan_delete_album_lists_tracks_and_album_row() {
         })
         .unwrap();
 
-    let plan = plan_delete_albums(&conn, &music, &[aid], &[music.clone()]).unwrap();
+    let plan = plan_delete_albums(&conn, &music, &[aid], std::slice::from_ref(&music)).unwrap();
 
     let mut track_ids = plan.track_ids.clone();
     track_ids.sort();
@@ -167,7 +179,7 @@ fn delete_album_preserves_tracks_that_belong_to_collections() {
     queries::update_collection_track_path(&conn, &music, coll_id, tid, &copy.display().to_string())
         .unwrap();
 
-    let plan = plan_delete_albums(&conn, &music, &[aid], &[music.clone()]).unwrap();
+    let plan = plan_delete_albums(&conn, &music, &[aid], std::slice::from_ref(&music)).unwrap();
     assert!(
         plan.track_ids.is_empty(),
         "collection tracks should survive album deletion"
@@ -176,18 +188,16 @@ fn delete_album_preserves_tracks_that_belong_to_collections() {
     assert_eq!(plan.promote_paths, vec![(tid, copy.display().to_string())]);
     assert_eq!(plan.files_to_delete, vec![primary.clone()]);
 
-    let report = apply_delete_plan(&conn, &music, &plan, true, &[music.clone()]).unwrap();
+    let report = apply_delete_plan(&conn, &music, &plan, true, std::slice::from_ref(&music)).unwrap();
 
     assert_eq!(report.albums_deleted, 1);
     assert_eq!(report.tracks_deleted, 0);
     assert_eq!(report.files_deleted, 1);
     assert!(!primary.exists());
     let album_id: Option<i64> = conn
-        .query_row(
-            "SELECT album_id FROM tracks WHERE id = ?1",
-            [tid],
-            |r| r.get(0),
-        )
+        .query_row("SELECT album_id FROM tracks WHERE id = ?1", [tid], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(album_id, None);
     // tracks.file_path now stores the relative form — read through the
@@ -202,6 +212,58 @@ fn delete_album_preserves_tracks_that_belong_to_collections() {
         )
         .unwrap();
     assert_eq!(membership_count, 1);
+}
+
+#[test]
+fn delete_album_without_file_delete_does_not_promote_collection_copy() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    let primary = music.join("Artist/Album/song.mp3");
+    let tid = add_album_track(&conn, primary.clone(), "Artist", "Album", 1, "Song", None);
+    let aid: i64 = conn
+        .query_row("SELECT album_id FROM tracks WHERE id = ?1", [tid], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let (coll_id, _) = queries::get_or_create_collection(&conn, "Mix").unwrap();
+    queries::add_track_to_collection(&conn, coll_id, tid).unwrap();
+    let copy = music.join("Collections/Mix/song.mp3");
+    touch(&copy);
+    queries::update_collection_track_path(&conn, &music, coll_id, tid, &copy.display().to_string())
+        .unwrap();
+
+    let plan = plan_delete_albums(&conn, &music, &[aid], std::slice::from_ref(&music)).unwrap();
+    assert_eq!(plan.promote_paths, vec![(tid, copy.display().to_string())]);
+
+    let report = apply_delete_plan(&conn, &music, &plan, false, std::slice::from_ref(&music)).unwrap();
+
+    assert_eq!(report.files_deleted, 0);
+    let row = queries::get_track(&conn, &music, tid).unwrap().unwrap();
+    assert_eq!(row.file_path, primary.display().to_string());
+    assert!(primary.exists());
+    assert!(copy.exists());
+}
+
+#[test]
+fn plan_delete_tracks_dedupes_primary_equal_to_collection_copy() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    let primary = music.join("Collections/Mix/song.mp3");
+    let tid = add_loose_track(&conn, primary.clone(), "Artist", "Song");
+    let (coll_id, _) = queries::get_or_create_collection(&conn, "Mix").unwrap();
+    queries::add_track_to_collection(&conn, coll_id, tid).unwrap();
+    queries::update_collection_track_path(
+        &conn,
+        &music,
+        coll_id,
+        tid,
+        &primary.display().to_string(),
+    )
+    .unwrap();
+
+    let plan = plan_delete_tracks(&conn, &music, &[tid], std::slice::from_ref(&music)).unwrap();
+
+    assert_eq!(plan.files_to_delete, vec![primary]);
+    assert!(plan.collection_copies_to_delete.is_empty());
+    assert_eq!(plan.deletable_file_count(), 1);
 }
 
 #[test]
@@ -226,7 +288,8 @@ fn delete_album_keeps_primary_file_for_collection_track_without_copy() {
         "do not delete a surviving collection track's only physical file"
     );
 
-    let report = apply_delete_plan(&conn, &music, &plan, true, std::slice::from_ref(&music)).unwrap();
+    let report =
+        apply_delete_plan(&conn, &music, &plan, true, std::slice::from_ref(&music)).unwrap();
 
     assert_eq!(report.albums_deleted, 1);
     assert_eq!(report.files_deleted, 0);
@@ -247,9 +310,9 @@ fn apply_delete_plan_keeps_files_when_flag_false() {
     let (_tmp, _src, music, conn) = fresh_world();
     let p = music.join("Artist/Album/song.mp3");
     let tid = add_album_track(&conn, p.clone(), "Artist", "Album", 1, "Song", None);
-    let plan = plan_delete_tracks(&conn, &music, &[tid], &[music.clone()]).unwrap();
+    let plan = plan_delete_tracks(&conn, &music, &[tid], std::slice::from_ref(&music)).unwrap();
 
-    let report = apply_delete_plan(&conn, &music, &plan, false, &[music.clone()]).unwrap();
+    let report = apply_delete_plan(&conn, &music, &plan, false, std::slice::from_ref(&music)).unwrap();
 
     assert_eq!(report.tracks_deleted, 1);
     assert_eq!(
@@ -270,9 +333,9 @@ fn apply_delete_plan_removes_files_and_empty_parents() {
     let (_tmp, _src, music, conn) = fresh_world();
     let p = music.join("Artist/Album/song.mp3");
     let tid = add_album_track(&conn, p.clone(), "Artist", "Album", 1, "Song", None);
-    let plan = plan_delete_tracks(&conn, &music, &[tid], &[music.clone()]).unwrap();
+    let plan = plan_delete_tracks(&conn, &music, &[tid], std::slice::from_ref(&music)).unwrap();
 
-    let report = apply_delete_plan(&conn, &music, &plan, true, &[music.clone()]).unwrap();
+    let report = apply_delete_plan(&conn, &music, &plan, true, std::slice::from_ref(&music)).unwrap();
 
     assert_eq!(report.files_deleted, 1);
     assert_eq!(report.tracks_deleted, 1);
@@ -299,7 +362,7 @@ fn apply_delete_plan_rejects_path_outside_managed_roots() {
     let plan = plan_delete_tracks(&conn, &music, &[tid], &[tmp.path().to_path_buf()]).unwrap();
     assert_eq!(plan.files_to_delete, vec![outside.clone()]);
 
-    let report = apply_delete_plan(&conn, &music, &plan, true, &[music.clone()]).unwrap();
+    let report = apply_delete_plan(&conn, &music, &plan, true, std::slice::from_ref(&music)).unwrap();
 
     assert_eq!(report.files_deleted, 0, "apply must refuse unmanaged paths");
     assert!(outside.exists(), "file outside cleanup_roots is untouched");
@@ -315,7 +378,7 @@ fn plan_delete_flags_files_outside_managed_roots() {
 
     // managed_roots contains only music_dir; outside path lands in
     // `files_outside_managed` and must not appear in `files_to_delete`.
-    let plan = plan_delete_tracks(&conn, &music, &[tid], &[music.clone()]).unwrap();
+    let plan = plan_delete_tracks(&conn, &music, &[tid], std::slice::from_ref(&music)).unwrap();
 
     assert!(plan.files_to_delete.is_empty());
     assert_eq!(plan.files_outside_managed, vec![outside]);

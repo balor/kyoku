@@ -1146,6 +1146,8 @@ pub struct OrganizeCollectionMembership {
     pub name: String,
     pub path_template: Option<String>,
     pub effective_position: u32,
+    /// Absolute path recorded for this collection copy, if any.
+    pub collection_file_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1250,7 +1252,7 @@ pub fn get_all_tracks_for_organize(
     // collection filenames stay stable when organizing one artist/album.
     let mut effective_cache: HashMap<i64, HashMap<i64, u32>> = HashMap::new();
     let mut coll_stmt = conn.prepare(
-        "SELECT ct.collection_id, c.name, c.path_template, ct.position
+        "SELECT ct.collection_id, c.name, c.path_template, ct.position, ct.collection_file_path
          FROM collection_tracks ct
          JOIN collections c ON c.id = ct.collection_id
          WHERE ct.track_id = ?1",
@@ -1262,10 +1264,11 @@ pub fn get_all_tracks_for_organize(
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<u32>>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })?;
         for c in colls {
-            let (id, name, path_template, position) = c?;
+            let (id, name, path_template, position, collection_file_path) = c?;
             if let std::collections::hash_map::Entry::Vacant(entry) = effective_cache.entry(id) {
                 entry.insert(get_collection_effective_positions(conn, music_dir, id)?);
             }
@@ -1279,6 +1282,8 @@ pub fn get_all_tracks_for_organize(
                 name,
                 path_template,
                 effective_position,
+                collection_file_path: collection_file_path
+                    .map(|p| paths::from_db_path(&p, music_dir).display().to_string()),
             });
         }
     }

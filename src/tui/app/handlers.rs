@@ -141,7 +141,7 @@ impl App {
                             &self.conn,
                             &self.settings.library.music_dir,
                             &plan,
-                            &self.settings.import.organize_operation,
+                            self.settings.import.organize_operation,
                             &crate::core::organizer::cleanup_roots(&self.settings),
                         ) {
                             Ok(result) => {
@@ -240,7 +240,7 @@ impl App {
                             &self.conn,
                             &self.settings.library.music_dir,
                             &plan,
-                            &self.settings.import.organize_operation,
+                            self.settings.import.organize_operation,
                             &crate::core::organizer::cleanup_roots(&self.settings),
                         ) {}
                         self.collections.load(&self.conn, None).ok();
@@ -413,7 +413,7 @@ impl App {
                                 &self.conn,
                                 &self.settings.library.music_dir,
                                 &plan,
-                                &self.settings.import.organize_operation,
+                                self.settings.import.organize_operation,
                                 &crate::core::organizer::cleanup_roots(&self.settings),
                             ) {
                                 let mut parts = Vec::new();

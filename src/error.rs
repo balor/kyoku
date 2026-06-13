@@ -16,6 +16,13 @@ pub enum KyokuError {
         source: lofty::error::LoftyError,
     },
 
+    #[error("Tag write error for {path}: {source}")]
+    TagWrite {
+        path: PathBuf,
+        #[source]
+        source: lofty::error::LoftyError,
+    },
+
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
 
