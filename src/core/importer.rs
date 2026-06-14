@@ -95,34 +95,59 @@ pub fn scan_audio_files(path: impl AsRef<Path>) -> Vec<std::path::PathBuf> {
     files
 }
 
-/// Group tracks by their album (using album tag + album_artist + directory).
+/// Stable grouping key for album imports. Non-loose imports group by source
+/// directory plus normalized album tag, falling back to the directory name
+/// when the album tag is absent. The NUL separator keeps source and album
+/// components unambiguous while remaining an internal-only key.
+pub(crate) fn album_group_key(
+    track: &Track,
+    tag: Option<&tagger::TagData>,
+    index: usize,
+    loose: bool,
+) -> String {
+    if loose {
+        return format!("__loose__{}", index);
+    }
+
+    let source = track
+        .source_dir
+        .as_deref()
+        .or_else(|| track.file_path.parent())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "Unknown".to_string());
+    let fallback_album = track
+        .file_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or("Unknown");
+    let album = tag
+        .and_then(|td| td.album.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback_album)
+        .to_lowercase();
+
+    format!("{source}\0{album}")
+}
+
+pub(crate) fn album_group_source_label(key: &str) -> &str {
+    key.split_once('\0').map_or(key, |(source, _)| source)
+}
+
+/// Group tracks by source directory + normalized album tag.
 /// Returns a map of group key -> list of tracks.
 /// If `loose` is true, each track is its own group (no album grouping).
-fn group_into_albums(tracks: &[Track], loose: bool) -> HashMap<String, Vec<usize>> {
+fn group_into_albums(
+    tracks: &[Track],
+    tag_data_map: &[Option<tagger::TagData>],
+    loose: bool,
+) -> HashMap<String, Vec<usize>> {
     let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
 
     for (i, track) in tracks.iter().enumerate() {
-        let key = if loose {
-            // Each track is independent
-            format!("__loose__{}", i)
-        } else {
-            // Group by album tag + directory
-            let album = track
-                .file_path
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str())
-                .unwrap_or("Unknown");
-
-            // If we have album tag from reading, prefer that
-            // But we don't have album on Track — we'll use source_dir as grouping key
-            track
-                .source_dir
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| album.to_string())
-        };
-
+        let tag = tag_data_map.get(i).and_then(|td| td.as_ref());
+        let key = album_group_key(track, tag, i, loose);
         groups.entry(key).or_default().push(i);
     }
 
@@ -272,7 +297,7 @@ pub fn import(
     }
 
     // Group into albums
-    let groups = group_into_albums(&tracks, loose);
+    let groups = group_into_albums(&tracks, &tag_data_map, loose);
 
     if pretend {
         tracing::info!("Dry run — would import {} track(s):", tracks.len());
@@ -286,7 +311,7 @@ pub fn import(
                     .get(indices[0])
                     .and_then(|td| td.as_ref())
                     .and_then(|td| td.album.as_deref())
-                    .unwrap_or(key);
+                    .unwrap_or_else(|| album_group_source_label(key));
                 tracing::info!("  Album: {} ({} tracks)", album_name, indices.len());
                 for &i in indices {
                     tracing::info!("    - {}", tracks[i].title);
@@ -434,6 +459,60 @@ mod tests {
             let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("");
             SUPPORTED_EXTENSIONS.contains(&ext.to_lowercase().as_str())
         }));
+    }
+
+    fn test_track(path: PathBuf, source_dir: PathBuf, title: &str) -> Track {
+        Track {
+            id: None,
+            album_id: None,
+            title: title.to_string(),
+            artist: Some("Artist".to_string()),
+            track_number: Some(1),
+            disc_number: 1,
+            duration_ms: None,
+            mbid: None,
+            file_path: path,
+            file_format: crate::db::models::AudioFormat::Mp3,
+            bitrate: None,
+            sample_rate: None,
+            tag_status: crate::db::models::TagStatus::Unmatched,
+            source_dir: Some(source_dir),
+        }
+    }
+
+    fn tag_with_album(album: &str) -> tagger::TagData {
+        tagger::TagData {
+            title: None,
+            artist: Some("Artist".to_string()),
+            album: Some(album.to_string()),
+            album_artist: Some("Artist".to_string()),
+            year: None,
+            track_number: Some(1),
+            disc_number: Some(1),
+            genre: None,
+            duration: None,
+        }
+    }
+
+    #[test]
+    fn group_into_albums_splits_mixed_album_tags_in_one_directory() {
+        let dir = PathBuf::from("/inbox/mixed");
+        let tracks = vec![
+            test_track(dir.join("a.mp3"), dir.clone(), "A"),
+            test_track(dir.join("b.mp3"), dir.clone(), "B"),
+            test_track(dir.join("c.mp3"), dir.clone(), "C"),
+        ];
+        let tags = vec![
+            Some(tag_with_album("Album A")),
+            Some(tag_with_album("album a ")),
+            Some(tag_with_album("Album B")),
+        ];
+
+        let groups = group_into_albums(&tracks, &tags, false);
+
+        assert_eq!(groups.len(), 2);
+        assert!(groups.values().any(|indices| indices == &vec![0, 1]));
+        assert!(groups.values().any(|indices| indices == &vec![2]));
     }
 
     #[test]

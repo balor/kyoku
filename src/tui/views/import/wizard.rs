@@ -25,9 +25,10 @@ use super::{
 };
 
 fn display_group_name(
-    source_dir: &str,
+    group_key: &str,
     tracks: &[(crate::db::models::Track, Option<tagger::TagData>)],
 ) -> String {
+    let source_dir = importer::album_group_source_label(group_key);
     let mut albums: Vec<String> = tracks
         .iter()
         .filter_map(|(_, tag)| tag.as_ref()?.album.as_deref())
@@ -526,14 +527,10 @@ impl ImportView {
                 if let Ok((mut track, tag_data)) = tagger::read_track_with_tags(&abs_path) {
                     track.file_path = abs_path;
 
-                    // Group by source directory. Mixed-album directories stay a
-                    // single group by design; the display name below annotates
-                    // them so the review screen is explicit about that choice.
-                    let group_key = track
-                        .source_dir
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "Unknown".to_string());
+                    // Group by source directory + normalized album tag so a
+                    // mixed folder does not stamp every track with the first
+                    // track's album during import.
+                    let group_key = importer::album_group_key(&track, Some(&tag_data), i, false);
 
                     if !groups.contains_key(&group_key) {
                         group_order.push(group_key.clone());
