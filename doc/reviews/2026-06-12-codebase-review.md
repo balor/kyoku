@@ -240,13 +240,10 @@ import; adding a separate source-path tracker is not worth the added model
 complexity.
 
 ### CORE-3 — Importer groups by directory only; first track's album tag stamps the group
-**Status:** accepted / not planned (UI annotated in 8693f47) · `src/core/importer.rs:94-123, 304-345`
+**Status:** fixed (e010ebe) · `src/core/importer.rs:94-123, 304-345`
 Mixed folders get welded into one wrong album even though per-file album tags
 sit in `tag_data_map` (the "we don't have album on Track" comment is stale).
 `ordered_group_indices` already computes a per-item `album_key` the grouping ignores.
-
-Owner decision: keep directory grouping as-is. The import wizard now annotates
-mixed/source groups with album-tag context so the review step is explicit.
 
 ### CORE-4 — Promotion runs even when `delete_files=false`; collection promote skips disk check
 **Status:** fixed (8693f47) · `pruner.rs:277-286`, `organizer.rs:770-773, 790-809`

@@ -256,12 +256,10 @@ Original options considered:
 Do not implement unless the owner reopens this decision.
 
 ### CORE-3 — importer groups by directory only (MEDIUM)
-**Owner decision (2026-06-13): accepted / not planned.** Keep directory
-cohesion as the grouping model. Commit `8693f47` made the import wizard more
-informative by annotating review groups with album-tag context, including mixed
-album-tag directories, without changing grouping behavior.
-
-Do not split groups by album tag unless the owner reopens this decision.
+Implemented in `e010ebe`: CLI import and the import wizard now group by source
+directory plus normalized album tag, falling back to the directory name when the
+album tag is empty. Mixed folders with Album A and Album B become separate
+review/import groups instead of stamping all tracks with the first track's album.
 
 ### CORE-4 — deletion promote/detach bugs (MEDIUM)
 Three related fixes:
