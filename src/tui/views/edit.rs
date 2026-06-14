@@ -34,6 +34,7 @@ use crate::db::queries;
 use crate::error::Result;
 use crate::tui::keybindings as keys;
 use crate::tui::themes::Theme;
+use crate::tui::widgets::confirm_delete::ConfirmDelete;
 use crate::tui::widgets::input::TextInput;
 
 /// Separator used to join / split multi-value frames in the text input.
@@ -76,6 +77,10 @@ pub struct EditorView {
     pub write_to_file: bool,
     /// True once a successful save has landed. Gates the "Saved" notice.
     pub saved: bool,
+    /// Pending discard confirmation shown when leaving with unsaved edits.
+    pub pending_discard: Option<ConfirmDelete>,
+    /// Whether confirming the discard should quit the app instead of returning.
+    pub discard_quit_on_confirm: bool,
 }
 
 impl Default for EditorView {
@@ -92,6 +97,8 @@ impl Default for EditorView {
             notice: None,
             write_to_file: true,
             saved: false,
+            pending_discard: None,
+            discard_quit_on_confirm: false,
         }
     }
 }
@@ -109,6 +116,8 @@ impl EditorView {
         self.editing = false;
         self.saved = false;
         self.notice = None;
+        self.pending_discard = None;
+        self.discard_quit_on_confirm = false;
         self.write_to_file = settings.tagging.write_tags;
 
         let Some(track) = queries::get_track(conn, &settings.library.music_dir, track_id)? else {
@@ -168,6 +177,23 @@ impl EditorView {
 
     pub fn is_editing(&self) -> bool {
         self.editing
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.frames.iter().any(FrameRow::is_modified)
+    }
+
+    pub fn has_popup(&self) -> bool {
+        self.editing || self.pending_discard.is_some()
+    }
+
+    pub fn request_discard_confirm(&mut self, quit_on_confirm: bool) {
+        self.pending_discard = Some(
+            ConfirmDelete::new("Discard changes", "Leave the tag editor without saving?")
+                .with_summary("Unsaved tag edits will be lost.")
+                .without_checkbox(),
+        );
+        self.discard_quit_on_confirm = quit_on_confirm;
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, conn: &Connection) {

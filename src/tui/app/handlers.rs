@@ -217,7 +217,7 @@ impl App {
     }
 
     pub(super) fn handle_collections_key(&mut self, key: KeyEvent) -> AppAction {
-        if keys::is_tab_switch(&key) {
+        if !self.collections.has_popup() && keys::is_tab_switch(&key) {
             self.switch_view(AppView::Library);
             return AppAction::None;
         }
@@ -444,13 +444,26 @@ impl App {
                                 }
                                 // Stash notice — we can't set it on the view
                                 // directly since we'll reload below
-                                if !parts.is_empty() {
-                                    let _notice =
-                                        format!("Organized: {}", parts.join(", "));
+                                let notice = if parts.is_empty() {
+                                    None
+                                } else {
+                                    Some(format!("Organized: {}", parts.join(", ")))
+                                };
+                            
+                                // Reload to reflect new paths
+                                if let AppView::CollectionDetail { collection_id } = self.view {
+                                    self.collection_detail
+                                        .load(
+                                            &self.conn,
+                                            collection_id,
+                                            &self.settings.library.music_dir,
+                                        )
+                                        .ok();
+                                    if let Some(notice) = notice {
+                                        self.collection_detail.notice = Some(notice);
+                                    }
                                 }
-                            }
-                            // Reload to reflect new paths
-                            if let AppView::CollectionDetail { collection_id } = self.view {
+                            } else if let AppView::CollectionDetail { collection_id } = self.view {
                                 self.collection_detail
                                     .load(
                                         &self.conn,
@@ -656,47 +669,76 @@ impl App {
     }
 
     pub(super) fn handle_editor_key(&mut self, key: KeyEvent) -> AppAction {
-        if keys::is_back(&key) && !self.editor.is_editing() {
-            // Return to the view we came from without reloading
-            // (preserves cursor position in album/collection detail)
-            let return_view = self.editor_return_to.take().unwrap_or(AppView::Library);
-
-            // If the editor made changes, refresh the underlying view's data
-            // but keep the cursor in place by re-running load (which clamps selection).
-            let music_dir = self.settings.library.music_dir.clone();
-            match &return_view {
-                AppView::AlbumDetail { album_id } => {
-                    let prev_selected = self.album_detail.selected;
-                    self.album_detail
-                        .load(&self.conn, &music_dir, *album_id)
-                        .ok();
-                    if prev_selected < self.album_detail.tracks.len() {
-                        self.album_detail.selected = prev_selected;
+        if let Some(popup) = &mut self.editor.pending_discard {
+            match popup.handle_key(key) {
+                ConfirmAction::Confirm { .. } => {
+                    let quit = self.editor.discard_quit_on_confirm;
+                    self.editor.pending_discard = None;
+                    self.editor.discard_quit_on_confirm = false;
+                    if quit {
+                        return AppAction::Quit;
                     }
+                    self.return_from_editor();
+                    return AppAction::None;
                 }
-                AppView::LooseTracks => {
-                    let prev_selected = self.album_detail.selected;
-                    self.album_detail.load_loose(&self.conn, &music_dir).ok();
-                    if prev_selected < self.album_detail.tracks.len() {
-                        self.album_detail.selected = prev_selected;
-                    }
+                ConfirmAction::Cancel => {
+                    self.editor.pending_discard = None;
+                    self.editor.discard_quit_on_confirm = false;
+                    return AppAction::None;
                 }
-                AppView::CollectionDetail { collection_id } => {
-                    let prev_selected = self.collection_detail.selected;
-                    self.collection_detail
-                        .load(&self.conn, *collection_id, &music_dir)
-                        .ok();
-                    if prev_selected < self.collection_detail.tracks.len() {
-                        self.collection_detail.selected = prev_selected;
-                    }
-                }
-                _ => {}
+                ConfirmAction::None => return AppAction::None,
             }
+        }
 
-            self.view = return_view;
-            return AppAction::None;
+        if !self.editor.is_editing() && (keys::is_back(&key) || keys::is_quit(&key)) {
+            if self.editor.is_dirty() {
+                self.editor.request_discard_confirm(keys::is_quit(&key));
+                return AppAction::None;
+            }
+            if keys::is_back(&key) {
+                self.return_from_editor();
+                return AppAction::None;
+            }
         }
         self.editor.handle_key(key, &self.conn);
         AppAction::None
+    }
+
+    fn return_from_editor(&mut self) {
+        // Return to the view we came from without losing cursor position.
+        let return_view = self.editor_return_to.take().unwrap_or(AppView::Library);
+
+        // Refresh underlying data so saved edits are visible, then clamp cursor.
+        let music_dir = self.settings.library.music_dir.clone();
+        match &return_view {
+            AppView::AlbumDetail { album_id } => {
+                let prev_selected = self.album_detail.selected;
+                self.album_detail
+                    .load(&self.conn, &music_dir, *album_id)
+                    .ok();
+                if prev_selected < self.album_detail.tracks.len() {
+                    self.album_detail.selected = prev_selected;
+                }
+            }
+            AppView::LooseTracks => {
+                let prev_selected = self.album_detail.selected;
+                self.album_detail.load_loose(&self.conn, &music_dir).ok();
+                if prev_selected < self.album_detail.tracks.len() {
+                    self.album_detail.selected = prev_selected;
+                }
+            }
+            AppView::CollectionDetail { collection_id } => {
+                let prev_selected = self.collection_detail.selected;
+                self.collection_detail
+                    .load(&self.conn, *collection_id, &music_dir)
+                    .ok();
+                if prev_selected < self.collection_detail.tracks.len() {
+                    self.collection_detail.selected = prev_selected;
+                }
+            }
+            _ => {}
+        }
+
+        self.view = return_view;
     }
 }

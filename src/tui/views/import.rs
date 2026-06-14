@@ -244,6 +244,7 @@ pub struct ConfirmCancel {
 enum ScanMessage {
     Progress(usize, usize),
     Complete(Vec<ImportGroup>),
+    Failed(String),
 }
 
 /// Result from a single-group MB search on the background thread.

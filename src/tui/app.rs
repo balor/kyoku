@@ -138,7 +138,8 @@ impl App {
         // The import view intercepts `q` to show a cancel confirmation
         // rather than quitting the app directly.
         let view_captures_input = self.current_view_has_popup();
-        let suppress_quit = view_captures_input || self.view == AppView::Import;
+        let dirty_editor = matches!(self.view, AppView::Editor { .. }) && self.editor.is_dirty();
+        let suppress_quit = view_captures_input || self.view == AppView::Import || dirty_editor;
         if !self.search.focused && !suppress_quit {
             if keys::is_quit(&key) {
                 return AppAction::Quit;
@@ -153,6 +154,12 @@ impl App {
                 self.refresh();
                 return AppAction::None;
             }
+        }
+
+        let search_supported = self.view_supports_search();
+        if self.search.focused && !search_supported {
+            self.search.focused = false;
+            self.search.clear();
         }
 
         // Search bar handling
@@ -173,13 +180,16 @@ impl App {
             return AppAction::None;
         }
 
-        if !view_captures_input && keys::is_search_focus(&key) {
+        if search_supported && !view_captures_input && keys::is_search_focus(&key) {
             self.search.focused = true;
             return AppAction::None;
         }
 
-        // Global search: g opens it from anywhere
-        if !view_captures_input && key.code == KeyCode::Char('g') {
+        // Global search: g opens it from browse views, but not from import
+        // review or the editor where it can discard in-progress work.
+        if !matches!(self.view, AppView::Import | AppView::Editor { .. })
+            && !view_captures_input
+            && key.code == KeyCode::Char('g') {
             self.global_search.open();
             self.global_search_open = true;
             return AppAction::None;
@@ -205,9 +215,20 @@ impl App {
             }
             AppView::Collections => self.collections.has_popup(),
             AppView::CollectionDetail { .. } => self.collection_detail.has_popup(),
-            AppView::Editor { .. } => self.editor.is_editing(),
+            AppView::Editor { .. } => self.editor.has_popup(),
             AppView::Import => self.import.has_popup(),
         }
+    }
+
+    fn view_supports_search(&self) -> bool {
+        matches!(
+            self.view,
+            AppView::Library
+                | AppView::Collections
+                | AppView::AlbumDetail { .. }
+                | AppView::LooseTracks
+                | AppView::CollectionDetail { .. }
+        )
     }
 
     pub fn tick(&mut self) {

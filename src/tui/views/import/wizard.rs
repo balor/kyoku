@@ -223,8 +223,8 @@ impl ImportView {
             }
             KeyCode::Enter => {
                 // Enter just advances to the next group, keeping whatever
-                // action is already set (AcceptMb if user picked 1-5,
-                // AcceptAsIs by default, etc.)
+                // action is already set (AcceptMb if user picked a numbered
+                // candidate, AcceptAsIs by default, etc.)
                 self.next_group();
             }
             KeyCode::Char('S') => {
@@ -459,6 +459,9 @@ impl ImportView {
     /// *past* the end into the review-summary state (current_group == len()).
     fn next_group(&mut self) {
         if self.current_group < self.groups.len() {
+            if let Some(group) = self.groups.get_mut(self.current_group) {
+                group.user_decided = true;
+            }
             self.current_group += 1;
             self.ensure_mb_searches_around_cursor();
         }
@@ -488,29 +491,33 @@ impl ImportView {
         !self.groups.is_empty() && self.current_group >= self.groups.len()
     }
 
-    fn start_scan(&mut self, conn: &Connection) {
+    fn start_scan(&mut self, _conn: &Connection) {
         self.step = ImportStep::Scanning;
-
-        // Filter out files that are already in the DB (main thread — needs conn).
-        // This is the same logic used by `kyoku scan` for the inbox indicator.
-        let unimported =
-            importer::scan_inbox(conn, &self.music_dir, &self.source_paths).unwrap_or_default();
+        self.scan_progress = (0, 0);
 
         let (tx, rx) = mpsc::channel();
         self.scan_rx = Some(rx);
 
-        // If nothing to import, jump straight to Review (empty) so the user
-        // gets feedback instead of a hanging Scanning screen.
-        if unimported.is_empty() {
-            self.groups.clear();
-            self.current_group = 0;
-            self.step = ImportStep::Review;
-            self.scan_rx = None;
-            return;
-        }
+        let db_path = self.db_path.clone();
+        let music_dir = self.music_dir.clone();
+        let source_paths = self.source_paths.clone();
 
         std::thread::spawn(move || {
-            let all_files = unimported;
+            let _ = tx.send(ScanMessage::Progress(0, 0));
+            let conn = match crate::db::open_database(&db_path, &music_dir) {
+                Ok(conn) => conn,
+                Err(e) => {
+                    let _ = tx.send(ScanMessage::Failed(format!("DB open failed: {e}")));
+                    return;
+                }
+            };
+            let all_files = match importer::scan_inbox(&conn, &music_dir, &source_paths) {
+                Ok(files) => files,
+                Err(e) => {
+                    let _ = tx.send(ScanMessage::Failed(e.to_string()));
+                    return;
+                }
+            };
             let total = all_files.len();
             let mut groups: std::collections::HashMap<
                 String,

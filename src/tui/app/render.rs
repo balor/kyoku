@@ -130,6 +130,8 @@ impl App {
                 ("i", "import"),
                 ("O", "organize"),
                 ("a", "add to coll"),
+                ("d", "delete"),
+                ("Space", "mark"),
                 ("s", "sort"),
                 ("Tab", "colls"),
                 ("?", "keybinds"),
@@ -200,6 +202,8 @@ impl App {
                 ("O", "organize"),
                 ("C", "fetch cover"),
                 ("a", "add to coll"),
+                ("d", "delete"),
+                ("Space", "mark"),
                 ("o", "open dir"),
                 ("?", "keybinds"),
                 ("Esc", "back"),
@@ -211,6 +215,8 @@ impl App {
                 ("O", "organize"),
                 ("C", "fetch cover"),
                 ("a", "add to coll"),
+                ("d", "delete"),
+                ("Space", "mark"),
                 ("?", "keybinds"),
                 ("Esc", "back"),
             ],
@@ -241,6 +247,8 @@ impl App {
                 ("O", "organize"),
                 ("o", "open dir"),
                 ("x", "remove"),
+                ("d", "delete"),
+                ("Space", "mark"),
                 ("?", "keybinds"),
                 ("Esc", "back"),
             ],
@@ -250,6 +258,8 @@ impl App {
                 ("R", "rename"),
                 ("O", "organize"),
                 ("x", "remove"),
+                ("d", "delete"),
+                ("Space", "mark"),
                 ("?", "keybinds"),
                 ("Esc", "back"),
             ],
@@ -286,6 +296,9 @@ impl App {
             .split(area);
 
         self.editor.render(frame, chunks[0], self.theme);
+        if let Some(popup) = &self.editor.pending_discard {
+            popup.render(frame, chunks[0], self.theme);
+        }
         crate::tui::widgets::status_bar::render(
             frame,
             chunks[1],

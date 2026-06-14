@@ -60,6 +60,7 @@ pub(super) fn run_import_worker(
     let mut dup_replaced = 0u32;
     let mut dup_user_skipped = 0u32;
     let mut orphaned = 0u32;
+    let mut mb_metadata_skipped = 0u32;
 
     // Fetch full release data for MB-matched groups (search results don't
     // include track listings — we need them for per-track metadata).
@@ -81,15 +82,39 @@ pub(super) fn run_import_worker(
                 None
             };
 
-            // If MB match, fetch the full release once for the whole group
+            // If MB match, use the full release already fetched by the wizard
+            // when available. Otherwise fetch once here. If that fetch fails,
+            // import the group as-is and do not apply destructive replacement
+            // plans that were computed from MB identity.
+            let mut mb_fetch_failed = false;
             let mb_full = if group.action == GroupAction::AcceptMb {
                 group
                     .selected_candidate
                     .and_then(|idx| group.mb_candidates.get(idx))
-                    .and_then(|c| mb_client.fetch_release(&c.release.id).ok())
+                    .and_then(|c| {
+                        if !c.release.tracks.is_empty() {
+                            Some(c.release.clone())
+                        } else {
+                            match mb_client.fetch_release(&c.release.id) {
+                                Ok(full) => Some(full),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "MB fetch_release({}) during import failed: {}",
+                                        c.release.id,
+                                        e
+                                    );
+                                    mb_fetch_failed = true;
+                                    None
+                                }
+                            }
+                        }
+                    })
             } else {
                 None
             };
+            if mb_fetch_failed {
+                mb_metadata_skipped += 1;
+            }
 
             // For MB-matched groups, all tracks share one album (the MB release).
             // Precompute it once.
@@ -205,7 +230,8 @@ pub(super) fn run_import_worker(
                 // Apply a "replace" decision: delete the existing row
                 // (its file stays on disk) and log the path as an orphan
                 // for the next organize pass to clean up.
-                if let Some(p) = plan
+                if !mb_fetch_failed
+                    && let Some(p) = plan
                     && let Some(repl) = p.replace_existing.as_ref()
                 {
                     if let Err(e) = queries::delete_track(conn, repl.id) {
@@ -346,6 +372,12 @@ pub(super) fn run_import_worker(
     }
     if user_skipped > 0 {
         parts.push(format!("Skipped: {}", user_skipped));
+    }
+    if mb_metadata_skipped > 0 {
+        parts.push(format!(
+            "Imported without MB metadata: {} group(s)",
+            mb_metadata_skipped
+        ));
     }
     if errors > 0 {
         parts.push(format!("Errors: {}", errors));

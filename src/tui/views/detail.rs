@@ -828,8 +828,8 @@ impl AlbumDetailView {
                 if let Some(mbid) = &album.mbid
                     && !mbid.is_empty()
                 {
-                    let short = &mbid[..mbid.len().min(8)];
-                    lines.push(tag_line("MB", short, theme));
+                    let short: String = mbid.chars().take(8).collect();
+                    lines.push(tag_line("MB", &short, theme));
                 }
                 if let Some(name) = cover_name {
                     lines.push(tag_line("Cover", name, theme));

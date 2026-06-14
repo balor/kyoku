@@ -24,6 +24,7 @@ impl ImportView {
         // Scanning screen forever, with q/Ctrl+C suppressed and no way out
         // short of killing the process.
         let mut scan_done = false;
+        let mut scan_failed = false;
         let mut scan_dead = false;
         if let Some(rx) = &self.scan_rx {
             loop {
@@ -36,6 +37,12 @@ impl ImportView {
                         self.current_group = 0;
                         scan_done = true;
                     }
+                    Ok(ScanMessage::Failed(reason)) => {
+                        self.result_summary = Some(format!("Scan failed: {reason}"));
+                        self.step = ImportStep::Complete;
+                        scan_done = true;
+                        scan_failed = true;
+                    }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         scan_dead = !scan_done;
@@ -46,12 +53,14 @@ impl ImportView {
         }
         if scan_done {
             self.scan_rx = None;
-            self.step = ImportStep::Review;
-            // Trigger lazy MB search for the first group, plus prefetch
-            // the next three so the user can navigate several groups
-            // forward before hitting a throbber.
-            for i in 0..=3 {
-                self.search_mb_for_group(i);
+            if !scan_failed {
+                self.step = ImportStep::Review;
+                // Trigger lazy MB search for the first group, plus prefetch
+                // the next three so the user can navigate several groups
+                // forward before hitting a throbber.
+                for i in 0..=3 {
+                    self.search_mb_for_group(i);
+                }
             }
         } else if scan_dead {
             self.scan_rx = None;
@@ -232,8 +241,19 @@ impl ImportView {
                         .get(self.current_group)
                         .map(|g| matches!(g.mb_state, MbMatchState::Failed(_)))
                         .unwrap_or(false);
+                    let pick_hint = match self.match_candidates.clamp(1, 9) {
+                        1 => "↑↓/1",
+                        2 => "↑↓/1-2",
+                        3 => "↑↓/1-3",
+                        4 => "↑↓/1-4",
+                        5 => "↑↓/1-5",
+                        6 => "↑↓/1-6",
+                        7 => "↑↓/1-7",
+                        8 => "↑↓/1-8",
+                        _ => "↑↓/1-9",
+                    };
                     let mut hints = vec![
-                        ("↑↓/1-5", "pick MB"),
+                        (pick_hint, "pick MB"),
                         ("m", "MBID"),
                         ("c", "+coll"),
                         ("A", "as-is"),
@@ -972,14 +992,13 @@ impl ImportView {
                     Style::default().fg(theme.fg_muted),
                 )),
             ],
-            DupOther::Batch(r) => {
-                let (t, _td) = self
-                    .groups
-                    .get(r.group)
-                    .and_then(|g| g.tracks.get(r.index))
-                    .map(|(t, td)| (t.clone(), td.clone()))
-                    .expect("batch ref must point at an existing track");
-                vec![
+            DupOther::Batch(r) => match self
+                .groups
+                .get(r.group)
+                .and_then(|g| g.tracks.get(r.index))
+                .map(|(t, td)| (t.clone(), td.clone()))
+            {
+                Some((t, _td)) => vec![
                     Line::from(Span::styled(
                         format!("  {}", t.title),
                         Style::default()
@@ -1008,7 +1027,11 @@ impl ImportView {
                         format!("  {}", t.file_path.display()),
                         Style::default().fg(theme.fg_muted),
                     )),
-                ]
+                ],
+                None => vec![Line::from(Span::styled(
+                    "  Batch track is no longer available.",
+                    Style::default().fg(theme.fg_muted),
+                ))],
             }
         };
         let a_block = Block::default()
@@ -1021,12 +1044,29 @@ impl ImportView {
         frame.render_widget(Paragraph::new(a_lines).block(a_block), panels[0]);
 
         // B panel — the new batch track
-        let (new_track, _) = self
+        let Some((new_track, _)) = self
             .groups
             .get(conflict.new.group)
             .and_then(|g| g.tracks.get(conflict.new.index))
             .map(|(t, td)| (t.clone(), td.clone()))
-            .expect("conflict.new must reference an existing track");
+        else {
+            let b_block = Block::default()
+                .title(Span::styled(
+                    " B — new (import) ",
+                    Style::default().fg(theme.yellow),
+                ))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border));
+            frame.render_widget(
+                Paragraph::new(vec![Line::from(Span::styled(
+                    "  New batch track is no longer available.",
+                    Style::default().fg(theme.fg_muted),
+                ))])
+                .block(b_block),
+                panels[1],
+            );
+            return;
+        };
         let b_lines = vec![
             Line::from(Span::styled(
                 format!("  {}", new_track.title),
