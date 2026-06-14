@@ -265,14 +265,14 @@ Real search score restored *after* `new_score` is computed — refetched candida
 get a flat 1.0 on the 0.10-weight API factor exactly when candidates are near-tied.
 
 ### TUI-4 — `/` and `g` live in views with no search bar; Tab bypasses collections popups
-**Status:** open · `src/tui/app.rs:176-186`, `handlers.rs:214-217`
+**Status:** fixed (d090b51) · `src/tui/app.rs:176-186`, `handlers.rs:214-217`
 `/` mid-import-review focuses an invisible widget that swallows all keys (view
 appears frozen); `g` opens global search from inside the wizard and `switch_view`
 abandons the mid-flight review. Tab in collections is checked before
 `has_popup()` (unlike library/detail/collection-detail), discarding typed input.
 
 ### TUI-5 — Import worker degrades MB groups on re-fetch failure, after destructive dup decisions
-**Status:** open · `worker.rs:85-90, 143, 209-233`
+**Status:** fixed (d090b51) · `worker.rs:85-90, 143, 209-233`
 Worker re-fetches the full release (`.ok()`) even when the wizard already has it
 (one wasted rate-limited call per group); on failure the group commits with no
 MB metadata and no error — but `replace_existing` plans (computed against the MB
@@ -286,21 +286,21 @@ cursor was an index into the *filtered* list reapplied to the unfiltered one.
 Fix once in a shared `reload_view_preserving_cursor` (see SYS-4).
 
 ### TUI-7 — `start_scan` walks the whole library synchronously in the key handler
-**Status:** open · `wizard.rs:464-470`, `import.rs:371-374`
+**Status:** fixed (d090b51) · `wizard.rs:464-470`, `import.rs:371-374`
 `music_dir` is always a scan source; `scan_inbox` (full walk + per-file DB check)
 runs before the next draw — UI freezes before the Scanning screen appears.
 `refresh_counts` (`handlers.rs:555-564`) repeats a smaller version after every
 delete/import.
 
 ### TUI-8 — Late MB auto-accept can flip a group's action while user sits in summary
-**Status:** open · `render.rs:69-84`, `wizard.rs:202-206`
+**Status:** fixed (d090b51) · `render.rs:69-84`, `wizard.rs:202-206`
 Enter doesn't set `user_decided`, so a slow search result auto-selects AcceptMb
 after the user moved past; if the candidate's tracklist is already populated,
 no preview refresh ever fires. Either Enter counts as a decision, or any action
 flip while `is_in_summary()` invalidates the preview.
 
 ### TUI-9 — Help screen drift
-**Status:** open · `help.rs:152-165`
+**Status:** fixed (d090b51) · `help.rs:152-165`
 Documents `g`/`Home`/`End` list bindings that don't exist; contradicts itself on
 `g` within one screen; lists `i` as global (library-only, `handlers.rs:95`).
 Library/detail status bars omit working `d` and `Space`. README promises every
@@ -330,7 +330,7 @@ alias documented in spec but unimplemented.
 | L-4 | LIKE patterns don't escape `%`/`_`; all-`"` FTS term is a syntax error; `fts_count` errors `unwrap_or(0)`; LIKE fallback inconsistently skips album titles | `queries.rs:463-466, 518-544, 634` | open |
 | L-5 | No index on `tracks.mbid` (scan per track during dup detect); none on `(title, album_artist)`; `idx_tracks_path` redundant with UNIQUE | `migrations/001_initial.sql` | fixed (b06f8a2) |
 | L-6 | Cross-device fallback fires on *any* rename error, masking cause — match `ErrorKind::CrossesDevices` (stable 1.85) | `organizer.rs:445-449, 547-551` | fixed (8693f47) |
-| L-7 | `q` quits from a dirty editor, no prompt (import view got one for this reason) | `app.rs:140-146` | open |
+| L-7 | `q` quits from a dirty editor, no prompt (import view got one for this reason) | `app.rs:140-146` | fixed (d090b51) |
 | L-8 | `missing_sources` not re-checked at apply (stale plan) — folded into ORG-1c | `organizer.rs:580-584` | fixed (240157a) |
 | L-9 | Setup writes unescaped paths into TOML (a `"` in a path produces the broken config that trips EXT-1); inbox entries unvalidated | `setup.rs:226-301` | fixed (6575900) |
 | L-10 | All-punctuation artist → malformed Lucene query → hard error instead of fallback chain | `musicbrainz.rs:96, 114-117` | fixed (b06f8a2) |
@@ -345,10 +345,10 @@ alias documented in spec but unimplemented.
 | L-19 | `DeletePlan::deletable_file_count` double-counts when collection copy *is* the primary | `pruner.rs:101-137` | fixed (8693f47) |
 | L-20 | Importer parses every file twice with lofty (doubles I/O on large imports) | `importer.rs:219-224` | fixed (8693f47) |
 | L-21 | Year read only via `ItemKey::Year` + `parse::<u32>` — TDRC / `YYYY-MM-DD` lose the year → "Album (0000)" | `tagger.rs:76-80` | fixed (8693f47) |
-| L-22 | `.expect()` on batch refs in conflict renderer — one refactor from a panic | `import/render.rs:940, 988` | open |
-| L-23 | Byte-slice of album MBID would panic on non-ASCII (`chars().take(8)` is free) | `detail.rs:825` | open |
-| L-24 | Resolver hint drift: comment promises `S` skip key that doesn't exist; hint hardcodes "1-5" while handler takes 1-9 and `match_candidates` is configurable | `wizard.rs:891-899`, `import/render.rs:195` | open |
-| L-25 | Collection-detail organize notice built then discarded (`let _notice`) | `handlers.rs:439-444` | open |
+| L-22 | `.expect()` on batch refs in conflict renderer — one refactor from a panic | `import/render.rs:940, 988` | fixed (d090b51) |
+| L-23 | Byte-slice of album MBID would panic on non-ASCII (`chars().take(8)` is free) | `detail.rs:825` | fixed (d090b51) |
+| L-24 | Resolver hint drift: comment promises `S` skip key that doesn't exist; hint hardcodes "1-5" while handler takes 1-9 and `match_candidates` is configurable | `wizard.rs:891-899`, `import/render.rs:195` | fixed (d090b51) |
+| L-25 | Collection-detail organize notice built then discarded (`let _notice`) | `handlers.rs:439-444` | fixed (d090b51) |
 | L-26 | Organize CLI filter flags silently non-exclusive (artist wins) — clap `ArgGroup` | `cli/mod.rs:59-72`, `main.rs:302-312` | fixed (6575900) |
 | L-27 | flake.nix installs `stable.latest` while claiming to match mise's 1.94.1 | `flake.nix:31-32` | open |
 | L-28 | Doc comment for `escape_lucene` sits on `error_chain` | `musicbrainz.rs:880-884` | open |
