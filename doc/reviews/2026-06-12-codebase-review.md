@@ -156,7 +156,7 @@ both `Err` and `result.errors` (`src/tui/app/handlers.rs:233-239`), nullifying
 Fix as policy: audit every `let _ =` / `.ok()` / `if let Ok` touching DB or fs.
 
 ### SYS-2 — Non-UTF-8 paths corrupted system-wide
-**Status:** open · **Confidence:** certain (mechanism)
+**Status:** fixed (e5a3306) · **Confidence:** certain (mechanism)
 All path persistence goes through `display().to_string()` (`src/core/paths.rs:22-41`,
 every row mapper, `importer.rs:204`), replacing invalid bytes with U+FFFD. Old
 Shift-JIS/GBK rips (the stated CJK use case) import "successfully" with a phantom
@@ -181,7 +181,7 @@ non-UTF-8 stem to `""` → `" (2).mp3"` (`organizer.rs:152-161`).
   `create_collection` at `collections.rs:169`).
 
 ### SYS-4 — Repetition already showing drift
-**Status:** open
+**Status:** partial (e5a3306; shared path safety, list cursor/filter, reload-preserve, HTTP plumbing; column SELECT consts and organize-popup extraction remain)
 - Organize-popup key handling copy-pasted 4× (`library.rs:181-221`,
   `detail.rs:237-335`, `collections.rs:119-157`, `collections.rs:727-765`) —
   already differ on Esc scroll reset.
@@ -280,7 +280,7 @@ identity) were already applied. Fix: pass the fetched release down; surface
 failures in the summary.
 
 ### TUI-6 — Filter/search-bar desync after delete, editor return, or refresh
-**Status:** open · `handlers.rs:277-313, 589-613, 661-687`
+**Status:** fixed (e5a3306) · `handlers.rs:277-313, 589-613, 661-687`
 Reload paths clear the view's `filter` but not `search.value`; the restored
 cursor was an index into the *filtered* list reapplied to the unfiltered one.
 Fix once in a shared `reload_view_preserving_cursor` (see SYS-4).
@@ -307,7 +307,7 @@ Library/detail status bars omit working `d` and `Space`. README promises every
 screen shows its keys.
 
 ### TEST-1 — FLAC/OGG tag tests have never run
-**Status:** open · `tests/tag_reader_test.rs:25-54`, `tests/fixtures/create_fixtures.rs`
+**Status:** fixed (e5a3306) · `tests/tag_reader_test.rs:25-54`, `tests/fixtures/create_fixtures.rs`
 Tests pass green when fixtures are missing; the generator only synthesizes MP3s.
 Spec §11 promises fixtures in every supported format. Missing fixture should
 fail (pattern repeated 5×, plus `import_organize_e2e.rs:22-25`).
@@ -327,17 +327,17 @@ alias documented in spec but unimplemented.
 | L-1 | Tagger tmp files keep real audio extensions → re-imported as tracks | `tagger.rs:483-495` | fixed (8693f47) |
 | L-2 | Tag *write* failures reported as `TagRead` (and point at the tmp path) | `tagger.rs:466-471` | fixed (8693f47) |
 | L-3 | Cover art written non-atomically; tag editor's copy-tmp-rename pattern exists to reuse; `to_string_lossy` into DB | `detail.rs:649-652` | fixed (8693f47) |
-| L-4 | LIKE patterns don't escape `%`/`_`; all-`"` FTS term is a syntax error; `fts_count` errors `unwrap_or(0)`; LIKE fallback inconsistently skips album titles | `queries.rs:463-466, 518-544, 634` | partial (065fe19; `fts_count` failure is now logged before LIKE fallback) |
+| L-4 | LIKE patterns don't escape `%`/`_`; all-`"` FTS term is a syntax error; `fts_count` errors `unwrap_or(0)`; LIKE fallback inconsistently skips album titles | `queries.rs:463-466, 518-544, 634` | fixed (065fe19, e5a3306) |
 | L-5 | No index on `tracks.mbid` (scan per track during dup detect); none on `(title, album_artist)`; `idx_tracks_path` redundant with UNIQUE | `migrations/001_initial.sql` | fixed (b06f8a2) |
 | L-6 | Cross-device fallback fires on *any* rename error, masking cause — match `ErrorKind::CrossesDevices` (stable 1.85) | `organizer.rs:445-449, 547-551` | fixed (8693f47) |
 | L-7 | `q` quits from a dirty editor, no prompt (import view got one for this reason) | `app.rs:140-146` | fixed (d090b51) |
 | L-8 | `missing_sources` not re-checked at apply (stale plan) — folded into ORG-1c | `organizer.rs:580-584` | fixed (240157a) |
 | L-9 | Setup writes unescaped paths into TOML (a `"` in a path produces the broken config that trips EXT-1); inbox entries unvalidated | `setup.rs:226-301` | fixed (6575900) |
 | L-10 | All-punctuation artist → malformed Lucene query → hard error instead of fallback chain | `musicbrainz.rs:96, 114-117` | fixed (b06f8a2) |
-| L-11 | `scripts_of` misses CJK Ext-B (U+20000+) — rare-kanji titles defeat the script-mismatch guard | `matching.rs:239-270` | open |
-| L-12 | Empty local artist scores 0.0 at full 0.15 weight instead of being excluded → silently disables auto-accept | `matching.rs:49-53, 289-298` | open |
-| L-13 | Duration tolerance scales with `local_track_titles.len()` not `local_track_count` (latent) | `matching.rs:137` | open |
-| L-14 | `score_release` doc weights wrong on 3 of 7 factors | `matching.rs:22-30` | open |
+| L-11 | `scripts_of` misses CJK Ext-B (U+20000+) — rare-kanji titles defeat the script-mismatch guard | `matching.rs:239-270` | fixed (e5a3306) |
+| L-12 | Empty local artist scores 0.0 at full 0.15 weight instead of being excluded → silently disables auto-accept | `matching.rs:49-53, 289-298` | fixed (e5a3306) |
+| L-13 | Duration tolerance scales with `local_track_titles.len()` not `local_track_count` (latent) | `matching.rs:137` | fixed (e5a3306) |
+| L-14 | `score_release` doc weights wrong on 3 of 7 factors | `matching.rs:22-30` | fixed (e5a3306) |
 | L-15 | Tiebreaker `fetch_release` failure swallowed with no log | `wizard.rs:647` | fixed (b06f8a2) |
 | L-16 | `insert_track` silently drops `Track.mbid` (compensated by separate update); `channels`/`acoustid`/`chromaprint` are dead columns | `queries.rs:84-115` | fixed (b06f8a2) |
 | L-17 | `initialize` can down-stamp a newer DB — folded into DB-4 | `schema.rs:42` | fixed (b06f8a2) |
@@ -350,10 +350,10 @@ alias documented in spec but unimplemented.
 | L-24 | Resolver hint drift: comment promises `S` skip key that doesn't exist; hint hardcodes "1-5" while handler takes 1-9 and `match_candidates` is configurable | `wizard.rs:891-899`, `import/render.rs:195` | fixed (d090b51) |
 | L-25 | Collection-detail organize notice built then discarded (`let _notice`) | `handlers.rs:439-444` | fixed (d090b51) |
 | L-26 | Organize CLI filter flags silently non-exclusive (artist wins) — clap `ArgGroup` | `cli/mod.rs:59-72`, `main.rs:302-312` | fixed (6575900) |
-| L-27 | flake.nix installs `stable.latest` while claiming to match mise's 1.94.1 | `flake.nix:31-32` | open |
-| L-28 | Doc comment for `escape_lucene` sits on `error_chain` | `musicbrainz.rs:880-884` | open |
-| L-29 | ~20 clippy warnings (`cargo clippy --fix` clears about half) | various | open |
-| L-30 | In-memory pagination / N+1 on collection paths; per-row `canonicalize` in `list_all_known_paths` at startup — fine at hobby scale, watch at 50k+ tracks | `queries.rs:21-49, 669-700, 1216-1256` | open |
+| L-27 | flake.nix installs `stable.latest` while claiming to match mise's 1.94.1 | `flake.nix:31-32` | fixed (e5a3306) |
+| L-28 | Doc comment for `escape_lucene` sits on `error_chain` | `musicbrainz.rs:880-884` | fixed (e5a3306) |
+| L-29 | ~20 clippy warnings (`cargo clippy --fix` clears about half) | various | partial (e5a3306; backlog reduced to 4 baseline warnings) |
+| L-30 | In-memory pagination / N+1 on collection paths; per-row `canonicalize` in `list_all_known_paths` at startup — fine at hobby scale, watch at 50k+ tracks | `queries.rs:21-49, 669-700, 1216-1256` | wontfix (scale) |
 
 ---
 
