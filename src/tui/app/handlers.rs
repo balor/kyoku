@@ -49,9 +49,7 @@ impl App {
                 );
             }
             AppView::Editor { track_id } => {
-                self.editor
-                    .load(&self.conn, *track_id, &self.settings)
-                    .ok();
+                self.editor.load(&self.conn, *track_id, &self.settings).ok();
             }
         }
         self.search.clear();
@@ -74,12 +72,10 @@ impl App {
                 self.collections.load(&self.conn, query).ok();
             }
             AppView::AlbumDetail { .. } | AppView::LooseTracks => {
-                self.album_detail
-                    .set_filter(self.search.value.clone());
+                self.album_detail.set_filter(self.search.value.clone());
             }
             AppView::CollectionDetail { .. } => {
-                self.collection_detail
-                    .set_filter(self.search.value.clone());
+                self.collection_detail.set_filter(self.search.value.clone());
             }
             _ => {}
         }
@@ -158,10 +154,8 @@ impl App {
                                     parts.push(format!("{} dirs cleaned", result.dirs_cleaned));
                                 }
                                 if result.orphans_cleaned > 0 {
-                                    parts.push(format!(
-                                        "{} orphans pruned",
-                                        result.orphans_cleaned
-                                    ));
+                                    parts
+                                        .push(format!("{} orphans pruned", result.orphans_cleaned));
                                 }
                                 if result.file_orphans_removed > 0 {
                                     parts.push(format!(
@@ -184,8 +178,7 @@ impl App {
                                 }
                             }
                             Err(e) => {
-                                self.library.notice =
-                                    Some(format!("Organize failed: {}", e));
+                                self.library.notice = Some(format!("Organize failed: {}", e));
                             }
                         }
                         self.library
@@ -206,8 +199,7 @@ impl App {
                             self.library.organize_scroll = 0;
                         }
                         Err(e) => {
-                            self.library.notice =
-                                Some(format!("Organize plan failed: {}", e));
+                            self.library.notice = Some(format!("Organize plan failed: {}", e));
                         }
                     }
                 }
@@ -236,24 +228,51 @@ impl App {
                 if self.collections.organize_plan.is_some() {
                     // Plan showing — Enter applies
                     if let Some(plan) = self.collections.organize_plan.take() {
-                        if let Ok(_result) = crate::core::organizer::apply_organize(
+                        let notice = match crate::core::organizer::apply_organize(
                             &self.conn,
                             &self.settings.library.music_dir,
                             &plan,
                             self.settings.import.organize_operation,
                             &crate::core::organizer::cleanup_roots(&self.settings),
-                        ) {}
+                        ) {
+                            Ok(result) => {
+                                let mut parts = Vec::new();
+                                let moved_total = result.moved + result.covers_moved;
+                                if moved_total > 0 {
+                                    parts.push(format!("{} moved", moved_total));
+                                }
+                                if result.copied > 0 {
+                                    parts.push(format!("{} copied", result.copied));
+                                }
+                                if result.dirs_cleaned > 0 {
+                                    parts.push(format!("{} dirs cleaned", result.dirs_cleaned));
+                                }
+                                if !result.errors.is_empty() {
+                                    parts.push(format!("{} errors", result.errors.len()));
+                                }
+                                if parts.is_empty() {
+                                    "Organize completed: no changes".to_string()
+                                } else {
+                                    format!("Organized: {}", parts.join(", "))
+                                }
+                            }
+                            Err(e) => format!("Organize failed: {e}"),
+                        };
                         self.collections.load(&self.conn, None).ok();
+                        self.collections.notice = Some(notice);
                         self.refresh_counts();
                     }
                 } else {
                     // Compute and show
-                    if let Ok(plan) = crate::core::organizer::plan_organize(
+                    match crate::core::organizer::plan_organize(
                         &self.conn,
                         &self.settings,
                         crate::core::organizer::OrganizeFilter::All,
                     ) {
-                        self.collections.organize_plan = Some(plan);
+                        Ok(plan) => self.collections.organize_plan = Some(plan),
+                        Err(e) => {
+                            self.collections.notice = Some(format!("Organize plan failed: {e}"))
+                        }
                     }
                 }
                 AppAction::None
@@ -272,7 +291,9 @@ impl App {
             self.switch_view(AppView::Collections);
             return AppAction::None;
         }
-        let action = self.album_detail.handle_key(key, &self.conn, &self.settings);
+        let action = self
+            .album_detail
+            .handle_key(key, &self.conn, &self.settings);
         match action {
             crate::tui::views::detail::DetailAction::None => AppAction::None,
             crate::tui::views::detail::DetailAction::EditTrack(id) => {
@@ -325,11 +346,7 @@ impl App {
                 } else {
                     crate::core::organizer::OrganizeFilter::Loose
                 };
-                match crate::core::organizer::plan_organize(
-                    &self.conn,
-                    &self.settings,
-                    filter,
-                ) {
+                match crate::core::organizer::plan_organize(&self.conn, &self.settings, filter) {
                     Ok(plan) => {
                         self.album_detail.set_organize_plan(plan);
                     }
@@ -356,9 +373,9 @@ impl App {
             self.switch_view(AppView::Library);
             return AppAction::None;
         }
-        let action =
-            self.collection_detail
-                .handle_key(key, &self.conn, &self.settings);
+        let action = self
+            .collection_detail
+            .handle_key(key, &self.conn, &self.settings);
         match action {
             crate::tui::views::collections::CollectionDetailAction::None => AppAction::None,
             crate::tui::views::collections::CollectionDetailAction::Deleted => {
@@ -425,10 +442,7 @@ impl App {
                                     parts.push(format!("{} copied", result.copied));
                                 }
                                 if result.dirs_cleaned > 0 {
-                                    parts.push(format!(
-                                        "{} dirs cleaned",
-                                        result.dirs_cleaned
-                                    ));
+                                    parts.push(format!("{} dirs cleaned", result.dirs_cleaned));
                                 }
                                 if result.file_orphans_removed > 0 {
                                     parts.push(format!(
@@ -437,10 +451,7 @@ impl App {
                                     ));
                                 }
                                 if !result.errors.is_empty() {
-                                    parts.push(format!(
-                                        "{} errors",
-                                        result.errors.len()
-                                    ));
+                                    parts.push(format!("{} errors", result.errors.len()));
                                 }
                                 // Stash notice — we can't set it on the view
                                 // directly since we'll reload below
@@ -449,7 +460,7 @@ impl App {
                                 } else {
                                     Some(format!("Organized: {}", parts.join(", ")))
                                 };
-                            
+
                                 // Reload to reflect new paths
                                 if let AppView::CollectionDetail { collection_id } = self.view {
                                     self.collection_detail
@@ -532,24 +543,18 @@ impl App {
 
         if !capturing && keys::is_back(&key) && self.import.can_cancel() {
             self.import.confirm_cancel = Some(ConfirmCancel {
-                popup: ConfirmDelete::new(
-                    "Cancel import",
-                    "Leave the import wizard?",
-                )
-                .with_summary("Any in-progress selections will be lost.")
-                .without_checkbox(),
+                popup: ConfirmDelete::new("Cancel import", "Leave the import wizard?")
+                    .with_summary("Any in-progress selections will be lost.")
+                    .without_checkbox(),
                 quit_on_confirm: false,
             });
             return AppAction::None;
         }
         if !capturing && keys::is_quit(&key) && self.import.can_cancel() {
             self.import.confirm_cancel = Some(ConfirmCancel {
-                popup: ConfirmDelete::new(
-                    "Quit kyoku",
-                    "Leave the import wizard and quit?",
-                )
-                .with_summary("Any in-progress selections will be lost.")
-                .without_checkbox(),
+                popup: ConfirmDelete::new("Quit kyoku", "Leave the import wizard and quit?")
+                    .with_summary("Any in-progress selections will be lost.")
+                    .without_checkbox(),
                 quit_on_confirm: true,
             });
             return AppAction::None;

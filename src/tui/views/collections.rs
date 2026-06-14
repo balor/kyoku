@@ -63,6 +63,7 @@ pub struct CollectionsView {
     pub organize_max_scroll: usize,
     pub organize_details: bool,
     pub selection: Selection,
+    pub notice: Option<String>,
     mode: InputMode,
 }
 
@@ -77,6 +78,7 @@ impl Default for CollectionsView {
             organize_max_scroll: 0,
             organize_details: false,
             selection: Selection::default(),
+            notice: None,
             mode: InputMode::Normal,
         }
     }
@@ -166,7 +168,11 @@ impl CollectionsView {
                 if keys::is_confirm(&key) {
                     let name = input.value.trim().to_string();
                     if !name.is_empty() {
-                        queries::create_collection(conn, &name).ok();
+                        match queries::get_or_create_collection(conn, &name) {
+                            Ok((_, true)) => self.notice = Some(format!("Created collection: {name}")),
+                            Ok((_, false)) => self.notice = Some(format!("Collection already exists: {name}")),
+                            Err(e) => self.notice = Some(format!("Create collection failed: {e}")),
+                        }
                     }
                     self.mode = InputMode::Normal;
                     return CollectionsAction::Refresh;
@@ -182,7 +188,10 @@ impl CollectionsView {
                 if keys::is_confirm(&key) {
                     let name = input.value.trim().to_string();
                     if !name.is_empty() {
-                        queries::rename_collection(conn, *id, &name).ok();
+                        match queries::rename_collection(conn, *id, &name) {
+                            Ok(()) => self.notice = Some(format!("Renamed collection: {name}")),
+                            Err(e) => self.notice = Some(format!("Rename collection failed: {e}")),
+                        }
                     }
                     self.mode = InputMode::Normal;
                     return CollectionsAction::Refresh;
@@ -199,14 +208,24 @@ impl CollectionsView {
                         return CollectionsAction::None;
                     }
                     ConfirmAction::Confirm { delete_files } => {
-                        organizer::apply_delete_collection_with_roots(
+                        match organizer::apply_delete_collection_with_roots(
                             conn,
                             music_dir,
                             plan,
                             delete_files,
                             &file_delete_roots,
-                        )
-                        .ok();
+                        ) {
+                            Ok(result) if result.errors.is_empty() => {
+                                self.notice = Some("Collection deleted".to_string());
+                            }
+                            Ok(result) => {
+                                self.notice = Some(format!(
+                                    "Collection deleted with {} error(s)",
+                                    result.errors.len()
+                                ));
+                            }
+                            Err(e) => self.notice = Some(format!("Delete collection failed: {e}")),
+                        }
                         self.mode = InputMode::Normal;
                         self.selection.clear();
                         return CollectionsAction::Refresh;
@@ -222,16 +241,28 @@ impl CollectionsView {
                         return CollectionsAction::None;
                     }
                     ConfirmAction::Confirm { delete_files } => {
+                        let mut failures = 0usize;
+                        let mut row_errors = 0usize;
                         for plan in plans.iter() {
-                            organizer::apply_delete_collection_with_roots(
+                            match organizer::apply_delete_collection_with_roots(
                                 conn,
                                 music_dir,
                                 plan,
                                 delete_files,
                                 &file_delete_roots,
-                            )
-                            .ok();
+                            ) {
+                                Ok(result) => row_errors += result.errors.len(),
+                                Err(e) => {
+                                    failures += 1;
+                                    tracing::warn!("delete collection {} failed: {}", plan.collection_id, e);
+                                }
+                            }
                         }
+                        self.notice = Some(if failures == 0 && row_errors == 0 {
+                            "Collections deleted".to_string()
+                        } else {
+                            format!("Collections deleted with {failures} failed plan(s), {row_errors} row error(s)")
+                        });
                         self.mode = InputMode::Normal;
                         self.selection.clear();
                         return CollectionsAction::Refresh;
@@ -550,6 +581,14 @@ impl CollectionsView {
     }
 
     pub fn render_detail_bar(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        if let Some(notice) = &self.notice {
+            let p = Paragraph::new(Span::styled(
+                format!(" {} ", notice),
+                Style::default().fg(theme.yellow).bg(theme.bg_alt),
+            ));
+            frame.render_widget(p, area);
+            return;
+        }
         if let Some(coll) = self.collections.get(self.selected) {
             let duration = format_duration_ms(coll.total_duration_ms);
             let detail = format!(
@@ -709,13 +748,25 @@ impl CollectionDetailView {
                     let file_delete_roots = organizer::file_delete_roots(settings);
                     let plan = plan.clone();
                     self.pending_delete = None;
-                    let _ = pruner::apply_delete_plan(
+                    match pruner::apply_delete_plan(
                         conn,
                         &settings.library.music_dir,
                         &plan,
                         delete_files,
                         &file_delete_roots,
-                    );
+                    ) {
+                        Ok(report) if report.errors.is_empty() => {
+                            self.notice = Some(format!("Deleted {} track(s)", report.tracks_deleted));
+                        }
+                        Ok(report) => {
+                            self.notice = Some(format!(
+                                "Deleted {} track(s) with {} error(s)",
+                                report.tracks_deleted,
+                                report.errors.len()
+                            ));
+                        }
+                        Err(e) => self.notice = Some(format!("Delete failed: {e}")),
+                    }
                     self.selection.clear();
                     self.reload_tracks(conn);
                     return CollectionDetailAction::Deleted;
@@ -778,13 +829,19 @@ impl CollectionDetailView {
                     && new_name != coll.name
                 {
                     let id = coll.id;
-                    queries::rename_collection(conn, id, &new_name).ok();
-                    // Reload collection info while preserving cursor
-                    let prev = self.selected;
-                    let cached_music_dir = self.music_dir.clone();
-                    self.load(conn, id, &cached_music_dir).ok();
-                    if prev < self.tracks.len() {
-                        self.selected = prev;
+                    match queries::rename_collection(conn, id, &new_name) {
+                        Ok(()) => {
+                            // Reload collection info while preserving cursor
+                            let prev = self.selected;
+                            let cached_music_dir = self.music_dir.clone();
+                            if let Err(e) = self.load(conn, id, &cached_music_dir) {
+                                self.notice = Some(format!("Renamed, but reload failed: {e}"));
+                            }
+                            if prev < self.tracks.len() {
+                                self.selected = prev;
+                            }
+                        }
+                        Err(e) => self.notice = Some(format!("Rename failed: {e}")),
                     }
                 }
                 self.rename_input = None;
@@ -813,26 +870,40 @@ impl CollectionDetailView {
 
                     if let Some(coll) = &self.collection {
                         let coll_id = coll.id;
-                        queries::remove_track_from_collection(conn, coll_id, track_id).ok();
+                        let mut errors = Vec::new();
+                        if let Err(e) = queries::remove_track_from_collection(conn, coll_id, track_id) {
+                            errors.push(format!("remove membership failed: {e}"));
+                        }
 
                         if delete_files
                             && let Some(p) = &file_path
                             && p.exists()
                             && path_is_in_roots(p, &file_delete_roots)
                         {
-                            let _ = std::fs::remove_file(p);
-                            if let Some(parent) = p.parent() {
-                                let _ = remove_empty_parents(parent, &file_delete_roots);
+                            match std::fs::remove_file(p) {
+                                Ok(()) => {
+                                    if let Some(parent) = p.parent() {
+                                        remove_empty_parents(parent, &file_delete_roots);
+                                    }
+                                }
+                                Err(e) => errors.push(format!("file delete failed: {e}")),
                             }
                         }
 
                         // If removing this collection membership would leave
                         // the track homeless, remove it from the library by
                         // default instead of creating an accidental loose row.
-                        if will_orphan {
-                            queries::delete_track(conn, track_id).ok();
+                        if will_orphan
+                            && let Err(e) = queries::delete_track(conn, track_id)
+                        {
+                            errors.push(format!("orphan track delete failed: {e}"));
                         }
 
+                        self.notice = Some(if errors.is_empty() {
+                            "Track removed from collection".to_string()
+                        } else {
+                            format!("Track removal completed with {} error(s)", errors.len())
+                        });
                         self.reload_tracks(conn);
                     }
                     return CollectionDetailAction::None;

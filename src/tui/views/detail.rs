@@ -351,9 +351,24 @@ impl AlbumDetailView {
                 if let Some(album) = &self.album
                     && !new_title.is_empty() && new_title != album.title {
                         let id = album.id;
-                        queries::rename_album(conn, id, &new_title).ok();
-                        // Reload to reflect the change
-                        self.load(conn, &settings.library.music_dir, id).ok();
+                        match queries::rename_album(conn, id, &new_title) {
+                            Ok(()) => {
+                                // Reload to reflect the change
+                                if let Err(e) = self.load(conn, &settings.library.music_dir, id) {
+                                    self.notice = Some((
+                                        NoticeKind::Warning,
+                                        format!("Album renamed, but reload failed: {e}"),
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                self.notice = Some((
+                                    NoticeKind::Warning,
+                                    format!("Rename failed: {e}"),
+                                ));
+                            }
+                        }
+                        self.rename_input = None;
                         return DetailAction::None;
                     }
                 self.rename_input = None;

@@ -75,9 +75,14 @@ pub(super) fn run_import_worker(
             // Resolve this group's target collection (if any)
             let target_collection_name = group.target_collection.trim();
             let target_collection_id = if !target_collection_name.is_empty() {
-                queries::get_or_create_collection(conn, target_collection_name)
-                    .ok()
-                    .map(|(id, _)| id)
+                match queries::get_or_create_collection(conn, target_collection_name) {
+                    Ok((id, _)) => Some(id),
+                    Err(e) => {
+                        tracing::warn!("target collection {target_collection_name:?} failed: {e}");
+                        errors += 1;
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -144,7 +149,7 @@ pub(super) fn run_import_worker(
 
             // Update MB album with MB metadata
             if let (Some(aid), Some(mb)) = (mb_album_id, &mb_full) {
-                queries::update_album_mb(
+                match queries::update_album_mb(
                     conn,
                     aid,
                     &mb.id,
@@ -152,8 +157,13 @@ pub(super) fn run_import_worker(
                     &mb.title,
                     mb.year,
                     mb.label.as_deref(),
-                )
-                .ok();
+                ) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!("update_album_mb({aid}) failed: {e}");
+                        errors += 1;
+                    }
+                }
             }
 
             // For "Accept as-is" mode, decide if this group is a real album
@@ -258,11 +268,21 @@ pub(super) fn run_import_worker(
                     }
                 }
 
-                if queries::track_exists_by_path(conn, &music_dir, &path_str).unwrap_or(false) {
-                    skipped += 1;
-                    done += 1;
-                    let _ = tx.send(ImportMessage::Progress(done, total_tracks));
-                    continue;
+                match queries::track_exists_by_path(conn, &music_dir, &path_str) {
+                    Ok(true) => {
+                        skipped += 1;
+                        done += 1;
+                        let _ = tx.send(ImportMessage::Progress(done, total_tracks));
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!("track_exists_by_path({path_str}) failed: {e}");
+                        errors += 1;
+                        done += 1;
+                        let _ = tx.send(ImportMessage::Progress(done, total_tracks));
+                        continue;
+                    }
                 }
 
                 // Per-track album resolution:
@@ -294,15 +314,17 @@ pub(super) fn run_import_worker(
                                 .and_then(|o| *o)
                                 .and_then(|idx| mb.tracks.get(idx));
                             if let Some(mbt) = mb_track {
-                                queries::update_track_mb(
+                                if let Err(e) = queries::update_track_mb(
                                     conn,
                                     track_id,
                                     &mbt.recording_id,
                                     mbt.artist.as_deref().unwrap_or(&mb.artist),
                                     &mbt.title,
                                     "matched",
-                                )
-                                .ok();
+                                ) {
+                                    tracing::warn!("update_track_mb({track_id}) failed: {e}");
+                                    errors += 1;
+                                }
 
                                 // Mirror the MB match to the file's tags. DB is
                                 // now authoritative either way, but beets-style
@@ -319,8 +341,11 @@ pub(super) fn run_import_worker(
                                     }
                                 }
                             } else {
-                                // No positional match — still mark as matched at album level
-                                queries::set_track_tag_status(conn, track_id, "matched").ok();
+                                // No positional match — still mark as matched at album level.
+                                if let Err(e) = queries::set_track_tag_status(conn, track_id, "matched") {
+                                    tracing::warn!("set_track_tag_status({track_id}) failed: {e}");
+                                    errors += 1;
+                                }
                             }
                         }
 
@@ -338,9 +363,13 @@ pub(super) fn run_import_worker(
                     .filter_map(|&idx| inserted_track_ids.get(idx).and_then(|id| *id))
                     .collect();
                 if !ordered_ids.is_empty() {
-                    added_to_collection +=
-                        queries::add_tracks_to_collection_ordered(conn, coll_id, &ordered_ids)
-                            .unwrap_or(0);
+                    match queries::add_tracks_to_collection_ordered(conn, coll_id, &ordered_ids) {
+                        Ok(n) => added_to_collection += n,
+                        Err(e) => {
+                            tracing::warn!("add_tracks_to_collection_ordered({coll_id}) failed: {e}");
+                            errors += 1;
+                        }
+                    }
                 }
             }
         }
@@ -665,6 +694,7 @@ fn stamp_sibling_cover(
         return;
     };
     if let Some(cover) = detect_sibling_cover(source_dir) {
+        // best-effort: cover stamping is non-critical import metadata.
         let _ = queries::set_album_cover_path(
             conn,
             music_dir,

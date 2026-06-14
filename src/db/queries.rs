@@ -514,9 +514,14 @@ pub fn search_tracks(
     query: &str,
     limit: usize,
 ) -> Result<Vec<TrackRow>> {
-    let fts_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM tracks_fts", [], |row| row.get(0))
-        .unwrap_or(0);
+    let fts_count: i64 =
+        match conn.query_row("SELECT COUNT(*) FROM tracks_fts", [], |row| row.get(0)) {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!("tracks_fts count failed; falling back to LIKE search: {e}");
+                0
+            }
+        };
 
     if fts_count > 0 {
         let fts_query = query
