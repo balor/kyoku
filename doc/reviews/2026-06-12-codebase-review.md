@@ -145,7 +145,7 @@ shipped one bug. No multi-disc tests despite spec §11 listing them.
 ## Systemic themes
 
 ### SYS-1 — Error swallowing after destructive steps
-**Status:** open
+**Status:** fixed (065fe19)
 Beyond DB-2: `apply_delete_plan` discards promote/detach failures *after* files
 are deleted (`src/core/pruner.rs:279-286`); collections organize handler drops
 both `Err` and `result.errors` (`src/tui/app/handlers.rs:233-239`), nullifying
@@ -327,7 +327,7 @@ alias documented in spec but unimplemented.
 | L-1 | Tagger tmp files keep real audio extensions → re-imported as tracks | `tagger.rs:483-495` | fixed (8693f47) |
 | L-2 | Tag *write* failures reported as `TagRead` (and point at the tmp path) | `tagger.rs:466-471` | fixed (8693f47) |
 | L-3 | Cover art written non-atomically; tag editor's copy-tmp-rename pattern exists to reuse; `to_string_lossy` into DB | `detail.rs:649-652` | fixed (8693f47) |
-| L-4 | LIKE patterns don't escape `%`/`_`; all-`"` FTS term is a syntax error; `fts_count` errors `unwrap_or(0)`; LIKE fallback inconsistently skips album titles | `queries.rs:463-466, 518-544, 634` | open |
+| L-4 | LIKE patterns don't escape `%`/`_`; all-`"` FTS term is a syntax error; `fts_count` errors `unwrap_or(0)`; LIKE fallback inconsistently skips album titles | `queries.rs:463-466, 518-544, 634` | partial (065fe19; `fts_count` failure is now logged before LIKE fallback) |
 | L-5 | No index on `tracks.mbid` (scan per track during dup detect); none on `(title, album_artist)`; `idx_tracks_path` redundant with UNIQUE | `migrations/001_initial.sql` | fixed (b06f8a2) |
 | L-6 | Cross-device fallback fires on *any* rename error, masking cause — match `ErrorKind::CrossesDevices` (stable 1.85) | `organizer.rs:445-449, 547-551` | fixed (8693f47) |
 | L-7 | `q` quits from a dirty editor, no prompt (import view got one for this reason) | `app.rs:140-146` | fixed (d090b51) |
