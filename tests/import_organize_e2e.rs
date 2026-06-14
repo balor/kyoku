@@ -20,8 +20,10 @@ fn fixtures_dir() -> PathBuf {
 fn e2e_import_album_then_organize_lands_files_under_music_dir() {
     let fixture = fixtures_dir().join("tagged.mp3");
     if !fixture.exists() {
-        eprintln!("Skipping: fixture {} missing", fixture.display());
-        return;
+        panic!(
+            "fixture missing: {} — see tests/fixtures/README",
+            fixture.display()
+        );
     }
 
     let tmp = tempfile::TempDir::new().unwrap();

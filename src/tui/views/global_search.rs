@@ -11,6 +11,7 @@ use crate::tui::fuzzy;
 use crate::tui::keybindings as keys;
 use crate::tui::themes::Theme;
 use crate::tui::widgets::input::TextInput;
+use crate::tui::widgets::list_cursor::ListCursor;
 
 #[derive(Debug, Clone)]
 pub enum GlobalResult {
@@ -89,23 +90,10 @@ impl GlobalSearchView {
 
         // Arrow-only navigation: the search input is live, so `j`/`k`
         // must insert (think "junjou", "jazz"), not move the selection.
-        if keys::is_up_arrow(&key) && self.selected > 0 {
-            self.selected -= 1;
-            return GlobalSearchAction::None;
-        }
-        if keys::is_down_arrow(&key)
-            && !self.results.is_empty()
-            && self.selected < self.results.len() - 1
-        {
-            self.selected += 1;
-            return GlobalSearchAction::None;
-        }
-        if keys::is_page_up(&key) {
-            self.selected = self.selected.saturating_sub(10);
-            return GlobalSearchAction::None;
-        }
-        if keys::is_page_down(&key) && !self.results.is_empty() {
-            self.selected = (self.selected + 10).min(self.results.len() - 1);
+        let mut cursor = ListCursor::new(self.selected, self.scroll_offset);
+        if cursor.handle_text_input_key(&key, self.results.len()) {
+            self.selected = cursor.selected;
+            self.scroll_offset = cursor.scroll;
             return GlobalSearchAction::None;
         }
 
@@ -174,7 +162,7 @@ impl GlobalSearchView {
             .constraints([
                 Constraint::Length(1), // input
                 Constraint::Length(1), // separator/hint
-                Constraint::Min(5),   // results
+                Constraint::Min(5),    // results
             ])
             .split(inner);
 
@@ -262,9 +250,7 @@ impl GlobalSearchView {
             Span::styled(cursor, prefix_style),
             Span::styled(
                 format!("[{}] ", kind),
-                Style::default()
-                    .fg(kind_color)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(kind_color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 main,

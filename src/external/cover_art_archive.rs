@@ -12,13 +12,11 @@
 //! fetch returns `Ok(None)` rather than burning the retry and surfacing an
 //! "External" error string.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::config::settings::CoverArtSize;
 use crate::error::{KyokuError, Result};
-
-const USER_AGENT: &str =
-    concat!("kyoku/", env!("CARGO_PKG_VERSION"), " (https://github.com/kyoku-project/kyoku)");
+use crate::external::http::{self, AttemptError};
 const CAA_BASE: &str = "https://coverartarchive.org";
 
 /// A fetched cover image. `extension` is derived from the response's
@@ -31,33 +29,17 @@ pub struct CoverImage {
 
 pub struct CaaClient {
     client: reqwest::blocking::Client,
-    rate_limit: Duration,
-    last_request: Option<Instant>,
+    throttle: http::Throttle,
 }
 
 impl CaaClient {
     pub fn new(rate_limit_ms: u64) -> Self {
-        let client = reqwest::blocking::Client::builder()
-            .user_agent(USER_AGENT)
-            .timeout(Duration::from_secs(20))
-            .build()
-            .expect("failed to create HTTP client");
+        let client = http::blocking_client(Duration::from_secs(20));
 
         Self {
             client,
-            rate_limit: Duration::from_millis(rate_limit_ms),
-            last_request: None,
+            throttle: http::Throttle::new(rate_limit_ms),
         }
-    }
-
-    fn throttle(&mut self) {
-        if let Some(last) = self.last_request {
-            let elapsed = last.elapsed();
-            if elapsed < self.rate_limit {
-                std::thread::sleep(self.rate_limit - elapsed);
-            }
-        }
-        self.last_request = Some(Instant::now());
     }
 
     /// Fetch the front cover for a release MBID at the requested size.
@@ -92,7 +74,12 @@ impl CaaClient {
         };
 
         for s in attempts {
-            let url = format!("{}/release/{}/front{}", CAA_BASE, release_mbid, s.url_suffix());
+            let url = format!(
+                "{}/release/{}/front{}",
+                CAA_BASE,
+                release_mbid,
+                s.url_suffix()
+            );
             match self.attempt(&url) {
                 Ok(Some(img)) => return Ok(Some(img)),
                 Ok(None) => {
@@ -120,8 +107,7 @@ impl CaaClient {
                             }
                             continue;
                         }
-                        Err(AttemptError::Retryable(msg))
-                        | Err(AttemptError::Permanent(msg)) => {
+                        Err(AttemptError::Retryable(msg)) | Err(AttemptError::Permanent(msg)) => {
                             return Err(KyokuError::External(format!(
                                 "CAA fetch for {} failed after retry: {}",
                                 release_mbid, msg
@@ -143,11 +129,11 @@ impl CaaClient {
     }
 
     fn attempt(&mut self, url: &str) -> std::result::Result<Option<CoverImage>, AttemptError> {
-        self.throttle();
+        self.throttle.wait();
 
         let resp = match self.client.get(url).send() {
             Ok(r) => r,
-            Err(e) => return Err(AttemptError::Retryable(format!("{}", e))),
+            Err(e) => return Err(AttemptError::Retryable(http::error_chain(&e))),
         };
 
         let status = resp.status();
@@ -176,7 +162,7 @@ impl CaaClient {
 
         let bytes = match resp.bytes() {
             Ok(b) => b.to_vec(),
-            Err(e) => return Err(AttemptError::Retryable(format!("{}", e))),
+            Err(e) => return Err(AttemptError::Retryable(http::error_chain(&e))),
         };
 
         Ok(Some(CoverImage { bytes, extension }))
@@ -197,11 +183,6 @@ fn extension_for_mime(mime: &str) -> &'static str {
         // image/jpeg, image/jpg, unknown → default to jpg
         "jpg"
     }
-}
-
-enum AttemptError {
-    Retryable(String),
-    Permanent(String),
 }
 
 #[cfg(test)]

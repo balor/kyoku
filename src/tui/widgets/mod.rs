@@ -2,6 +2,7 @@ pub mod add_to_collection;
 pub mod confirm_delete;
 pub mod cover_preview;
 pub mod input;
+pub mod list_cursor;
 pub mod organize_popup;
 pub mod path_footer;
 pub mod pick_collection;

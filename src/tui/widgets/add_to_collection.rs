@@ -55,7 +55,7 @@ impl AddToCollectionPopup {
             return PopupAction::None;
         }
         if keys::is_down_arrow(&key) {
-            let max = self.filtered_indices().len();
+            let max = self.visible_entries().len();
             if max > 0 && self.suggestion_selected < max.saturating_sub(1) {
                 self.suggestion_selected += 1;
             }
@@ -73,26 +73,18 @@ impl AddToCollectionPopup {
     }
 
     fn commit(&mut self, conn: &Connection) -> String {
-        let filtered = self.filtered_indices();
+        let entries = self.visible_entries();
 
-        let (coll_id, coll_name) = if !filtered.is_empty() {
-            let c = &self.suggestions[filtered[self.suggestion_selected]];
-            (c.id, c.name.clone())
-        } else {
-            let name = self.input.value.trim().to_string();
-            if name.is_empty() {
-                return String::new();
+        let (coll_id, coll_name) = match entries.get(self.suggestion_selected) {
+            Some(AddEntry::Existing(idx)) => {
+                let c = &self.suggestions[*idx];
+                (c.id, c.name.clone())
             }
-            match queries::find_collection_by_name(conn, &name) {
-                Ok(Some(id)) => (id, name),
-                Ok(None) => match queries::create_collection(conn, &name) {
-                    Ok(id) => (id, name),
-                    Err(_) => return "Failed to create collection".to_string(),
-                },
-                // A failed lookup is NOT "doesn't exist" — creating here
-                // would duplicate the collection on a transient DB error.
-                Err(_) => return "Failed to look up collection".to_string(),
-            }
+            Some(AddEntry::NewTyped(name)) => match queries::get_or_create_collection(conn, name) {
+                Ok((id, _)) => (id, name.clone()),
+                Err(_) => return "Failed to create collection".to_string(),
+            },
+            None => return String::new(),
         };
 
         let added =
@@ -112,6 +104,21 @@ impl AddToCollectionPopup {
         } else {
             format!("Added {} · {} already in '{}'", added, skipped, coll_name)
         }
+    }
+
+    fn visible_entries(&self) -> Vec<AddEntry> {
+        let typed = self.input.value.trim();
+        let mut entries = Vec::new();
+        if !typed.is_empty()
+            && !self
+                .suggestions
+                .iter()
+                .any(|c| c.name.eq_ignore_ascii_case(typed))
+        {
+            entries.push(AddEntry::NewTyped(typed.to_string()));
+        }
+        entries.extend(self.filtered_indices().into_iter().map(AddEntry::Existing));
+        entries
     }
 
     fn filtered_indices(&self) -> Vec<usize> {
@@ -145,25 +152,17 @@ impl AddToCollectionPopup {
 
         self.input.render(frame, chunks[0], theme);
 
-        let filtered = self.filtered_indices();
-        let hint = if filtered.is_empty() {
-            if self.input.value.trim().is_empty() {
-                " No collections yet — type a name to create one".to_string()
-            } else {
-                " Enter to create new collection".to_string()
-            }
+        let entries = self.visible_entries();
+        let hint = if entries.is_empty() {
+            " Type a name and press Enter to create".to_string()
         } else {
-            format!(
-                " {} match(es) — j/k to select, Enter to add",
-                filtered.len()
-            )
+            format!(" {} option(s) — ↑↓ navigate, Enter to add", entries.len())
         };
         let p = Paragraph::new(Span::styled(hint, Style::default().fg(theme.fg_muted)));
         frame.render_widget(p, chunks[1]);
 
         let mut lines: Vec<Line<'_>> = Vec::new();
-        for (pos, &i) in filtered.iter().enumerate() {
-            let coll = &self.suggestions[i];
+        for (pos, entry) in entries.iter().enumerate() {
             let selected = pos == self.suggestion_selected;
             let marker = if selected { "▶ " } else { "  " };
             let style = if selected {
@@ -174,16 +173,38 @@ impl AddToCollectionPopup {
             } else {
                 Style::default().fg(theme.fg)
             };
-            lines.push(Line::from(vec![
-                Span::styled(marker, style),
-                Span::styled(coll.name.clone(), style),
-                Span::styled(
-                    format!(" ({} tracks)", coll.track_count),
-                    Style::default().fg(theme.fg_dim),
-                ),
-            ]));
+            match entry {
+                AddEntry::NewTyped(name) => lines.push(Line::from(vec![
+                    Span::styled(marker, style),
+                    Span::styled(
+                        "[+ New] ",
+                        Style::default()
+                            .fg(theme.green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(name.clone(), style),
+                    Span::styled(" (will be created)", Style::default().fg(theme.fg_muted)),
+                ])),
+                AddEntry::Existing(i) => {
+                    let coll = &self.suggestions[*i];
+                    lines.push(Line::from(vec![
+                        Span::styled(marker, style),
+                        Span::styled(coll.name.clone(), style),
+                        Span::styled(
+                            format!(" ({} tracks)", coll.track_count),
+                            Style::default().fg(theme.fg_dim),
+                        ),
+                    ]));
+                }
+            }
         }
         let p = Paragraph::new(lines);
         frame.render_widget(p, chunks[2]);
     }
+}
+
+#[derive(Debug, Clone)]
+enum AddEntry {
+    NewTyped(String),
+    Existing(usize),
 }

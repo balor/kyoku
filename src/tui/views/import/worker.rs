@@ -296,7 +296,7 @@ pub(super) fn run_import_worker(
                 } else if let Some(id) = mb_album_id {
                     Some(id)
                 } else {
-                    asis_album_id.map(|id| id)
+                    asis_album_id
                 };
 
                 let file_size = std::fs::metadata(&track.file_path)
@@ -342,7 +342,9 @@ pub(super) fn run_import_worker(
                                 }
                             } else {
                                 // No positional match — still mark as matched at album level.
-                                if let Err(e) = queries::set_track_tag_status(conn, track_id, "matched") {
+                                if let Err(e) =
+                                    queries::set_track_tag_status(conn, track_id, "matched")
+                                {
                                     tracing::warn!("set_track_tag_status({track_id}) failed: {e}");
                                     errors += 1;
                                 }
@@ -366,7 +368,9 @@ pub(super) fn run_import_worker(
                     match queries::add_tracks_to_collection_ordered(conn, coll_id, &ordered_ids) {
                         Ok(n) => added_to_collection += n,
                         Err(e) => {
-                            tracing::warn!("add_tracks_to_collection_ordered({coll_id}) failed: {e}");
+                            tracing::warn!(
+                                "add_tracks_to_collection_ordered({coll_id}) failed: {e}"
+                            );
                             errors += 1;
                         }
                     }
@@ -476,8 +480,7 @@ fn strip_filename_title_prefixes(s: &str) -> String {
     let after_digits = s
         .trim_start()
         .trim_start_matches(|c: char| c.is_ascii_digit());
-    let after_sep =
-        after_digits.trim_start_matches(|c: char| c == '.' || c == '-' || c == '_' || c == ' ');
+    let after_sep = after_digits.trim_start_matches(['.', '-', '_', ' ']);
     // Drop one "Something - " prefix if present (typical Artist separator).
     if let Some((_, tail)) = after_sep.split_once(" - ") {
         tail.trim().to_string()
@@ -695,12 +698,8 @@ fn stamp_sibling_cover(
     };
     if let Some(cover) = detect_sibling_cover(source_dir) {
         // best-effort: cover stamping is non-critical import metadata.
-        let _ = queries::set_album_cover_path(
-            conn,
-            music_dir,
-            album_id,
-            &cover.display().to_string(),
-        );
+        let _ =
+            queries::set_album_cover_path(conn, music_dir, album_id, &cover.display().to_string());
     }
 }
 

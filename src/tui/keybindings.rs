@@ -49,6 +49,14 @@ pub fn is_save(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s')
 }
 
+pub fn is_home(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Home || key.code == KeyCode::Char('g')
+}
+
+pub fn is_end(key: &KeyEvent) -> bool {
+    key.code == KeyCode::End || key.code == KeyCode::Char('G')
+}
+
 pub fn is_page_up(key: &KeyEvent) -> bool {
     key.code == KeyCode::PageUp
         || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('b'))

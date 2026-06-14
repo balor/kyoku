@@ -1,17 +1,12 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::config::settings::NameScriptPreference;
 use crate::error::Result;
-use crate::external::name_preference::{pick_preferred_name, AliasKind, MbAlias};
-
-const USER_AGENT: &str = concat!(
-    "kyoku/",
-    env!("CARGO_PKG_VERSION"),
-    " (https://github.com/kyoku-project/kyoku)"
-);
+use crate::external::http::{self, AttemptError};
+use crate::external::name_preference::{AliasKind, MbAlias, pick_preferred_name};
 const MB_BASE: &str = "https://musicbrainz.org/ws/2";
 
 #[derive(Debug, Clone)]
@@ -45,8 +40,7 @@ pub struct MbTrack {
 
 pub struct MbClient {
     client: reqwest::blocking::Client,
-    rate_limit: Duration,
-    last_request: Option<Instant>,
+    throttle: http::Throttle,
     name_script: NameScriptPreference,
     /// Per-artist alias cache keyed by MBID. Shared across releases in one
     /// session so a multi-release import of the same artist pays the
@@ -56,29 +50,14 @@ pub struct MbClient {
 
 impl MbClient {
     pub fn new(rate_limit_ms: u64, name_script: NameScriptPreference) -> Self {
-        let client = reqwest::blocking::Client::builder()
-            .user_agent(USER_AGENT)
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("failed to create HTTP client");
+        let client = http::blocking_client(Duration::from_secs(15));
 
         Self {
             client,
-            rate_limit: Duration::from_millis(rate_limit_ms),
-            last_request: None,
+            throttle: http::Throttle::new(rate_limit_ms),
             name_script,
             artist_alias_cache: HashMap::new(),
         }
-    }
-
-    fn throttle(&mut self) {
-        if let Some(last) = self.last_request {
-            let elapsed = last.elapsed();
-            if elapsed < self.rate_limit {
-                std::thread::sleep(self.rate_limit - elapsed);
-            }
-        }
-        self.last_request = Some(Instant::now());
     }
 
     /// Search for releases matching artist + album name.
@@ -509,7 +488,7 @@ impl MbClient {
     /// One request attempt. Throttles first so the caller doesn't have to,
     /// and so the throttle applies both to the first attempt and the retry.
     fn attempt_get(&mut self, url: &str, op: &str) -> std::result::Result<String, AttemptError> {
-        self.throttle();
+        self.throttle.wait();
 
         let resp = match self.client.get(url).send() {
             Ok(r) => r,
@@ -517,14 +496,14 @@ impl MbClient {
                 // Network-level errors (timeout, DNS, TLS, connection refused)
                 // are generally transient — worth one retry.
                 let _ = op;
-                return Err(AttemptError::Retryable(error_chain(&e)));
+                return Err(AttemptError::Retryable(http::error_chain(&e)));
             }
         };
 
         let status = resp.status();
         let body = match resp.text() {
             Ok(b) => b,
-            Err(e) => return Err(AttemptError::Retryable(error_chain(&e))),
+            Err(e) => return Err(AttemptError::Retryable(http::error_chain(&e))),
         };
 
         if !status.is_success() {
@@ -545,11 +524,6 @@ impl MbClient {
 
         Ok(body)
     }
-}
-
-enum AttemptError {
-    Retryable(String),
-    Permanent(String),
 }
 
 fn truncate_for_log(s: &str, max: usize) -> String {
@@ -917,20 +891,6 @@ fn build_artist_search_query(
 }
 
 /// Escape special Lucene characters in a search query value.
-/// Flatten an error and its `.source()` chain into a single colon-separated
-/// string. reqwest's top-level Display is often just "error sending request",
-/// with the actual cause (DNS, TLS, timeout) hiding one or two levels down.
-fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
-    let mut out = e.to_string();
-    let mut src = e.source();
-    while let Some(s) = src {
-        out.push_str(": ");
-        out.push_str(&s.to_string());
-        src = s.source();
-    }
-    out
-}
-
 fn escape_lucene(s: &str) -> String {
     let special = [
         '+', '-', '&', '|', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':', '\\',

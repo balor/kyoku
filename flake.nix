@@ -28,8 +28,8 @@
         {
           default = pkgs.mkShell {
             packages = with pkgs; [
-              # From mise.toml: rust = "1.94.1"
-              (rust-bin.stable.latest.default.override {
+              # Keep in sync with .mise.toml.
+              (rust-bin.stable."1.94.1".default.override {
                 extensions = [ "rustfmt" "clippy" ];
               })
 

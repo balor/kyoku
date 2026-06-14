@@ -247,6 +247,7 @@ fn main() -> anyhow::Result<()> {
                 total.imported += result.imported;
                 total.skipped_duplicate += result.skipped_duplicate;
                 total.skipped_error += result.skipped_error;
+                total.skipped_non_utf8 += result.skipped_non_utf8;
                 total.added_to_collection += result.added_to_collection;
                 total.albums_created += result.albums_created;
                 total.albums_existing += result.albums_existing;
@@ -293,8 +294,11 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             println!(
-                "Import complete: {} imported, {} skipped (duplicate), {} errors",
-                total.imported, total.skipped_duplicate, total.skipped_error
+                "Import complete: {} imported, {} skipped (duplicate), {} skipped (non-UTF-8 filename — rename to import), {} errors",
+                total.imported,
+                total.skipped_duplicate,
+                total.skipped_non_utf8,
+                total.skipped_error
             );
             if !total.errors.is_empty() {
                 println!("\nErrors:");

@@ -17,6 +17,7 @@ use crate::tui::selection::Selection;
 use crate::tui::themes::Theme;
 use crate::tui::widgets::add_to_collection::{AddToCollectionPopup, PopupAction};
 use crate::tui::widgets::confirm_delete::{ConfirmAction, ConfirmDelete};
+use crate::tui::widgets::list_cursor::ListCursor;
 use crate::tui::widgets::track_table;
 
 pub enum LibraryAction {
@@ -238,41 +239,10 @@ impl LibraryView {
 
         let count = self.item_count();
 
-        if keys::is_up(&key) {
-            if self.selected > 0 {
-                self.selected -= 1;
-            }
-            return LibraryAction::None;
-        }
-
-        if keys::is_down(&key) {
-            if count > 0 && self.selected < count - 1 {
-                self.selected += 1;
-            }
-            return LibraryAction::None;
-        }
-
-        if keys::is_page_up(&key) {
-            self.selected = self.selected.saturating_sub(20);
-            return LibraryAction::None;
-        }
-
-        if keys::is_page_down(&key) {
-            if count > 0 {
-                self.selected = (self.selected + 20).min(count - 1);
-            }
-            return LibraryAction::None;
-        }
-
-        if keys::is_half_page_up(&key) {
-            self.selected = self.selected.saturating_sub(10);
-            return LibraryAction::None;
-        }
-
-        if keys::is_half_page_down(&key) {
-            if count > 0 {
-                self.selected = (self.selected + 10).min(count - 1);
-            }
+        let mut cursor = ListCursor::new(self.selected, self.scroll_offset);
+        if cursor.handle_key(&key, count) {
+            self.selected = cursor.selected;
+            self.scroll_offset = cursor.scroll;
             return LibraryAction::None;
         }
 
@@ -374,13 +344,6 @@ impl LibraryView {
         if key.code == KeyCode::Char('S') {
             self.sort_ascending = !self.sort_ascending;
             return LibraryAction::SortChanged;
-        }
-
-        if key.code == KeyCode::Char('G') {
-            if count > 0 {
-                self.selected = count - 1;
-            }
-            return LibraryAction::None;
         }
 
         if key.code == KeyCode::Char('O') {

@@ -23,10 +23,11 @@ pub struct MatchScore {
 /// - MB API score (0.10): incorporates aliases, fuzzy matching; but biased
 ///   toward the current canonical name, so kept low.
 /// - Artist similarity (0.15): Jaro-Winkler on the name string
-/// - Album similarity (0.20): Jaro-Winkler on the title string
+/// - Album similarity (0.15): Jaro-Winkler on the title string
 /// - Track count (0.25): exact match is very strong signal — steepest penalty
 ///   for mismatch since it's the most objective metric we have from search.
-/// - Duration (0.10): total duration within tolerance
+/// - Year (0.15): exact/near release year match
+/// - Duration (0.05): total duration within tolerance
 /// - Per-track titles (0.20): ordered Jaro-Winkler (0.5 if unavailable)
 pub fn score_release(
     local_artist: &str,
@@ -46,7 +47,8 @@ pub fn score_release(
     // carry the weight. By this point release search has already resolved
     // the artist via MBID alias lookup, so a script mismatch here reflects
     // the MB credit being in a different script, not a wrong artist.
-    let artist = if scripts_differ(local_artist, &candidate.artist) {
+    let local_artist = local_artist.trim();
+    let artist = if local_artist.is_empty() || scripts_differ(local_artist, &candidate.artist) {
         None
     } else {
         Some(sim(local_artist, &candidate.artist))
@@ -125,17 +127,13 @@ pub fn score_release(
     let duration = if local_total_duration_ms == 0 {
         None
     } else {
-        let mb_duration: u64 = candidate
-            .tracks
-            .iter()
-            .filter_map(|t| t.duration_ms)
-            .sum();
+        let mb_duration: u64 = candidate.tracks.iter().filter_map(|t| t.duration_ms).sum();
         if mb_duration == 0 {
             None
         } else {
             let diff = (local_total_duration_ms as f64 - mb_duration as f64).abs();
-            let tolerance = (local_track_titles.len().max(1) * 10_000) as f64;
-            Some((1.0 - diff / tolerance).max(0.0).min(1.0))
+            let tolerance = (local_track_count.max(1) * 10_000) as f64;
+            Some((1.0 - diff / tolerance).clamp(0.0, 1.0))
         }
     };
 
@@ -146,10 +144,7 @@ pub fn score_release(
     let mut weighted_sum = 0.0f64;
 
     // Always available
-    let factors: &[(f64, f64)] = &[
-        (api_score, 0.10),
-        (track_count, 0.25),
-    ];
+    let factors: &[(f64, f64)] = &[(api_score, 0.10), (track_count, 0.25)];
     for &(score, weight) in factors {
         weighted_sum += score * weight;
         total_weight += weight;
@@ -249,10 +244,16 @@ fn scripts_of(s: &str) -> u16 {
             set |= S_KANA; // Hiragana + Katakana (incl. phonetic ext + halfwidth)
         } else if (0x4E00..=0x9FFF).contains(&u)
             || (0x3400..=0x4DBF).contains(&u)
+            || (0x20000..=0x2EBEF).contains(&u)
+            || (0x30000..=0x3134F).contains(&u)
             || (0xF900..=0xFAFF).contains(&u)
         {
-            set |= S_CJK; // CJK Unified Ideographs, Ext A, Compat
-        } else if (0xAC00..=0xD7AF).contains(&u) || (0x1100..=0x11FF).contains(&u) {
+            set |= S_CJK; // CJK Unified Ideographs, Ext A-G, Compat
+        } else if (0xAC00..=0xD7AF).contains(&u)
+            || (0x1100..=0x11FF).contains(&u)
+            || (0xA960..=0xA97F).contains(&u)
+            || (0xD7B0..=0xD7FF).contains(&u)
+        {
             set |= S_HANGUL;
         } else if (0x0400..=0x04FF).contains(&u) {
             set |= S_CYRILLIC;
@@ -303,11 +304,7 @@ mod tests {
     use super::*;
     use crate::external::musicbrainz::{MbRelease, MbTrack};
 
-    fn make_release(
-        artist: &str,
-        title: &str,
-        tracks: &[&str],
-    ) -> MbRelease {
+    fn make_release(artist: &str, title: &str, tracks: &[&str]) -> MbRelease {
         MbRelease {
             id: "test-id".to_string(),
             title: title.to_string(),
@@ -392,17 +389,28 @@ mod tests {
     fn year_mismatch_penalizes() {
         let release = make_release("Radiohead", "OK Computer", &["Airbag"]);
         let score_correct = score_release(
-            "Radiohead", "OK Computer", Some(1997), 1,
-            &["Airbag".to_string()], 240_000, &release,
+            "Radiohead",
+            "OK Computer",
+            Some(1997),
+            1,
+            &["Airbag".to_string()],
+            240_000,
+            &release,
         );
         let score_wrong = score_release(
-            "Radiohead", "OK Computer", Some(2020), 1,
-            &["Airbag".to_string()], 240_000, &release,
+            "Radiohead",
+            "OK Computer",
+            Some(2020),
+            1,
+            &["Airbag".to_string()],
+            240_000,
+            &release,
         );
         assert!(
             score_correct.total > score_wrong.total,
             "correct year {} should beat wrong year {}",
-            score_correct.total, score_wrong.total
+            score_correct.total,
+            score_wrong.total
         );
     }
 
@@ -495,13 +503,41 @@ mod tests {
         // scripts. Two Latin-script albums with different names must still
         // score the album factor normally.
         let release = make_release("Artist", "OK Computer", &[]);
-        let score = score_release(
-            "Artist", "Kid A", None, 0, &[], 0, &release,
-        );
+        let score = score_release("Artist", "Kid A", None, 0, &[], 0, &release);
         assert!(
             score.album < 0.8,
             "same-script differing titles must still penalize: {}",
             score.album
+        );
+    }
+
+    #[test]
+    fn cjk_extension_b_counts_as_cjk_script() {
+        let ext_b = "𠀀";
+        assert!(!is_pure_latin(ext_b));
+        assert!(scripts_differ(ext_b, "Latin Title"));
+    }
+
+    #[test]
+    fn empty_local_artist_is_excluded_from_weighting() {
+        let release = make_release("Known Artist", "Perfect Album", &[]);
+        let score = score_release(
+            "   ",
+            "Perfect Album",
+            Some(1997),
+            12,
+            &[],
+            0,
+            &MbRelease {
+                track_count: 12,
+                year: Some(1997),
+                ..release
+            },
+        );
+        assert!(
+            score.total >= 0.85,
+            "artist-less perfect album should still auto-match: {}",
+            score.total
         );
     }
 
@@ -539,24 +575,8 @@ mod tests {
             ..album
         };
 
-        let single_score = score_release(
-            "9Lana",
-            "Let me battle",
-            Some(2024),
-            7,
-            &[],
-            0,
-            &single,
-        );
-        let album_score = score_release(
-            "9Lana",
-            "Let me battle",
-            Some(2024),
-            7,
-            &[],
-            0,
-            &album,
-        );
+        let single_score = score_release("9Lana", "Let me battle", Some(2024), 7, &[], 0, &single);
+        let album_score = score_release("9Lana", "Let me battle", Some(2024), 7, &[], 0, &album);
 
         assert!(
             album_score.total > single_score.total + 0.15,
@@ -575,8 +595,13 @@ mod tests {
     fn normalized_album_title_matches() {
         let release = make_release("Artist", "MMXX Hypa Hypa Edition", &[]);
         let score = score_release(
-            "Artist", "MMXX (Hypa Hypa edition)", None, 0,
-            &[], 0, &release,
+            "Artist",
+            "MMXX (Hypa Hypa edition)",
+            None,
+            0,
+            &[],
+            0,
+            &release,
         );
         assert!(
             score.album > 0.9,

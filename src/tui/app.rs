@@ -140,10 +140,8 @@ impl App {
         let view_captures_input = self.current_view_has_popup();
         let dirty_editor = matches!(self.view, AppView::Editor { .. }) && self.editor.is_dirty();
         let suppress_quit = view_captures_input || self.view == AppView::Import || dirty_editor;
-        if !self.search.focused && !suppress_quit {
-            if keys::is_quit(&key) {
-                return AppAction::Quit;
-            }
+        if !self.search.focused && !suppress_quit && keys::is_quit(&key) {
+            return AppAction::Quit;
         }
         if !self.search.focused && !view_captures_input {
             if keys::is_help(&key) {
@@ -189,7 +187,8 @@ impl App {
         // review or the editor where it can discard in-progress work.
         if !matches!(self.view, AppView::Import | AppView::Editor { .. })
             && !view_captures_input
-            && key.code == KeyCode::Char('g') {
+            && key.code == KeyCode::Char('g')
+        {
             self.global_search.open();
             self.global_search_open = true;
             return AppAction::None;
@@ -210,9 +209,7 @@ impl App {
     fn current_view_has_popup(&self) -> bool {
         match self.view {
             AppView::Library => self.library.has_popup(),
-            AppView::AlbumDetail { .. } | AppView::LooseTracks => {
-                self.album_detail.has_popup()
-            }
+            AppView::AlbumDetail { .. } | AppView::LooseTracks => self.album_detail.has_popup(),
             AppView::Collections => self.collections.has_popup(),
             AppView::CollectionDetail { .. } => self.collection_detail.has_popup(),
             AppView::Editor { .. } => self.editor.has_popup(),
@@ -234,10 +231,11 @@ impl App {
     pub fn tick(&mut self) {
         // Check debounced search
         if let Some(deadline) = self.search_debounce
-            && Instant::now() >= deadline {
-                self.on_search_changed();
-                self.search_debounce = None;
-            }
+            && Instant::now() >= deadline
+        {
+            self.on_search_changed();
+            self.search_debounce = None;
+        }
 
         // Tick import view for background operations
         if self.view == AppView::Import {

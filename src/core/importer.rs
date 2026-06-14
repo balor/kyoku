@@ -57,6 +57,7 @@ pub struct ImportResult {
     pub imported: u32,
     pub skipped_duplicate: u32,
     pub skipped_error: u32,
+    pub skipped_non_utf8: u32,
     pub added_to_collection: u32,
     pub albums_created: u32,
     pub albums_existing: u32,
@@ -64,16 +65,27 @@ pub struct ImportResult {
     pub errors: Vec<(String, String)>,
 }
 
-/// Scan a directory for audio files, returning absolute paths.
-pub fn scan_audio_files(path: impl AsRef<Path>) -> Vec<std::path::PathBuf> {
+#[derive(Debug, Default)]
+pub struct ScanAudioResult {
+    pub files: Vec<std::path::PathBuf>,
+    pub skipped_non_utf8: u32,
+}
+
+/// Scan a directory for audio files, returning absolute paths plus skipped-file counts.
+pub fn scan_audio_files_with_report(path: impl AsRef<Path>) -> ScanAudioResult {
     let path = path.as_ref();
-    let mut files = Vec::new();
+    let mut result = ScanAudioResult::default();
 
     for entry in WalkDir::new(path).follow_links(true).into_iter().flatten() {
         if !entry.file_type().is_file() {
             continue;
         }
         let path = entry.path();
+        if path.to_str().is_none() {
+            tracing::warn!("skipping non-UTF-8 path: {}", path.display());
+            result.skipped_non_utf8 += 1;
+            continue;
+        }
         if path
             .file_name()
             .and_then(|n| n.to_str())
@@ -87,12 +99,12 @@ pub fn scan_audio_files(path: impl AsRef<Path>) -> Vec<std::path::PathBuf> {
             .unwrap_or("")
             .to_lowercase();
         if SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
-            files.push(entry.into_path());
+            result.files.push(entry.into_path());
         }
     }
 
-    files.sort();
-    files
+    result.files.sort();
+    result
 }
 
 /// Stable grouping key for album imports. Non-loose imports group by source
@@ -214,9 +226,17 @@ pub fn import(
 
     // Scan for audio files
     let files = if path.is_file() {
-        vec![path.to_path_buf()]
+        if path.to_str().is_none() {
+            tracing::warn!("skipping non-UTF-8 path: {}", path.display());
+            result.skipped_non_utf8 += 1;
+            Vec::new()
+        } else {
+            vec![path.to_path_buf()]
+        }
     } else {
-        scan_audio_files(path)
+        let scan = scan_audio_files_with_report(path);
+        result.skipped_non_utf8 = scan.skipped_non_utf8;
+        scan.files
     };
 
     if files.is_empty() {
@@ -407,15 +427,21 @@ pub fn import(
 /// or by the `orphaned_files` table. This matters when one of the scan paths
 /// is `music_dir` itself — we don't want to resurface collection copies or
 /// pending-orphan leftovers as "untracked".
-pub fn scan_inbox(
+#[derive(Debug, Default)]
+pub struct ScanInboxResult {
+    pub files: Vec<std::path::PathBuf>,
+    pub skipped_non_utf8: u32,
+}
+
+pub fn scan_inbox_with_report(
     conn: &Connection,
     music_dir: &Path,
     inbox_dirs: &[std::path::PathBuf],
-) -> Result<Vec<std::path::PathBuf>> {
+) -> Result<ScanInboxResult> {
     // Build the exclusion set once per call — O(N) memory in library size,
     // but a single pass per table beats a per-file query.
     let known = queries::list_all_known_paths(conn, music_dir)?;
-    let mut unimported = Vec::new();
+    let mut result = ScanInboxResult::default();
 
     for dir in inbox_dirs {
         if !dir.exists() {
@@ -423,18 +449,27 @@ pub fn scan_inbox(
             continue;
         }
 
-        let files = scan_audio_files(dir);
-        for file_path in files {
+        let scan = scan_audio_files_with_report(dir);
+        result.skipped_non_utf8 += scan.skipped_non_utf8;
+        for file_path in scan.files {
             let abs_path = std::fs::canonicalize(&file_path).unwrap_or(file_path);
             let path_str = abs_path.display().to_string();
             if known.contains(&path_str) {
                 continue;
             }
-            unimported.push(abs_path);
+            result.files.push(abs_path);
         }
     }
 
-    Ok(unimported)
+    Ok(result)
+}
+
+pub fn scan_inbox(
+    conn: &Connection,
+    music_dir: &Path,
+    inbox_dirs: &[std::path::PathBuf],
+) -> Result<Vec<std::path::PathBuf>> {
+    scan_inbox_with_report(conn, music_dir, inbox_dirs).map(|r| r.files)
 }
 
 #[cfg(test)]
@@ -452,7 +487,7 @@ mod tests {
 
     #[test]
     fn test_scan_audio_files() {
-        let files = scan_audio_files(fixtures_dir());
+        let files = scan_audio_files_with_report(fixtures_dir()).files;
         // We have tagged.mp3, no_title.mp3, cjk_tagged.mp3 (not_audio.txt is excluded)
         assert!(files.len() >= 3);
         assert!(files.iter().all(|f| {
@@ -670,13 +705,27 @@ mod tests {
         assert!(detect_sibling_cover(tmp.path()).is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn scan_audio_files_skips_non_utf8_paths() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bad = tmp.path().join(std::ffi::OsStr::from_bytes(b"bad\xFF.mp3"));
+        std::fs::write(&bad, b"").unwrap();
+
+        let result = scan_audio_files_with_report(tmp.path());
+        assert!(result.files.is_empty());
+        assert_eq!(result.skipped_non_utf8, 1);
+    }
+
     #[test]
     fn scan_audio_files_skips_kyoku_tmp_marker() {
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::write(tmp.path().join("real.mp3"), b"").unwrap();
         std::fs::write(tmp.path().join("real.kyoku-tmp.mp3"), b"").unwrap();
 
-        let files = scan_audio_files(tmp.path());
+        let files = scan_audio_files_with_report(tmp.path()).files;
 
         assert_eq!(files.len(), 1);
         assert_eq!(

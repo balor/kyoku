@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 /// uses a symlink or normalized filesystem spelling, an existing path falls
 /// back to canonicalized comparison.
 pub fn to_db_path(path: &Path, music_dir: &Path) -> String {
+    // SYS-2: callers guarantee UTF-8 paths; the scanner enforces this so
+    // display().to_string() cannot silently persist U+FFFD-corrupted paths.
     // No music_dir context (in-memory tests, fresh setup) — every path is
     // stored verbatim; relative inputs stay relative.
     if path.is_relative() || music_dir.as_os_str().is_empty() {
@@ -30,14 +32,26 @@ pub fn to_db_path(path: &Path, music_dir: &Path) -> String {
         return rel.display().to_string();
     }
 
-    if let (Ok(canonical_path), Ok(canonical_music_dir)) =
-        (std::fs::canonicalize(path), std::fs::canonicalize(music_dir))
-        && let Some(rel) = strip_non_empty(&canonical_path, &canonical_music_dir)
+    if let (Ok(canonical_path), Ok(canonical_music_dir)) = (
+        std::fs::canonicalize(path),
+        std::fs::canonicalize(music_dir),
+    ) && let Some(rel) = strip_non_empty(&canonical_path, &canonical_music_dir)
     {
         return rel.display().to_string();
     }
 
     path.display().to_string()
+}
+
+/// Returns true iff `path` is strictly inside at least one managed root.
+///
+/// Safety invariant for destructive filesystem operations: a managed path is
+/// never a root itself and never outside all roots. This prevents cleanup and
+/// delete code from touching a library/inbox root or climbing above it.
+pub fn path_is_strictly_inside(path: &Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .any(|root| path.starts_with(root) && path != root.as_path())
 }
 
 fn strip_non_empty(path: &Path, prefix: &Path) -> Option<PathBuf> {
@@ -91,13 +105,19 @@ mod tests {
         let music = Path::new("/home/user/Music");
         let p = Path::new("/home/user/Music Backup/Artist/01.mp3");
         // /home/user/Music is NOT a parent of /home/user/Music Backup/...
-        assert_eq!(to_db_path(p, music), "/home/user/Music Backup/Artist/01.mp3");
+        assert_eq!(
+            to_db_path(p, music),
+            "/home/user/Music Backup/Artist/01.mp3"
+        );
     }
 
     #[test]
     fn relative_input_passes_through() {
         let music = Path::new("/home/user/Music");
-        assert_eq!(to_db_path(Path::new("Artist/01.mp3"), music), "Artist/01.mp3");
+        assert_eq!(
+            to_db_path(Path::new("Artist/01.mp3"), music),
+            "Artist/01.mp3"
+        );
     }
 
     #[test]

@@ -1,2 +1,3 @@
 [tools]
+# Keep in sync with flake.nix.
 rust = "1.94.1"

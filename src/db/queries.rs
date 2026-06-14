@@ -463,7 +463,7 @@ pub fn search_albums(
 ) -> Result<Vec<AlbumRow>> {
     let terms: Vec<String> = query
         .split_whitespace()
-        .map(|w| format!("%{}%", w))
+        .map(|w| format!("%{}%", escape_like(w)))
         .collect();
     if terms.is_empty() {
         return Ok(Vec::new());
@@ -471,7 +471,7 @@ pub fn search_albums(
 
     // Build one "(a.title LIKE ?n OR a.album_artist LIKE ?n)" clause per term.
     let clauses: Vec<String> = (1..=terms.len())
-        .map(|i| format!("(a.title LIKE ?{i} OR a.album_artist LIKE ?{i})"))
+        .map(|i| format!("(a.title LIKE ?{i} ESCAPE '\\' OR a.album_artist LIKE ?{i} ESCAPE '\\')"))
         .collect();
     let where_clause = clauses.join(" AND ");
     let limit_param = terms.len() + 1;
@@ -526,9 +526,15 @@ pub fn search_tracks(
     if fts_count > 0 {
         let fts_query = query
             .split_whitespace()
-            .map(|w| format!("\"{}\"*", w.replace('"', "")))
+            .filter_map(|w| {
+                let term = w.replace('"', "");
+                (!term.is_empty()).then(|| format!("\"{}\"*", term))
+            })
             .collect::<Vec<_>>()
             .join(" ");
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut stmt = conn.prepare(
             "SELECT t.id, t.title, t.artist, t.track_number, t.disc_number, t.duration_ms,
                     t.tag_status, t.bitrate, t.file_format, t.file_path
@@ -547,13 +553,16 @@ pub fn search_tracks(
         }
         Ok(result)
     } else {
-        let pattern = format!("%{}%", query);
+        let pattern = format!("%{}%", escape_like(query));
         let mut stmt = conn.prepare(
-            "SELECT id, title, artist, track_number, disc_number, duration_ms,
-                    tag_status, bitrate, file_format, file_path
-             FROM tracks
-             WHERE title LIKE ?1 OR artist LIKE ?1
-             ORDER BY title COLLATE NOCASE
+            "SELECT t.id, t.title, t.artist, t.track_number, t.disc_number, t.duration_ms,
+                    t.tag_status, t.bitrate, t.file_format, t.file_path
+             FROM tracks t
+             LEFT JOIN albums a ON a.id = t.album_id
+             WHERE t.title LIKE ?1 ESCAPE '\\'
+                OR t.artist LIKE ?1 ESCAPE '\\'
+                OR a.title LIKE ?1 ESCAPE '\\'
+             ORDER BY t.title COLLATE NOCASE
              LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], |row| {
@@ -565,6 +574,17 @@ pub fn search_tracks(
         }
         Ok(result)
     }
+}
+
+fn escape_like(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Get an album by ID. Cover-art path is resolved to absolute.
@@ -808,11 +828,6 @@ pub fn get_collection_file_paths(
     Ok(map)
 }
 
-/// Create a collection, or return the existing case-insensitive match.
-pub fn create_collection(conn: &Connection, name: &str) -> Result<i64> {
-    get_or_create_collection(conn, name).map(|(id, _)| id)
-}
-
 /// Delete a collection (cascade removes track associations).
 pub fn delete_collection(conn: &Connection, collection_id: i64) -> Result<()> {
     conn.execute("DELETE FROM collections WHERE id = ?1", [collection_id])?;
@@ -907,18 +922,6 @@ pub fn rename_collection(conn: &Connection, collection_id: i64, new_name: &str) 
         rusqlite::params![new_name, collection_id],
     )?;
     Ok(())
-}
-
-/// Find a collection by name (case-insensitive exact match).
-pub fn find_collection_by_name(conn: &Connection, name: &str) -> Result<Option<i64>> {
-    let id: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM collections WHERE name = ?1 COLLATE NOCASE",
-            [name],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(id)
 }
 
 /// Track in a collection with information about its other "homes".
@@ -1922,6 +1925,43 @@ mod tests {
             tracks.iter().map(|t| t.id).collect::<Vec<_>>(),
             vec![zulu, alpha]
         );
+    }
+
+    #[test]
+    fn search_tracks_ignores_all_quote_fts_term() {
+        let conn = db::open_memory().unwrap();
+        insert_track(&conn, no_root(), &test_track(), None, None).unwrap();
+
+        let rows = search_tracks(&conn, no_root(), "\"", 10).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn like_fallback_escapes_wildcards_and_searches_album_titles() {
+        let conn = db::open_memory().unwrap();
+        let (album_id, _) =
+            get_or_create_album(&conn, "100% Hits", Some("Artist"), None, None, 1).unwrap();
+        insert_track(
+            &conn,
+            no_root(),
+            &test_track_with("/test/exact.mp3", "Exact", Some(1)),
+            Some(album_id),
+            None,
+        )
+        .unwrap();
+        insert_track(
+            &conn,
+            no_root(),
+            &test_track_with("/test/near.mp3", "1000 Nights", Some(2)),
+            None,
+            None,
+        )
+        .unwrap();
+        conn.execute("DELETE FROM tracks_fts", []).unwrap();
+
+        let rows = search_tracks(&conn, no_root(), "100%", 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Exact");
     }
 
     #[test]

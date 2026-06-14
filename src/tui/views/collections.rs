@@ -19,6 +19,7 @@ use crate::tui::themes::Theme;
 use crate::tui::views::library::format_duration_ms;
 use crate::tui::widgets::confirm_delete::{ConfirmAction, ConfirmDelete};
 use crate::tui::widgets::input::TextInput;
+use crate::tui::widgets::list_cursor::{self, ListCursor};
 use crate::tui::widgets::track_table;
 
 pub enum CollectionsAction {
@@ -169,8 +170,12 @@ impl CollectionsView {
                     let name = input.value.trim().to_string();
                     if !name.is_empty() {
                         match queries::get_or_create_collection(conn, &name) {
-                            Ok((_, true)) => self.notice = Some(format!("Created collection: {name}")),
-                            Ok((_, false)) => self.notice = Some(format!("Collection already exists: {name}")),
+                            Ok((_, true)) => {
+                                self.notice = Some(format!("Created collection: {name}"))
+                            }
+                            Ok((_, false)) => {
+                                self.notice = Some(format!("Collection already exists: {name}"))
+                            }
                             Err(e) => self.notice = Some(format!("Create collection failed: {e}")),
                         }
                     }
@@ -254,14 +259,20 @@ impl CollectionsView {
                                 Ok(result) => row_errors += result.errors.len(),
                                 Err(e) => {
                                     failures += 1;
-                                    tracing::warn!("delete collection {} failed: {}", plan.collection_id, e);
+                                    tracing::warn!(
+                                        "delete collection {} failed: {}",
+                                        plan.collection_id,
+                                        e
+                                    );
                                 }
                             }
                         }
                         self.notice = Some(if failures == 0 && row_errors == 0 {
                             "Collections deleted".to_string()
                         } else {
-                            format!("Collections deleted with {failures} failed plan(s), {row_errors} row error(s)")
+                            format!(
+                                "Collections deleted with {failures} failed plan(s), {row_errors} row error(s)"
+                            )
                         });
                         self.mode = InputMode::Normal;
                         self.selection.clear();
@@ -274,26 +285,10 @@ impl CollectionsView {
 
         let count = self.collections.len();
 
-        if keys::is_up(&key) && self.selected > 0 {
-            self.selected -= 1;
-        }
-        if keys::is_down(&key) && count > 0 && self.selected < count - 1 {
-            self.selected += 1;
-        }
-        if keys::is_page_up(&key) {
-            self.selected = self.selected.saturating_sub(20);
-        }
-        if keys::is_page_down(&key) && count > 0 {
-            self.selected = (self.selected + 20).min(count - 1);
-        }
-        if keys::is_half_page_up(&key) {
-            self.selected = self.selected.saturating_sub(10);
-        }
-        if keys::is_half_page_down(&key) && count > 0 {
-            self.selected = (self.selected + 10).min(count - 1);
-        }
-        if key.code == KeyCode::Char('G') && count > 0 {
-            self.selected = count - 1;
+        let mut cursor = ListCursor::new(self.selected, self.list_scroll_offset);
+        if cursor.handle_key(&key, count) {
+            self.selected = cursor.selected;
+            self.list_scroll_offset = cursor.scroll;
         }
         if keys::is_confirm(&key)
             && let Some(coll) = self.collections.get(self.selected)
@@ -349,19 +344,20 @@ impl CollectionsView {
 
             if ids.len() == 1 {
                 // Single-collection delete — preserve the existing rich popup.
-                if let Ok(plan) =
-                    organizer::plan_delete_collection_with_roots(conn, music_dir, ids[0], &file_delete_roots)
-                {
+                if let Ok(plan) = organizer::plan_delete_collection_with_roots(
+                    conn,
+                    music_dir,
+                    ids[0],
+                    &file_delete_roots,
+                ) {
                     let mut widget = ConfirmDelete::new(
                         "Confirm Delete",
                         format!("Delete collection '{}'?", plan.collection_name),
                     );
                     let total_files = plan.files_to_delete.len();
                     if total_files > 0 {
-                        widget = widget.with_detail(format!(
-                            "{} file(s) to delete from disk",
-                            total_files
-                        ));
+                        widget = widget
+                            .with_detail(format!("{} file(s) to delete from disk", total_files));
                     } else {
                         widget = widget.without_checkbox();
                     }
@@ -388,9 +384,12 @@ impl CollectionsView {
                 // Batch — plan every collection and summarise.
                 let mut plans = Vec::with_capacity(ids.len());
                 for id in &ids {
-                    if let Ok(plan) =
-                        organizer::plan_delete_collection_with_roots(conn, music_dir, *id, &file_delete_roots)
-                    {
+                    if let Ok(plan) = organizer::plan_delete_collection_with_roots(
+                        conn,
+                        music_dir,
+                        *id,
+                        &file_delete_roots,
+                    ) {
                         plans.push(plan);
                     }
                 }
@@ -407,10 +406,8 @@ impl CollectionsView {
                     format!("Delete {} collections?", plans.len()),
                 );
                 if total_files > 0 {
-                    widget = widget.with_detail(format!(
-                        "{} file(s) to delete from disk",
-                        total_files
-                    ));
+                    widget =
+                        widget.with_detail(format!("{} file(s) to delete from disk", total_files));
                 } else {
                     widget = widget.without_checkbox();
                 }
@@ -659,18 +656,10 @@ impl Default for CollectionDetailView {
 
 impl CollectionDetailView {
     pub fn filtered_indices(&self) -> Vec<usize> {
-        if self.filter.is_empty() {
-            return (0..self.tracks.len()).collect();
-        }
-        self.tracks
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| {
-                let artist = t.artist.as_deref().unwrap_or("");
-                crate::tui::fuzzy::matches_any(&self.filter, &[&t.title, artist])
-            })
-            .map(|(i, _)| i)
-            .collect()
+        list_cursor::filtered_indices(&self.tracks, &self.filter, |t| {
+            let artist = t.artist.as_deref().unwrap_or("");
+            crate::tui::fuzzy::matches_any(&self.filter, &[&t.title, artist])
+        })
     }
 
     pub fn set_filter(&mut self, filter: String) {
@@ -756,7 +745,8 @@ impl CollectionDetailView {
                         &file_delete_roots,
                     ) {
                         Ok(report) if report.errors.is_empty() => {
-                            self.notice = Some(format!("Deleted {} track(s)", report.tracks_deleted));
+                            self.notice =
+                                Some(format!("Deleted {} track(s)", report.tracks_deleted));
                         }
                         Ok(report) => {
                             self.notice = Some(format!(
@@ -871,7 +861,9 @@ impl CollectionDetailView {
                     if let Some(coll) = &self.collection {
                         let coll_id = coll.id;
                         let mut errors = Vec::new();
-                        if let Err(e) = queries::remove_track_from_collection(conn, coll_id, track_id) {
+                        if let Err(e) =
+                            queries::remove_track_from_collection(conn, coll_id, track_id)
+                        {
                             errors.push(format!("remove membership failed: {e}"));
                         }
 
@@ -893,9 +885,7 @@ impl CollectionDetailView {
                         // If removing this collection membership would leave
                         // the track homeless, remove it from the library by
                         // default instead of creating an accidental loose row.
-                        if will_orphan
-                            && let Err(e) = queries::delete_track(conn, track_id)
-                        {
+                        if will_orphan && let Err(e) = queries::delete_track(conn, track_id) {
                             errors.push(format!("orphan track delete failed: {e}"));
                         }
 
@@ -913,26 +903,10 @@ impl CollectionDetailView {
 
         let count = visible.len();
 
-        if keys::is_up(&key) && self.selected > 0 {
-            self.selected -= 1;
-        }
-        if keys::is_down(&key) && count > 0 && self.selected < count - 1 {
-            self.selected += 1;
-        }
-        if keys::is_page_up(&key) {
-            self.selected = self.selected.saturating_sub(20);
-        }
-        if keys::is_page_down(&key) && count > 0 {
-            self.selected = (self.selected + 20).min(count - 1);
-        }
-        if keys::is_half_page_up(&key) {
-            self.selected = self.selected.saturating_sub(10);
-        }
-        if keys::is_half_page_down(&key) && count > 0 {
-            self.selected = (self.selected + 10).min(count - 1);
-        }
-        if key.code == KeyCode::Char('G') && count > 0 {
-            self.selected = count - 1;
+        let mut cursor = ListCursor::new(self.selected, self.scroll_offset);
+        if cursor.handle_key(&key, count) {
+            self.selected = cursor.selected;
+            self.scroll_offset = cursor.scroll;
         }
 
         let current_track = visible.get(self.selected).and_then(|&i| self.tracks.get(i));
@@ -962,7 +936,12 @@ impl CollectionDetailView {
                 return CollectionDetailAction::None;
             }
             let file_delete_roots = organizer::file_delete_roots(settings);
-            match pruner::plan_delete_tracks(conn, &settings.library.music_dir, &ids, &file_delete_roots) {
+            match pruner::plan_delete_tracks(
+                conn,
+                &settings.library.music_dir,
+                &ids,
+                &file_delete_roots,
+            ) {
                 Ok(plan) => {
                     if plan.is_empty() {
                         return CollectionDetailAction::None;
@@ -1017,9 +996,10 @@ impl CollectionDetailView {
                         widget = widget.with_summary(format!("File: {}", p.display()));
                     } else {
                         widget = widget.without_checkbox();
-                        widget = widget.with_detail(format!(
-                            "File is outside the managed directory — kyoku won't delete it",
-                        ));
+                        widget = widget.with_detail(
+                            "File is outside the managed directory — kyoku won't delete it"
+                                .to_string(),
+                        );
                     }
                 } else {
                     widget = widget.without_checkbox();
@@ -1219,12 +1199,7 @@ impl CollectionDetailView {
                 .get(&selected_track.id)
                 .cloned()
                 .unwrap_or_else(|| selected_track.file_path.clone());
-            crate::tui::widgets::path_footer::render(
-                frame,
-                footer_chunks[1],
-                theme,
-                &path_display,
-            );
+            crate::tui::widgets::path_footer::render(frame, footer_chunks[1], theme, &path_display);
         }
 
         // Rename popup
@@ -1293,9 +1268,7 @@ impl CollectionDetailView {
 }
 
 fn path_is_in_roots(path: &Path, roots: &[PathBuf]) -> bool {
-    roots
-        .iter()
-        .any(|root| path.starts_with(root) && path != root.as_path())
+    crate::core::paths::path_is_strictly_inside(path, roots)
 }
 
 fn build_collection_track_confirm(plan: &pruner::DeletePlan) -> ConfirmDelete {

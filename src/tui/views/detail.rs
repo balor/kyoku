@@ -14,17 +14,18 @@ use crate::core::organizer::{self, OrganizePlan};
 use crate::core::pruner;
 use crate::core::tagger::TMP_MARKER;
 use crate::db::queries::{self, AlbumRow, TrackRow};
-use crate::external::cover_art_archive::{CaaClient, CoverImage};
 use crate::error::Result;
+use crate::external::cover_art_archive::{CaaClient, CoverImage};
 use crate::tui::keybindings as keys;
 use crate::tui::selection::Selection;
 use crate::tui::themes::Theme;
-use crate::tui::widgets::track_table;
 use crate::tui::views::library::format_duration_ms;
 use crate::tui::widgets::add_to_collection::{AddToCollectionPopup, PopupAction};
 use crate::tui::widgets::confirm_delete::{ConfirmAction, ConfirmDelete};
 use crate::tui::widgets::cover_preview::CoverRegistry;
 use crate::tui::widgets::input::TextInput;
+use crate::tui::widgets::list_cursor::{self, ListCursor};
+use crate::tui::widgets::track_table;
 
 pub enum DetailAction {
     None,
@@ -79,18 +80,10 @@ struct CoverFetchResult {
 impl AlbumDetailView {
     /// Return indices of tracks matching the current filter.
     pub fn filtered_indices(&self) -> Vec<usize> {
-        if self.filter.is_empty() {
-            return (0..self.tracks.len()).collect();
-        }
-        self.tracks
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| {
-                let artist = t.artist.as_deref().unwrap_or("");
-                crate::tui::fuzzy::matches_any(&self.filter, &[&t.title, artist])
-            })
-            .map(|(i, _)| i)
-            .collect()
+        list_cursor::filtered_indices(&self.tracks, &self.filter, |t| {
+            let artist = t.artist.as_deref().unwrap_or("");
+            crate::tui::fuzzy::matches_any(&self.filter, &[&t.title, artist])
+        })
     }
 
     pub fn set_filter(&mut self, filter: String) {
@@ -222,10 +215,8 @@ impl AlbumDetailView {
                             self.notice = Some((NoticeKind::Success, msg));
                         }
                         Err(e) => {
-                            self.notice = Some((
-                                NoticeKind::Warning,
-                                format!("Delete failed: {}", e),
-                            ));
+                            self.notice =
+                                Some((NoticeKind::Warning, format!("Delete failed: {}", e)));
                         }
                     }
                     self.selection.clear();
@@ -273,17 +264,13 @@ impl AlbumDetailView {
                                 } else {
                                     NoticeKind::Success
                                 };
-                                self.notice = Some((
-                                    kind,
-                                    format!("Organized: {}", parts.join(", ")),
-                                ));
+                                self.notice =
+                                    Some((kind, format!("Organized: {}", parts.join(", "))));
                             }
                         }
                         Err(e) => {
-                            self.notice = Some((
-                                NoticeKind::Warning,
-                                format!("Organize failed: {}", e),
-                            ));
+                            self.notice =
+                                Some((NoticeKind::Warning, format!("Organize failed: {}", e)));
                         }
                     }
                     // Reload to reflect new paths
@@ -349,28 +336,28 @@ impl AlbumDetailView {
             if keys::is_confirm(&key) {
                 let new_title = input.value.trim().to_string();
                 if let Some(album) = &self.album
-                    && !new_title.is_empty() && new_title != album.title {
-                        let id = album.id;
-                        match queries::rename_album(conn, id, &new_title) {
-                            Ok(()) => {
-                                // Reload to reflect the change
-                                if let Err(e) = self.load(conn, &settings.library.music_dir, id) {
-                                    self.notice = Some((
-                                        NoticeKind::Warning,
-                                        format!("Album renamed, but reload failed: {e}"),
-                                    ));
-                                }
-                            }
-                            Err(e) => {
+                    && !new_title.is_empty()
+                    && new_title != album.title
+                {
+                    let id = album.id;
+                    match queries::rename_album(conn, id, &new_title) {
+                        Ok(()) => {
+                            // Reload to reflect the change
+                            if let Err(e) = self.load(conn, &settings.library.music_dir, id) {
                                 self.notice = Some((
                                     NoticeKind::Warning,
-                                    format!("Rename failed: {e}"),
+                                    format!("Album renamed, but reload failed: {e}"),
                                 ));
                             }
                         }
-                        self.rename_input = None;
-                        return DetailAction::None;
+                        Err(e) => {
+                            self.notice =
+                                Some((NoticeKind::Warning, format!("Rename failed: {e}")));
+                        }
                     }
+                    self.rename_input = None;
+                    return DetailAction::None;
+                }
                 self.rename_input = None;
                 return DetailAction::None;
             }
@@ -381,31 +368,13 @@ impl AlbumDetailView {
         let visible = self.filtered_indices();
         let count = visible.len();
 
-        if keys::is_up(&key) && self.selected > 0 {
-            self.selected -= 1;
-        }
-        if keys::is_down(&key) && count > 0 && self.selected < count - 1 {
-            self.selected += 1;
-        }
-        if keys::is_page_up(&key) {
-            self.selected = self.selected.saturating_sub(20);
-        }
-        if keys::is_page_down(&key) && count > 0 {
-            self.selected = (self.selected + 20).min(count - 1);
-        }
-        if keys::is_half_page_up(&key) {
-            self.selected = self.selected.saturating_sub(10);
-        }
-        if keys::is_half_page_down(&key) && count > 0 {
-            self.selected = (self.selected + 10).min(count - 1);
-        }
-        if key.code == KeyCode::Char('G') && count > 0 {
-            self.selected = count - 1;
+        let mut cursor = ListCursor::new(self.selected, self.scroll_offset);
+        if cursor.handle_key(&key, count) {
+            self.selected = cursor.selected;
+            self.scroll_offset = cursor.scroll;
         }
 
-        let current_track = visible
-            .get(self.selected)
-            .and_then(|&i| self.tracks.get(i));
+        let current_track = visible.get(self.selected).and_then(|&i| self.tracks.get(i));
 
         if keys::is_back(&key) && !self.selection.is_empty() {
             self.selection.clear();
@@ -413,13 +382,14 @@ impl AlbumDetailView {
         }
 
         if keys::is_toggle_select(&key)
-            && let Some(track) = current_track {
-                self.selection.toggle(track.id);
-                if count > 0 && self.selected < count - 1 {
-                    self.selected += 1;
-                }
-                return DetailAction::None;
+            && let Some(track) = current_track
+        {
+            self.selection.toggle(track.id);
+            if count > 0 && self.selected < count - 1 {
+                self.selected += 1;
             }
+            return DetailAction::None;
+        }
 
         if keys::is_delete(&key) {
             let ids: Vec<i64> = if self.selection.is_empty() {
@@ -439,58 +409,55 @@ impl AlbumDetailView {
             ) {
                 Ok(plan) => {
                     if plan.is_empty() {
-                        self.notice =
-                            Some((NoticeKind::Warning, "Nothing to delete".to_string()));
+                        self.notice = Some((NoticeKind::Warning, "Nothing to delete".to_string()));
                         return DetailAction::None;
                     }
                     let popup = build_track_confirm(&plan);
                     self.pending_delete = Some((plan, popup));
                 }
                 Err(e) => {
-                    self.notice =
-                        Some((NoticeKind::Warning, format!("Delete plan failed: {}", e)));
+                    self.notice = Some((NoticeKind::Warning, format!("Delete plan failed: {}", e)));
                 }
             }
             return DetailAction::None;
         }
 
         if key.code == KeyCode::Char('e')
-            && let Some(track) = current_track {
-                return DetailAction::EditTrack(track.id);
-            }
+            && let Some(track) = current_track
+        {
+            return DetailAction::EditTrack(track.id);
+        }
         if key.code == KeyCode::Char('a')
-            && let Some(track) = current_track {
-                self.add_to_collection = Some(AddToCollectionPopup::open(
-                    vec![track.id],
-                    track.title.clone(),
-                    conn,
-                ));
-            }
+            && let Some(track) = current_track
+        {
+            self.add_to_collection = Some(AddToCollectionPopup::open(
+                vec![track.id],
+                track.title.clone(),
+                conn,
+            ));
+        }
         if key.code == KeyCode::Char('o')
-            && let Some(track) = current_track {
-                let path = std::path::Path::new(&track.file_path);
-                if let Some(parent) = path.parent() {
-                    if !parent.exists() {
-                        self.notice = Some((
-                            NoticeKind::Warning,
-                            format!("Directory not found: {}", parent.display()),
-                        ));
-                    } else if !open_directory(parent) {
-                        self.notice = Some((
-                            NoticeKind::Warning,
-                            format!(
-                                "Could not open file manager — path: {}",
-                                parent.display()
-                            ),
-                        ));
-                    }
+            && let Some(track) = current_track
+        {
+            let path = std::path::Path::new(&track.file_path);
+            if let Some(parent) = path.parent() {
+                if !parent.exists() {
+                    self.notice = Some((
+                        NoticeKind::Warning,
+                        format!("Directory not found: {}", parent.display()),
+                    ));
+                } else if !open_directory(parent) {
+                    self.notice = Some((
+                        NoticeKind::Warning,
+                        format!("Could not open file manager — path: {}", parent.display()),
+                    ));
                 }
             }
+        }
         if key.code == KeyCode::Char('R') && !self.is_loose() {
             // Rename album
             if let Some(album) = &self.album {
-                let mut input =
-                    TextInput::new("New album title...").with_label(" Title: ");
+                let mut input = TextInput::new("New album title...").with_label(" Title: ");
                 input.value = album.title.clone();
                 input.cursor = input.value.len();
                 input.focused = true;
@@ -539,10 +506,7 @@ impl AlbumDetailView {
             .map(Path::new)
             .filter(|p| p.exists());
         if let Some(path) = existing {
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("cover");
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("cover");
             self.pending_cover_overwrite = Some(
                 ConfirmDelete::new(
                     "Overwrite cover",
@@ -617,10 +581,7 @@ impl AlbumDetailView {
                     ));
                 }
                 Err(e) => {
-                    self.notice = Some((
-                        NoticeKind::Warning,
-                        format!("Cover save failed: {}", e),
-                    ));
+                    self.notice = Some((NoticeKind::Warning, format!("Cover save failed: {}", e)));
                 }
             },
             Ok(None) => {
@@ -630,10 +591,7 @@ impl AlbumDetailView {
                 ));
             }
             Err(e) => {
-                self.notice = Some((
-                    NoticeKind::Warning,
-                    format!("Cover fetch failed: {}", e),
-                ));
+                self.notice = Some((NoticeKind::Warning, format!("Cover fetch failed: {}", e)));
             }
         }
     }
@@ -676,11 +634,7 @@ impl AlbumDetailView {
         Ok(dest)
     }
 
-    fn handle_add_to_collection_key(
-        &mut self,
-        key: KeyEvent,
-        conn: &Connection,
-    ) -> DetailAction {
+    fn handle_add_to_collection_key(&mut self, key: KeyEvent, conn: &Connection) -> DetailAction {
         let popup = match self.add_to_collection.as_mut() {
             Some(p) => p,
             None => return DetailAction::None,
@@ -690,9 +644,10 @@ impl AlbumDetailView {
             PopupAction::Closed(notice) => {
                 self.add_to_collection = None;
                 if let Some(n) = notice
-                    && !n.is_empty() {
-                        self.notice = Some((NoticeKind::Success, n));
-                    }
+                    && !n.is_empty()
+                {
+                    self.notice = Some((NoticeKind::Success, n));
+                }
             }
         }
         DetailAction::None
@@ -923,10 +878,7 @@ impl AlbumDetailView {
         let track_area_raw = if show_info_panel {
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Length(INFO_PANEL_WIDTH),
-                    Constraint::Min(20),
-                ])
+                .constraints([Constraint::Length(INFO_PANEL_WIDTH), Constraint::Min(20)])
                 .split(chunks[0]);
             self.render_info_panel(
                 frame,
@@ -1041,9 +993,7 @@ impl AlbumDetailView {
             .style(Style::default().bg(theme.bg_alt));
             frame.render_widget(p, chunks[1]);
         } else {
-            let selected_track = visible
-                .get(self.selected)
-                .and_then(|&i| self.tracks.get(i));
+            let selected_track = visible.get(self.selected).and_then(|&i| self.tracks.get(i));
             if let Some(track) = selected_track {
                 crate::tui::widgets::path_footer::render(frame, chunks[1], theme, &track.file_path);
             } else {
@@ -1087,12 +1037,7 @@ impl AlbumDetailView {
                     90,
                 )
             } else if nothing {
-                (
-                    OrganizeView::Summary,
-                    "Organize Preview",
-                    "Esc = close",
-                    80,
-                )
+                (OrganizeView::Summary, "Organize Preview", "Esc = close", 80)
             } else {
                 (
                     OrganizeView::Summary,
@@ -1130,10 +1075,7 @@ fn section_heading(label: &str, theme: &Theme) -> Line<'static> {
 /// up the primary foreground so the eye lands there.
 fn tag_line(key: &str, value: &str, theme: &Theme) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!("{}: ", key),
-            Style::default().fg(theme.fg_muted),
-        ),
+        Span::styled(format!("{}: ", key), Style::default().fg(theme.fg_muted)),
         Span::styled(value.to_string(), Style::default().fg(theme.fg_dim)),
     ])
 }
@@ -1201,8 +1143,8 @@ pub fn open_directory(path: &std::path::Path) -> bool {
     #[cfg(not(target_os = "macos"))]
     {
         let has_dbus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some();
-        let has_display = std::env::var_os("DISPLAY").is_some()
-            || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let has_display =
+            std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
 
         // No graphical session reachable (e.g. SSH without X forwarding) — bail
         // up-front so the caller can show a notice instead of silently
@@ -1242,7 +1184,9 @@ pub fn open_directory(path: &std::path::Path) -> bool {
         // .spawn() returns Ok even if the child immediately exits, but
         // checking has_display avoids the obvious "no display" case.
         if has_display {
-            for cmd in &["nautilus", "dolphin", "thunar", "nemo", "pcmanfm", "xdg-open"] {
+            for cmd in &[
+                "nautilus", "dolphin", "thunar", "nemo", "pcmanfm", "xdg-open",
+            ] {
                 if std::process::Command::new(cmd)
                     .arg(path)
                     .stdout(null())

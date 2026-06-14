@@ -27,15 +27,14 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use rusqlite::Connection;
 
 use crate::config::Settings;
-use crate::core::tagger::{
-    self, FrameEntry, FrameGroup, TagChanges, TagValue, display_name_for,
-};
+use crate::core::tagger::{self, FrameEntry, FrameGroup, TagChanges, TagValue, display_name_for};
 use crate::db::queries;
 use crate::error::Result;
 use crate::tui::keybindings as keys;
 use crate::tui::themes::Theme;
 use crate::tui::widgets::confirm_delete::ConfirmDelete;
 use crate::tui::widgets::input::TextInput;
+use crate::tui::widgets::list_cursor::ListCursor;
 
 /// Separator used to join / split multi-value frames in the text input.
 /// Picked for visual distinctiveness; users aren't likely to type this
@@ -104,12 +103,7 @@ impl Default for EditorView {
 }
 
 impl EditorView {
-    pub fn load(
-        &mut self,
-        conn: &Connection,
-        track_id: i64,
-        settings: &Settings,
-    ) -> Result<()> {
+    pub fn load(&mut self, conn: &Connection, track_id: i64, settings: &Settings) -> Result<()> {
         self.track_id = track_id;
         self.selected = 0;
         self.scroll_offset = 0;
@@ -130,8 +124,7 @@ impl EditorView {
         // Read all frames from the file. If the file is missing/unreadable,
         // fall back to the DB's known fields so the user can still do a
         // DB-only edit — not useless, since the library view pulls from DB.
-        let frames_from_file = tagger::read_all_frames(&self.file_path)
-            .unwrap_or_default();
+        let frames_from_file = tagger::read_all_frames(&self.file_path).unwrap_or_default();
 
         self.frames = frames_from_file
             .into_iter()
@@ -142,7 +135,11 @@ impl EditorView {
         // the file is missing or tag-less, so the editor is usable in that
         // degenerate case. We don't add a row when the frame is already
         // present from the file read.
-        ensure_row(&mut self.frames, lofty::tag::ItemKey::TrackTitle, &track.title);
+        ensure_row(
+            &mut self.frames,
+            lofty::tag::ItemKey::TrackTitle,
+            &track.title,
+        );
         ensure_row(
             &mut self.frames,
             lofty::tag::ItemKey::TrackArtist,
@@ -232,20 +229,10 @@ impl EditorView {
             return;
         }
 
-        if keys::is_up(&key) && self.selected > 0 {
-            self.selected -= 1;
-        }
-        if keys::is_down(&key)
-            && !self.frames.is_empty()
-            && self.selected < self.frames.len() - 1
-        {
-            self.selected += 1;
-        }
-        if keys::is_page_up(&key) {
-            self.selected = self.selected.saturating_sub(10);
-        }
-        if keys::is_page_down(&key) && !self.frames.is_empty() {
-            self.selected = (self.selected + 10).min(self.frames.len() - 1);
+        let mut cursor = ListCursor::new(self.selected, self.scroll_offset);
+        if cursor.handle_key(&key, self.frames.len()) {
+            self.selected = cursor.selected;
+            self.scroll_offset = cursor.scroll;
         }
         if key.code == KeyCode::Tab && !self.frames.is_empty() {
             self.selected = (self.selected + 1) % self.frames.len();
@@ -302,14 +289,11 @@ impl EditorView {
         // currently recognises.
         let mirror: Vec<(&'static str, String)> = modified
             .iter()
-            .filter_map(|(key, value, _)| {
-                db_mirror_column(key).map(|col| (col, value.clone()))
-            })
+            .filter_map(|(key, value, _)| db_mirror_column(key).map(|col| (col, value.clone())))
             .collect();
 
         if !mirror.is_empty() {
-            let refs: Vec<(&str, &str)> =
-                mirror.iter().map(|(c, v)| (*c, v.as_str())).collect();
+            let refs: Vec<(&str, &str)> = mirror.iter().map(|(c, v)| (*c, v.as_str())).collect();
             if let Err(e) = queries::update_track_fields(conn, self.track_id, &refs) {
                 self.notice = Some(format!("DB update failed: {}", e));
                 return;
@@ -338,7 +322,7 @@ impl EditorView {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(2), // header
-                Constraint::Min(5),   // fields table
+                Constraint::Min(5),    // fields table
                 Constraint::Length(1), // footer
             ])
             .split(area);
@@ -388,8 +372,7 @@ impl EditorView {
 
         let mut rows: Vec<Row> = Vec::new();
         let mut last_group: Option<FrameGroup> = None;
-        let visible_range =
-            self.scroll_offset..self.frames.len().min(self.scroll_offset + visible);
+        let visible_range = self.scroll_offset..self.frames.len().min(self.scroll_offset + visible);
 
         for i in visible_range.clone() {
             let row = &self.frames[i];

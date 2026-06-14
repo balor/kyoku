@@ -511,13 +511,15 @@ impl ImportView {
                     return;
                 }
             };
-            let all_files = match importer::scan_inbox(&conn, &music_dir, &source_paths) {
-                Ok(files) => files,
+            let scan = match importer::scan_inbox_with_report(&conn, &music_dir, &source_paths) {
+                Ok(scan) => scan,
                 Err(e) => {
                     let _ = tx.send(ScanMessage::Failed(e.to_string()));
                     return;
                 }
             };
+            let skipped_non_utf8 = scan.skipped_non_utf8;
+            let all_files = scan.files;
             let total = all_files.len();
             let mut groups: std::collections::HashMap<
                 String,
@@ -566,7 +568,10 @@ impl ImportView {
                 })
                 .collect();
 
-            let _ = tx.send(ScanMessage::Complete(import_groups));
+            let _ = tx.send(ScanMessage::Complete {
+                groups: import_groups,
+                skipped_non_utf8,
+            });
         });
     }
 
@@ -679,14 +684,14 @@ impl ImportView {
                     .min(3); // never refetch more than top 3
 
                 if tied_count > 1 {
-                    for i in 0..tied_count {
-                        let mbid = candidates[i].release.id.clone();
+                    for candidate in candidates.iter_mut().take(tied_count) {
+                        let mbid = candidate.release.id.clone();
                         match client.fetch_release(&mbid) {
                             Ok(mut full) => {
                                 // Preserve the search-result API score before rescoring:
                                 // full release fetch returns api_score = 100 because it is
                                 // not a search hit, and using that flat score biases ties.
-                                let preserved_api = candidates[i].release.api_score;
+                                let preserved_api = candidate.release.api_score;
                                 full.api_score = preserved_api;
                                 let new_score = matching::score_release(
                                     &artist,
@@ -697,7 +702,7 @@ impl ImportView {
                                     total_ms,
                                     &full,
                                 );
-                                candidates[i] = MbCandidate {
+                                *candidate = MbCandidate {
                                     release: full,
                                     score: new_score,
                                 };
@@ -876,7 +881,7 @@ impl ImportView {
         let (groups_to_import, plans_to_import): (Vec<ImportGroup>, Vec<Vec<_>>) = self
             .groups
             .iter()
-            .zip(plans.into_iter())
+            .zip(plans)
             .filter(|(g, _)| g.action != GroupAction::Skip)
             .map(|(g, p)| (g.clone(), p))
             .unzip();

@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use crate::core::organizer::remove_empty_parents;
+use crate::core::paths::path_is_strictly_inside;
 use crate::db::queries;
 use crate::error::Result;
 
@@ -68,13 +69,6 @@ impl DeletePlan {
     }
 }
 
-/// Returns `true` iff `path` is strictly inside at least one managed root.
-fn path_is_managed(path: &Path, roots: &[PathBuf]) -> bool {
-    roots
-        .iter()
-        .any(|r| path.starts_with(r) && path != r.as_path())
-}
-
 /// Classify a file path into the plan — either queued for deletion or tagged
 /// as outside-managed-roots (never touched).
 fn classify_file(
@@ -83,7 +77,7 @@ fn classify_file(
     managed_roots: &[PathBuf],
     is_collection_copy: bool,
 ) {
-    if path_is_managed(&path, managed_roots) {
+    if path_is_strictly_inside(&path, managed_roots) {
         if is_collection_copy {
             plan.collection_copies_to_delete.push(path);
         } else {
@@ -263,7 +257,7 @@ pub fn apply_delete_plan(
             }
             // Defensive second check — even if a caller passes a plan built
             // against different roots, refuse to touch unmanaged paths.
-            if !path_is_managed(p, cleanup_roots) {
+            if !path_is_strictly_inside(p, cleanup_roots) {
                 continue;
             }
             match std::fs::remove_file(p) {

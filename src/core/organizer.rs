@@ -1159,9 +1159,7 @@ pub fn apply_delete_collection_with_roots(
 }
 
 fn path_is_in_roots(path: &Path, roots: &[PathBuf]) -> bool {
-    roots
-        .iter()
-        .any(|root| path.starts_with(root) && path != root.as_path())
+    crate::core::paths::path_is_strictly_inside(path, roots)
 }
 
 /// Directory roots where Kyoku may delete tracked music files on explicit
@@ -1189,11 +1187,7 @@ pub fn cleanup_roots(settings: &Settings) -> Vec<PathBuf> {
 /// strictly inside at least one of the roots. This is a safety floor against
 /// accidentally sweeping up the user's home directory or filesystem root.
 pub(crate) fn remove_empty_parents(dir: &Path, roots: &[PathBuf]) -> u32 {
-    // Must live strictly inside at least one root. Being equal to a root
-    // is not enough — roots themselves are sacrosanct.
-    let is_inside_a_root =
-        |p: &Path| -> bool { roots.iter().any(|r| p.starts_with(r) && p != r.as_path()) };
-    if !is_inside_a_root(dir) {
+    if !crate::core::paths::path_is_strictly_inside(dir, roots) {
         return 0;
     }
 
@@ -1201,7 +1195,7 @@ pub(crate) fn remove_empty_parents(dir: &Path, roots: &[PathBuf]) -> u32 {
     let mut current = dir.to_path_buf();
     loop {
         // Never touch a path that is not strictly inside a managed root.
-        if !is_inside_a_root(&current) {
+        if !crate::core::paths::path_is_strictly_inside(&current, roots) {
             break;
         }
         match std::fs::read_dir(&current) {

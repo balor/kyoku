@@ -433,10 +433,10 @@ fn expand_path_vars(input: &str) -> Option<PathBuf> {
 /// Nicotine+'s own defaults for `NICOTINE_DATA_HOME` / `NICOTINE_CONFIG_HOME`
 /// when the env var isn't set, because Nicotine+ resolves those internally.
 fn resolve_var(name: &str) -> Option<String> {
-    if let Ok(v) = std::env::var(name) {
-        if !v.is_empty() {
-            return Some(v);
-        }
+    if let Ok(v) = std::env::var(name)
+        && !v.is_empty()
+    {
+        return Some(v);
     }
     let home = dirs::home_dir()?;
     let path = match name {

@@ -109,8 +109,8 @@ impl ImportGroup {
             })
         };
         let first_key = self.tracks.first().and_then(|(_, td)| key(td));
-        let consistent = first_key.is_some()
-            && self.tracks.iter().all(|(_, td)| key(td) == first_key);
+        let consistent =
+            first_key.is_some() && self.tracks.iter().all(|(_, td)| key(td) == first_key);
         if !consistent {
             return false;
         }
@@ -151,6 +151,15 @@ impl ImportGroup {
             || (n_tracks >= 4 && (unique_artists.len() * 100 / n_tracks) >= 40);
         !too_diverse
     }
+}
+
+pub struct ImportConfig {
+    pub rate_limit_ms: u64,
+    pub name_script: crate::config::settings::NameScriptPreference,
+    pub write_tags: bool,
+    pub auto_match_threshold: f64,
+    pub match_candidates: u32,
+    pub db_path: PathBuf,
 }
 
 pub struct ImportView {
@@ -243,7 +252,10 @@ pub struct ConfirmCancel {
 
 enum ScanMessage {
     Progress(usize, usize),
-    Complete(Vec<ImportGroup>),
+    Complete {
+        groups: Vec<ImportGroup>,
+        skipped_non_utf8: u32,
+    },
     Failed(String),
 }
 
@@ -318,12 +330,7 @@ impl ImportView {
         inbox_dirs: &[PathBuf],
         music_dir: &std::path::Path,
         _conn: &Connection,
-        rate_limit_ms: u64,
-        name_script: crate::config::settings::NameScriptPreference,
-        write_tags: bool,
-        auto_match_threshold: f64,
-        match_candidates: u32,
-        db_path: PathBuf,
+        config: ImportConfig,
     ) {
         self.step = ImportStep::SelectSource;
         self.groups.clear();
@@ -343,12 +350,12 @@ impl ImportView {
         self.decisions.clear();
         self.conflict_cursor = 0;
         self.confirm_cancel = None;
-        self.rate_limit_ms = rate_limit_ms;
-        self.name_script = name_script;
-        self.write_tags = write_tags;
-        self.auto_match_threshold = auto_match_threshold;
-        self.match_candidates = match_candidates;
-        self.db_path = db_path;
+        self.rate_limit_ms = config.rate_limit_ms;
+        self.name_script = config.name_script;
+        self.write_tags = config.write_tags;
+        self.auto_match_threshold = config.auto_match_threshold;
+        self.match_candidates = config.match_candidates;
+        self.db_path = config.db_path;
         self.music_dir = music_dir.to_path_buf();
 
         // Reset SelectSource fields

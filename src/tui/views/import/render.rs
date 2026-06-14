@@ -32,9 +32,18 @@ impl ImportView {
                     Ok(ScanMessage::Progress(done, total)) => {
                         self.scan_progress = (done, total);
                     }
-                    Ok(ScanMessage::Complete(groups)) => {
+                    Ok(ScanMessage::Complete {
+                        groups,
+                        skipped_non_utf8,
+                    }) => {
                         self.groups = groups;
                         self.current_group = 0;
+                        if skipped_non_utf8 > 0 {
+                            self.result_summary = Some(format!(
+                                "{} file(s) skipped (non-UTF-8 filename — rename to import)",
+                                skipped_non_utf8
+                            ));
+                        }
                         scan_done = true;
                     }
                     Ok(ScanMessage::Failed(reason)) => {
@@ -97,11 +106,12 @@ impl ImportView {
                         // would clobber their Skip/Loose/explicit pick.
                         if !group.user_decided
                             && let Some(best) = result.candidates.first()
-                            && best.score.total >= auto_threshold {
-                                group.selected_candidate = Some(0);
-                                group.action = GroupAction::AcceptMb;
-                                auto_selected.push(result.group_idx);
-                            }
+                            && best.score.total >= auto_threshold
+                        {
+                            group.selected_candidate = Some(0);
+                            group.action = GroupAction::AcceptMb;
+                            auto_selected.push(result.group_idx);
+                        }
                         group.mb_candidates = result.candidates;
                         group.mb_state = MbMatchState::Done;
                     }
@@ -150,23 +160,24 @@ impl ImportView {
         // Process manual MBID fetch result
         let mut fetch_done = false;
         if let Some(rx) = &self.mbid_fetch_rx
-            && let Ok(result) = rx.try_recv() {
-                if let Some(group) = self.groups.get_mut(result.group_idx) {
-                    if let Some(err) = result.error {
-                        group.mb_state = MbMatchState::Failed(err);
-                    } else if !result.candidates.is_empty() {
-                        // Insert the fetched release at the top of candidates
-                        let mut new_candidates = result.candidates;
-                        new_candidates.append(&mut group.mb_candidates);
-                        group.mb_candidates = new_candidates;
-                        group.selected_candidate = Some(0);
-                        group.action = GroupAction::AcceptMb;
-                        group.user_decided = true;
-                        group.mb_state = MbMatchState::Done;
-                    }
+            && let Ok(result) = rx.try_recv()
+        {
+            if let Some(group) = self.groups.get_mut(result.group_idx) {
+                if let Some(err) = result.error {
+                    group.mb_state = MbMatchState::Failed(err);
+                } else if !result.candidates.is_empty() {
+                    // Insert the fetched release at the top of candidates
+                    let mut new_candidates = result.candidates;
+                    new_candidates.append(&mut group.mb_candidates);
+                    group.mb_candidates = new_candidates;
+                    group.selected_candidate = Some(0);
+                    group.action = GroupAction::AcceptMb;
+                    group.user_decided = true;
+                    group.mb_state = MbMatchState::Done;
                 }
-                fetch_done = true;
             }
+            fetch_done = true;
+        }
         if fetch_done {
             self.mbid_fetch_rx = None;
         }
@@ -318,7 +329,9 @@ impl ImportView {
 
         // Inbox section
         let inbox_header_style = if self.use_custom_path {
-            Style::default().fg(theme.fg_dim).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.fg_dim)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)
         };
@@ -491,8 +504,8 @@ impl ImportView {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2), // group nav
-                Constraint::Min(3),   // tracks
+                Constraint::Length(2),         // group nav
+                Constraint::Min(3),            // tracks
                 Constraint::Length(mb_height), // MB candidates
             ])
             .split(inner);
@@ -510,9 +523,7 @@ impl ImportView {
                 )
             }
             GroupAction::Skip => Span::styled("[Skip]", Style::default().fg(theme.red)),
-            GroupAction::Loose => {
-                Span::styled("[Import loose]", Style::default().fg(theme.yellow))
-            }
+            GroupAction::Loose => Span::styled("[Import loose]", Style::default().fg(theme.yellow)),
         };
         let mut nav_spans = vec![
             Span::styled(
@@ -551,18 +562,9 @@ impl ImportView {
                 .unwrap_or("");
             let artist = track.artist.as_deref().unwrap_or("");
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {} ", track.title),
-                    Style::default().fg(theme.fg),
-                ),
-                Span::styled(
-                    format!("— {} ", artist),
-                    Style::default().fg(theme.fg_dim),
-                ),
-                Span::styled(
-                    format!("[{}]", album),
-                    Style::default().fg(theme.fg_muted),
-                ),
+                Span::styled(format!("  {} ", track.title), Style::default().fg(theme.fg)),
+                Span::styled(format!("— {} ", artist), Style::default().fg(theme.fg_dim)),
+                Span::styled(format!("[{}]", album), Style::default().fg(theme.fg_muted)),
             ]));
         }
         let p = Paragraph::new(lines);
@@ -599,16 +601,10 @@ impl ImportView {
                     .year
                     .map(|y| format!(" ({})", y))
                     .unwrap_or_default();
-                let country = candidate
-                    .release
-                    .country
-                    .as_deref()
-                    .unwrap_or("");
+                let country = candidate.release.country.as_deref().unwrap_or("");
 
                 let style = if is_selected {
-                    Style::default()
-                        .fg(theme.fg)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.fg_dim)
                 };
@@ -628,22 +624,26 @@ impl ImportView {
                 let count_match = candidate.release.track_count as usize == group.tracks.len();
                 let count_marker = if count_match { " ✓" } else { "" };
                 let count_marker_style = if count_match {
-                    Style::default().fg(theme.green).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme.green)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
 
                 mb_lines.push(Line::from(vec![
-                    Span::styled(
-                        format!(" {} {} ", marker, i + 1),
-                        style,
-                    ),
+                    Span::styled(format!(" {} {} ", marker, i + 1), style),
                     Span::styled(
                         format!("{}% ", score_pct),
-                        Style::default().fg(score_color).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(score_color)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        format!("{} — {}{}", candidate.release.artist, candidate.release.title, year_str),
+                        format!(
+                            "{} — {}{}",
+                            candidate.release.artist, candidate.release.title, year_str
+                        ),
                         style,
                     ),
                     Span::styled(
@@ -663,7 +663,10 @@ impl ImportView {
             frame.render_widget(p, chunks[2]);
         } else if let MbMatchState::Failed(reason) = &group.mb_state {
             let p = Paragraph::new(Span::styled(
-                format!(" MB search failed: {} — press r to retry (log has detail)", reason),
+                format!(
+                    " MB search failed: {} — press r to retry (log has detail)",
+                    reason
+                ),
                 Style::default().fg(theme.red),
             ));
             frame.render_widget(p, chunks[2]);
@@ -746,9 +749,7 @@ impl ImportView {
             Line::from(""),
             Line::from(Span::styled(
                 " All groups reviewed",
-                Style::default()
-                    .fg(theme.fg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
         ];
@@ -814,7 +815,12 @@ impl ImportView {
         if accept_mb > 0 && self.write_tags {
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
-                Span::styled("  Note: ", Style::default().fg(theme.yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "  Note: ",
+                    Style::default()
+                        .fg(theme.yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     format!(
                         "MB metadata will be written to the tags of {} file(s).",
@@ -833,17 +839,20 @@ impl ImportView {
         // summary; the count is stashed on the view. Surfacing it here
         // so nobody is surprised by a mid-flow resolver screen.
         if !self.conflicts.is_empty() {
-            let (lib_count, batch_count) = self.conflicts.iter().fold((0u32, 0u32), |acc, c| {
-                match c.other {
-                    super::dup_detect::DupOther::Library(_) => (acc.0 + 1, acc.1),
-                    super::dup_detect::DupOther::Batch(_) => (acc.0, acc.1 + 1),
-                }
-            });
+            let (lib_count, batch_count) =
+                self.conflicts
+                    .iter()
+                    .fold((0u32, 0u32), |acc, c| match c.other {
+                        super::dup_detect::DupOther::Library(_) => (acc.0 + 1, acc.1),
+                        super::dup_detect::DupOther::Batch(_) => (acc.0, acc.1 + 1),
+                    });
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
                 Span::styled(
                     "  Duplicates: ",
-                    Style::default().fg(theme.yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!(
@@ -916,11 +925,15 @@ impl ImportView {
         let decision_label = match decision {
             Some(ConflictDecision::KeepOther) => Span::styled(
                 "  → keep A",
-                Style::default().fg(theme.green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.green)
+                    .add_modifier(Modifier::BOLD),
             ),
             Some(ConflictDecision::KeepNew) => Span::styled(
                 "  → keep B (replace)",
-                Style::default().fg(theme.yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             None => Span::raw(""),
         };
@@ -933,9 +946,7 @@ impl ImportView {
         let header_lines = vec![
             Line::from(Span::styled(
                 format!("  Conflict {} of {}", self.conflict_cursor + 1, total),
-                Style::default()
-                    .fg(theme.fg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
             )),
             Line::from(vec![
                 Span::styled(signal_text, Style::default().fg(theme.fg_dim)),
@@ -958,9 +969,7 @@ impl ImportView {
             DupOther::Library(e) => vec![
                 Line::from(Span::styled(
                     format!("  {}", e.title),
-                    Style::default()
-                        .fg(theme.fg)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(Span::styled(
                     format!(
@@ -976,7 +985,9 @@ impl ImportView {
                     format!(
                         "  {} · {} kbps{}",
                         e.file_format.to_uppercase(),
-                        e.bitrate.map(|b| b.to_string()).unwrap_or_else(|| "—".into()),
+                        e.bitrate
+                            .map(|b| b.to_string())
+                            .unwrap_or_else(|| "—".into()),
                         e.file_size
                             .map(|s| format!(" · {:.1} MB", s as f64 / 1_000_000.0))
                             .unwrap_or_default(),
@@ -1001,9 +1012,7 @@ impl ImportView {
                 Some((t, _td)) => vec![
                     Line::from(Span::styled(
                         format!("  {}", t.title),
-                        Style::default()
-                            .fg(theme.fg)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
                     )),
                     Line::from(Span::styled(
                         format!(
@@ -1019,7 +1028,9 @@ impl ImportView {
                         format!(
                             "  {} · {} kbps",
                             t.file_format.as_str().to_uppercase(),
-                            t.bitrate.map(|b| b.to_string()).unwrap_or_else(|| "—".into()),
+                            t.bitrate
+                                .map(|b| b.to_string())
+                                .unwrap_or_else(|| "—".into()),
                         ),
                         Style::default().fg(theme.fg_muted),
                     )),
@@ -1032,7 +1043,7 @@ impl ImportView {
                     "  Batch track is no longer available.",
                     Style::default().fg(theme.fg_muted),
                 ))],
-            }
+            },
         };
         let a_block = Block::default()
             .title(Span::styled(
@@ -1070,9 +1081,7 @@ impl ImportView {
         let b_lines = vec![
             Line::from(Span::styled(
                 format!("  {}", new_track.title),
-                Style::default()
-                    .fg(theme.fg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
                 format!(
@@ -1119,7 +1128,10 @@ impl ImportView {
                 Style::default().fg(theme.fg_dim),
             )),
             Line::from(Span::styled(
-                format!("  Viewing {}/{}. Enter commits all decisions and starts the import.", resolved, total),
+                format!(
+                    "  Viewing {}/{}. Enter commits all decisions and starts the import.",
+                    resolved, total
+                ),
                 Style::default().fg(theme.fg_muted),
             )),
         ];
@@ -1180,10 +1192,7 @@ impl ImportView {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let summary = self
-            .result_summary
-            .as_deref()
-            .unwrap_or("No results.");
+        let summary = self.result_summary.as_deref().unwrap_or("No results.");
 
         let lines = vec![
             Line::from(""),

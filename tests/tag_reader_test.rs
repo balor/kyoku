@@ -8,11 +8,10 @@ fn fixtures_dir() -> PathBuf {
 fn test_read_mp3_tags() {
     let path = fixtures_dir().join("tagged.mp3");
     if !path.exists() {
-        eprintln!(
-            "Skipping test: fixture file not found at {}",
+        panic!(
+            "fixture missing: {} — see tests/fixtures/README",
             path.display()
         );
-        return;
     }
 
     let track = kyoku::core::tagger::read_track(&path).unwrap();
@@ -25,11 +24,10 @@ fn test_read_mp3_tags() {
 fn test_read_flac_tags() {
     let path = fixtures_dir().join("tagged.flac");
     if !path.exists() {
-        eprintln!(
-            "Skipping test: fixture file not found at {}",
+        panic!(
+            "fixture missing: {} — see tests/fixtures/README",
             path.display()
         );
-        return;
     }
 
     let track = kyoku::core::tagger::read_track(&path).unwrap();
@@ -41,11 +39,10 @@ fn test_read_flac_tags() {
 fn test_read_ogg_tags() {
     let path = fixtures_dir().join("tagged.ogg");
     if !path.exists() {
-        eprintln!(
-            "Skipping test: fixture file not found at {}",
+        panic!(
+            "fixture missing: {} — see tests/fixtures/README",
             path.display()
         );
-        return;
     }
 
     let track = kyoku::core::tagger::read_track(&path).unwrap();
@@ -57,11 +54,10 @@ fn test_read_ogg_tags() {
 fn test_missing_title_derives_from_filename() {
     let path = fixtures_dir().join("no_title.mp3");
     if !path.exists() {
-        eprintln!(
-            "Skipping test: fixture file not found at {}",
+        panic!(
+            "fixture missing: {} — see tests/fixtures/README",
             path.display()
         );
-        return;
     }
 
     let track = kyoku::core::tagger::read_track(&path).unwrap();
@@ -72,11 +68,10 @@ fn test_missing_title_derives_from_filename() {
 fn test_unsupported_format() {
     let path = fixtures_dir().join("not_audio.txt");
     if !path.exists() {
-        eprintln!(
-            "Skipping test: fixture file not found at {}",
+        panic!(
+            "fixture missing: {} — see tests/fixtures/README",
             path.display()
         );
-        return;
     }
 
     let result = kyoku::core::tagger::read_track(&path);

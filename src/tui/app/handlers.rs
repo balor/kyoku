@@ -40,12 +40,14 @@ impl App {
                     &self.settings.library.inbox_dirs,
                     &self.settings.library.music_dir,
                     &self.conn,
-                    self.settings.musicbrainz.rate_limit_ms,
-                    self.settings.musicbrainz.name_script,
-                    self.settings.tagging.write_tags,
-                    self.settings.import.auto_match_threshold,
-                    self.settings.import.match_candidates,
-                    self.settings.database_file(),
+                    crate::tui::views::import::ImportConfig {
+                        rate_limit_ms: self.settings.musicbrainz.rate_limit_ms,
+                        name_script: self.settings.musicbrainz.name_script,
+                        write_tags: self.settings.tagging.write_tags,
+                        auto_match_threshold: self.settings.import.auto_match_threshold,
+                        match_candidates: self.settings.import.match_candidates,
+                        db_path: self.settings.database_file(),
+                    },
                 );
             }
             AppView::Editor { track_id } => {
@@ -123,9 +125,8 @@ impl App {
                 AppAction::None
             }
             crate::tui::views::library::LibraryAction::Deleted => {
-                self.library
-                    .load(&self.conn, &self.settings.library.music_dir, None)
-                    .ok();
+                let view = self.view.clone();
+                self.reload_view_preserving_cursor(&view);
                 self.refresh_counts();
                 AppAction::None
             }
@@ -221,7 +222,8 @@ impl App {
                 AppAction::None
             }
             crate::tui::views::collections::CollectionsAction::Refresh => {
-                self.collections.load(&self.conn, None).ok();
+                let view = self.view.clone();
+                self.reload_view_preserving_cursor(&view);
                 AppAction::None
             }
             crate::tui::views::collections::CollectionsAction::OrganizeAll => {
@@ -316,23 +318,13 @@ impl App {
                         {
                             self.switch_view(AppView::Library);
                         } else {
-                            let prev = self.album_detail.selected;
-                            self.album_detail
-                                .load(&self.conn, &self.settings.library.music_dir, album_id)
-                                .ok();
-                            if prev < self.album_detail.tracks.len() {
-                                self.album_detail.selected = prev;
-                            }
+                            let view = self.view.clone();
+                            self.reload_view_preserving_cursor(&view);
                         }
                     }
                     AppView::LooseTracks => {
-                        let prev = self.album_detail.selected;
-                        self.album_detail
-                            .load_loose(&self.conn, &self.settings.library.music_dir)
-                            .ok();
-                        if prev < self.album_detail.tracks.len() {
-                            self.album_detail.selected = prev;
-                        }
+                        let view = self.view.clone();
+                        self.reload_view_preserving_cursor(&view);
                     }
                     _ => {}
                 }
@@ -379,11 +371,8 @@ impl App {
         match action {
             crate::tui::views::collections::CollectionDetailAction::None => AppAction::None,
             crate::tui::views::collections::CollectionDetailAction::Deleted => {
-                if let AppView::CollectionDetail { collection_id } = self.view {
-                    self.collection_detail
-                        .load(&self.conn, collection_id, &self.settings.library.music_dir)
-                        .ok();
-                }
+                let view = self.view.clone();
+                self.reload_view_preserving_cursor(&view);
                 self.refresh_counts();
                 AppAction::None
             }
@@ -587,56 +576,65 @@ impl App {
         .unwrap_or(0);
     }
 
-    /// Full refresh: reloads counts and the current view's data from disk/DB.
-    /// Useful when files are added to the inbox while the TUI is running.
-    pub(super) fn refresh(&mut self) {
-        self.refresh_counts();
-
+    fn reload_view_preserving_cursor(&mut self, view: &AppView) {
         let search_query = if self.search.value.is_empty() {
             None
         } else {
             Some(self.search.value.clone())
         };
-
         let music_dir = self.settings.library.music_dir.clone();
-        match &self.view {
+        match view {
             AppView::Library => {
+                let prev = self.library.selected;
                 self.library
                     .load(&self.conn, &music_dir, search_query.as_deref())
                     .ok();
+                let count = self.library.albums.len() + usize::from(self.library.loose_count > 0);
+                self.library.selected = prev.min(count.saturating_sub(1));
             }
             AppView::Collections => {
+                let prev = self.collections.selected;
                 self.collections
                     .load(&self.conn, search_query.as_deref())
                     .ok();
+                self.collections.selected =
+                    prev.min(self.collections.collections.len().saturating_sub(1));
             }
             AppView::AlbumDetail { album_id } => {
                 let prev = self.album_detail.selected;
                 self.album_detail
                     .load(&self.conn, &music_dir, *album_id)
                     .ok();
-                if prev < self.album_detail.tracks.len() {
-                    self.album_detail.selected = prev;
-                }
+                self.album_detail.set_filter(self.search.value.clone());
+                let count = self.album_detail.filtered_indices().len();
+                self.album_detail.selected = prev.min(count.saturating_sub(1));
             }
             AppView::LooseTracks => {
                 let prev = self.album_detail.selected;
                 self.album_detail.load_loose(&self.conn, &music_dir).ok();
-                if prev < self.album_detail.tracks.len() {
-                    self.album_detail.selected = prev;
-                }
+                self.album_detail.set_filter(self.search.value.clone());
+                let count = self.album_detail.filtered_indices().len();
+                self.album_detail.selected = prev.min(count.saturating_sub(1));
             }
             AppView::CollectionDetail { collection_id } => {
                 let prev = self.collection_detail.selected;
                 self.collection_detail
                     .load(&self.conn, *collection_id, &music_dir)
                     .ok();
-                if prev < self.collection_detail.tracks.len() {
-                    self.collection_detail.selected = prev;
-                }
+                self.collection_detail.set_filter(self.search.value.clone());
+                let count = self.collection_detail.filtered_indices().len();
+                self.collection_detail.selected = prev.min(count.saturating_sub(1));
             }
             _ => {}
         }
+    }
+
+    /// Full refresh: reloads counts and the current view's data from disk/DB.
+    /// Useful when files are added to the inbox while the TUI is running.
+    pub(super) fn refresh(&mut self) {
+        self.refresh_counts();
+        let view = self.view.clone();
+        self.reload_view_preserving_cursor(&view);
     }
 
     pub(super) fn handle_global_search_action(&mut self, action: GlobalSearchAction) -> AppAction {
@@ -713,37 +711,9 @@ impl App {
         // Return to the view we came from without losing cursor position.
         let return_view = self.editor_return_to.take().unwrap_or(AppView::Library);
 
-        // Refresh underlying data so saved edits are visible, then clamp cursor.
-        let music_dir = self.settings.library.music_dir.clone();
-        match &return_view {
-            AppView::AlbumDetail { album_id } => {
-                let prev_selected = self.album_detail.selected;
-                self.album_detail
-                    .load(&self.conn, &music_dir, *album_id)
-                    .ok();
-                if prev_selected < self.album_detail.tracks.len() {
-                    self.album_detail.selected = prev_selected;
-                }
-            }
-            AppView::LooseTracks => {
-                let prev_selected = self.album_detail.selected;
-                self.album_detail.load_loose(&self.conn, &music_dir).ok();
-                if prev_selected < self.album_detail.tracks.len() {
-                    self.album_detail.selected = prev_selected;
-                }
-            }
-            AppView::CollectionDetail { collection_id } => {
-                let prev_selected = self.collection_detail.selected;
-                self.collection_detail
-                    .load(&self.conn, *collection_id, &music_dir)
-                    .ok();
-                if prev_selected < self.collection_detail.tracks.len() {
-                    self.collection_detail.selected = prev_selected;
-                }
-            }
-            _ => {}
-        }
-
+        // Refresh underlying data so saved edits are visible, then clamp cursor
+        // against the active filter shown in the search bar.
+        self.reload_view_preserving_cursor(&return_view);
         self.view = return_view;
     }
 }

@@ -187,7 +187,7 @@ fn target_album_id_for_group(conn: &Connection, group: &ImportGroup) -> Result<O
             // Only resolve an album_id when the group's tags actually
             // describe a single coherent album. Heterogeneous groups
             // (mixed singles, hand-picked bundles, "Various" comps) get
-                // committed by the worker as loose tracks with no album,
+            // committed by the worker as loose tracks with no album,
             // so they have no shared slot space to dedupe against —
             // pretending they do (by picking the first track's album)
             // produces phantom conflicts every time the first track's
@@ -201,10 +201,7 @@ fn target_album_id_for_group(conn: &Connection, group: &ImportGroup) -> Result<O
             let Some(album) = td.album.as_deref() else {
                 return Ok(None);
             };
-            let album_artist = td
-                .album_artist
-                .as_deref()
-                .or(td.artist.as_deref());
+            let album_artist = td.album_artist.as_deref().or(td.artist.as_deref());
             lookup_album(conn, album, album_artist)
         }
         GroupAction::Loose | GroupAction::Skip => Ok(None),
@@ -224,41 +221,40 @@ fn album_keys_for_group(conn: &Connection, group: &ImportGroup) -> Vec<String> {
     if let Ok(Some(id)) = target_album_id_for_group(conn, group) {
         keys.push(format!("db:{}", id));
     }
-    if group.action == GroupAction::AcceptMb {
-        if let Some(idx) = group.selected_candidate {
-            if let Some(cand) = group.mb_candidates.get(idx) {
-                if !cand.release.id.is_empty() {
-                    keys.push(format!("mb:{}", cand.release.id));
-                }
-                // Also emit a tag-equivalent key so this AcceptMb group
-                // matches a sibling AcceptAsIs group of the same release.
-                keys.push(format!(
-                    "tag:{}|{}",
-                    normalize_album_token(&cand.release.title),
-                    normalize_album_token(&cand.release.artist),
-                ));
-            }
+    if group.action == GroupAction::AcceptMb
+        && let Some(idx) = group.selected_candidate
+        && let Some(cand) = group.mb_candidates.get(idx)
+    {
+        if !cand.release.id.is_empty() {
+            keys.push(format!("mb:{}", cand.release.id));
         }
+        // Also emit a tag-equivalent key so this AcceptMb group
+        // matches a sibling AcceptAsIs group of the same release.
+        keys.push(format!(
+            "tag:{}|{}",
+            normalize_album_token(&cand.release.title),
+            normalize_album_token(&cand.release.artist),
+        ));
     }
     // Only emit a tag-based album key for AcceptAsIs groups whose tags
     // actually describe one album. A heterogeneous group's first-track
     // album is a misleading proxy and would let unrelated singles share
     // an album_key (and thus collide in MBID / album+title passes).
-    if group.action == GroupAction::AcceptAsIs && group.has_consistent_album_tags() {
-        if let Some((_, Some(td))) = group.tracks.first() {
-            if let Some(album) = td.album.as_deref() {
-                let artist = td
-                    .album_artist
-                    .as_deref()
-                    .or(td.artist.as_deref())
-                    .unwrap_or("");
-                keys.push(format!(
-                    "tag:{}|{}",
-                    normalize_album_token(album),
-                    normalize_album_token(artist),
-                ));
-            }
-        }
+    if group.action == GroupAction::AcceptAsIs
+        && group.has_consistent_album_tags()
+        && let Some((_, Some(td))) = group.tracks.first()
+        && let Some(album) = td.album.as_deref()
+    {
+        let artist = td
+            .album_artist
+            .as_deref()
+            .or(td.artist.as_deref())
+            .unwrap_or("");
+        keys.push(format!(
+            "tag:{}|{}",
+            normalize_album_token(album),
+            normalize_album_token(artist),
+        ));
     }
     keys
 }
@@ -323,11 +319,7 @@ fn normalized_title(group: &ImportGroup, track_idx: usize) -> Option<String> {
 /// Find an existing album row by title + album_artist. Returns None if
 /// absent — detection then treats the group as "new album, nothing to
 /// clash with in the library".
-fn lookup_album(
-    conn: &Connection,
-    title: &str,
-    album_artist: Option<&str>,
-) -> Result<Option<i64>> {
+fn lookup_album(conn: &Connection, title: &str, album_artist: Option<&str>) -> Result<Option<i64>> {
     let id: Option<i64> = conn
         .query_row(
             "SELECT id FROM albums WHERE title = ?1 AND album_artist IS ?2",
@@ -373,9 +365,8 @@ pub fn detect(
             }
         })
         .collect();
-    let shares_key = |a: &[String], b: &[String]| -> bool {
-        a.iter().any(|x| b.iter().any(|y| x == y))
-    };
+    let shares_key =
+        |a: &[String], b: &[String]| -> bool { a.iter().any(|x| b.iter().any(|y| x == y)) };
 
     // ── Pass 1: album-slot ────────────────────────────────────────────
     for (gi, group) in groups.iter().enumerate() {
@@ -396,7 +387,10 @@ pub fn detect(
             }
             let disc = track.disc_number;
             let key = (album_id, disc, pos);
-            let new_ref = BatchTrackRef { group: gi, index: ti };
+            let new_ref = BatchTrackRef {
+                group: gi,
+                index: ti,
+            };
 
             // Library dup?
             if let Some(existing) =
@@ -446,15 +440,12 @@ pub fn detect(
     // legitimately published on multiple releases (single → best-of →
     // special edition) from raising a conflict every time. The same
     // MBID across *different* albums is a re-release, not a duplicate.
-    let group_rec_ids: Vec<Vec<Option<String>>> = groups
-        .iter()
-        .map(|g| recording_ids_for_group(g))
-        .collect();
+    let group_rec_ids: Vec<Vec<Option<String>>> =
+        groups.iter().map(recording_ids_for_group).collect();
     // Maps recording_id → list of (album_keys, BatchTrackRef) claims so
     // a later track only matches an earlier one when they actually share
     // an album.
-    let mut batch_mbid_claims: HashMap<String, Vec<(Vec<String>, BatchTrackRef)>> =
-        HashMap::new();
+    let mut batch_mbid_claims: HashMap<String, Vec<(Vec<String>, BatchTrackRef)>> = HashMap::new();
     for (gi, group) in groups.iter().enumerate() {
         if matches!(group.action, GroupAction::Skip | GroupAction::Loose) {
             continue;
@@ -467,7 +458,10 @@ pub fn detect(
             let Some(recording_id) = group_rec_ids[gi].get(ti).cloned().flatten() else {
                 continue;
             };
-            let new_ref = BatchTrackRef { group: gi, index: ti };
+            let new_ref = BatchTrackRef {
+                group: gi,
+                index: ti,
+            };
 
             // Library dup by MBID? Only counts when the existing track
             // belongs to the same album the user is importing into.
@@ -577,7 +571,10 @@ pub fn detect(
                 continue;
             };
             let pos = track.track_number;
-            let new_ref = BatchTrackRef { group: gi, index: ti };
+            let new_ref = BatchTrackRef {
+                group: gi,
+                index: ti,
+            };
 
             // Tier 1: exact (album_key, title, position).
             let mut chosen: Option<usize> = None;
@@ -758,7 +755,11 @@ mod tests {
         (t, Some(td))
     }
 
-    fn group(name: &str, action: GroupAction, tracks: Vec<(Track, Option<TagData>)>) -> ImportGroup {
+    fn group(
+        name: &str,
+        action: GroupAction,
+        tracks: Vec<(Track, Option<TagData>)>,
+    ) -> ImportGroup {
         ImportGroup {
             name: name.to_string(),
             tracks,
@@ -775,15 +776,8 @@ mod tests {
     /// Insert a pre-existing track into the library at album "Album" /
     /// artist "Artist", position `pos`. Returns the inserted track id.
     fn seed_library_track(conn: &Connection, pos: u32, path: &str) -> i64 {
-        let (album_id, _) = queries::get_or_create_album(
-            conn,
-            "Album",
-            Some("Artist"),
-            None,
-            None,
-            11,
-        )
-        .unwrap();
+        let (album_id, _) =
+            queries::get_or_create_album(conn, "Album", Some("Artist"), None, None, 11).unwrap();
         let track = Track {
             id: None,
             album_id: Some(album_id),
@@ -800,7 +794,14 @@ mod tests {
             tag_status: TagStatus::Matched,
             source_dir: None,
         };
-        queries::insert_track(conn, std::path::Path::new(""), &track, Some(album_id), Some(10_000)).unwrap()
+        queries::insert_track(
+            conn,
+            std::path::Path::new(""),
+            &track,
+            Some(album_id),
+            Some(10_000),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -831,15 +832,8 @@ mod tests {
         // groups as loose tracks with no album, so dup detection has to
         // do the same — otherwise the slot keys are pure phantoms.
         let conn = db::open_memory().unwrap();
-        let (kyougen_id, _) = queries::get_or_create_album(
-            &conn,
-            "Kyougen",
-            Some("Ado"),
-            None,
-            None,
-            12,
-        )
-        .unwrap();
+        let (kyougen_id, _) =
+            queries::get_or_create_album(&conn, "Kyougen", Some("Ado"), None, None, 12).unwrap();
         // Existing library track: Readymade @ pos 1 of Kyougen.
         queries::insert_track(
             &conn,
@@ -1094,7 +1088,11 @@ mod tests {
         }
     }
 
-    fn mb_group(name: &str, tracks: Vec<(Track, Option<TagData>)>, cand: MbCandidate) -> ImportGroup {
+    fn mb_group(
+        name: &str,
+        tracks: Vec<(Track, Option<TagData>)>,
+        cand: MbCandidate,
+    ) -> ImportGroup {
         ImportGroup {
             name: name.to_string(),
             tracks,
@@ -1123,15 +1121,9 @@ mod tests {
         // appears on more than one release. Same MBID across different
         // albums is a re-release, not a duplicate.
         let conn = db::open_memory().unwrap();
-        let (album_id, _) = queries::get_or_create_album(
-            &conn,
-            "Different Album",
-            Some("Artist"),
-            None,
-            None,
-            1,
-        )
-        .unwrap();
+        let (album_id, _) =
+            queries::get_or_create_album(&conn, "Different Album", Some("Artist"), None, None, 1)
+                .unwrap();
         let existing_id = queries::insert_track(
             &conn,
             std::path::Path::new(""),
@@ -1177,15 +1169,9 @@ mod tests {
         // because the local track number disagrees with the library row.
         // This is the case where the MBID pass legitimately fires.
         let conn = db::open_memory().unwrap();
-        let (album_id, _) = queries::get_or_create_album(
-            &conn,
-            "Shared Album",
-            Some("Artist"),
-            None,
-            None,
-            1,
-        )
-        .unwrap();
+        let (album_id, _) =
+            queries::get_or_create_album(&conn, "Shared Album", Some("Artist"), None, None, 1)
+                .unwrap();
         let existing_id = queries::insert_track(
             &conn,
             std::path::Path::new(""),
@@ -1287,15 +1273,8 @@ mod tests {
         // a no-op — no HTTP happens, no phantom conflict.
         let conn = db::open_memory().unwrap();
         // Seed a library row with an MBID we'd otherwise clash on.
-        let (album_id, _) = queries::get_or_create_album(
-            &conn,
-            "Other",
-            Some("Artist"),
-            None,
-            None,
-            1,
-        )
-        .unwrap();
+        let (album_id, _) =
+            queries::get_or_create_album(&conn, "Other", Some("Artist"), None, None, 1).unwrap();
         let existing_id = queries::insert_track(
             &conn,
             std::path::Path::new(""),
@@ -1324,11 +1303,7 @@ mod tests {
         // Candidate with empty tracks (unfetched).
         let mut cand = candidate_with_recording(1, "rec-xyz");
         cand.release.tracks.clear();
-        let g = mb_group(
-            "New",
-            vec![track("A", Some(1), "/in/a.flac")],
-            cand,
-        );
+        let g = mb_group("New", vec![track("A", Some(1), "/in/a.flac")], cand);
         let conflicts = detect(&conn, std::path::Path::new(""), &[g]).unwrap();
         assert!(
             conflicts.is_empty(),
@@ -1377,7 +1352,11 @@ mod tests {
             vec![track_with_disc("Late Song", Some(1), 2, "/in/b/2-01.flac")],
         );
         let conflicts = detect(&conn, std::path::Path::new(""), &[g1, g2]).unwrap();
-        assert_eq!(conflicts.len(), 1, "title pass must catch disc-divergent dup");
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "title pass must catch disc-divergent dup"
+        );
         assert_eq!(conflicts[0].signal, DupSignal::AlbumTitle);
         match &conflicts[0].other {
             DupOther::Batch(earlier) => {
@@ -1473,7 +1452,10 @@ mod tests {
         let g1 = group("A", GroupAction::AcceptAsIs, vec![t1]);
         let g2 = group("B", GroupAction::AcceptAsIs, vec![t2]);
         let conflicts = detect(&conn, std::path::Path::new(""), &[g1, g2]).unwrap();
-        assert!(conflicts.is_empty(), "empty titles → no title-pass conflict");
+        assert!(
+            conflicts.is_empty(),
+            "empty titles → no title-pass conflict"
+        );
     }
 
     /// Build an MB candidate whose release has `per_disc * discs` tracks.
