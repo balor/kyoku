@@ -113,8 +113,9 @@ impl ListCursor {
         true
     }
 
-    /// Apply navigation in a live text-input context where `j`/`k` must stay
-    /// typeable and only arrow keys move the list.
+    /// Apply navigation in a live text-input context where printable
+    /// characters must stay typeable. In particular, vim-style `j`/`k` and
+    /// `g`/`G` list-navigation aliases are deliberately not consumed here.
     pub fn handle_text_input_key(&mut self, key: &KeyEvent, count: usize) -> bool {
         if keys::is_up_arrow(key) {
             self.up(count);
@@ -128,13 +129,54 @@ impl ListCursor {
             self.half_page_up(count);
         } else if keys::is_half_page_down(key) {
             self.half_page_down(count);
-        } else if keys::is_home(key) {
-            self.move_top(count);
-        } else if keys::is_end(key) {
-            self.move_bottom(count);
         } else {
             return false;
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::ListCursor;
+
+    #[test]
+    fn standard_navigation_consumes_vim_home_end_aliases() {
+        let mut cursor = ListCursor::new(3, 2);
+
+        assert!(cursor.handle_key(&key(KeyCode::Char('g')), 10));
+        assert_eq!(cursor.selected, 0);
+        assert_eq!(cursor.scroll, 0);
+
+        assert!(cursor.handle_key(&key(KeyCode::Char('G')), 10));
+        assert_eq!(cursor.selected, 9);
+    }
+
+    #[test]
+    fn text_input_navigation_does_not_consume_g_or_shift_g() {
+        let mut cursor = ListCursor::new(3, 2);
+
+        assert!(!cursor.handle_text_input_key(&key(KeyCode::Char('g')), 10));
+        assert_eq!(cursor, ListCursor::new(3, 2));
+
+        assert!(!cursor.handle_text_input_key(&key(KeyCode::Char('G')), 10));
+        assert_eq!(cursor, ListCursor::new(3, 2));
+    }
+
+    #[test]
+    fn text_input_navigation_keeps_arrow_keys_for_selection() {
+        let mut cursor = ListCursor::new(3, 2);
+
+        assert!(cursor.handle_text_input_key(&key(KeyCode::Down), 10));
+        assert_eq!(cursor.selected, 4);
+
+        assert!(cursor.handle_text_input_key(&key(KeyCode::Up), 10));
+        assert_eq!(cursor.selected, 3);
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
     }
 }
