@@ -25,10 +25,9 @@ use super::{
 };
 
 fn display_group_name(
-    group_key: &str,
+    source_dir: &str,
     tracks: &[(crate::db::models::Track, Option<tagger::TagData>)],
 ) -> String {
-    let source_dir = importer::album_group_source_label(group_key);
     let mut albums: Vec<String> = tracks
         .iter()
         .filter_map(|(_, tag)| tag.as_ref()?.album.as_deref())
@@ -44,6 +43,25 @@ fn display_group_name(
         1 => format!("{source_dir} — {}", albums[0]),
         n => format!("{source_dir} — mixed album tags ({n})"),
     }
+}
+
+fn default_collection_name(group: &ImportGroup) -> String {
+    group
+        .tracks
+        .first()
+        .and_then(|(track, _)| track.source_dir.as_deref().or_else(|| track.file_path.parent()))
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            group
+                .name
+                .split(" — mixed album tags")
+                .next()
+                .unwrap_or(&group.name)
+                .to_string()
+        })
 }
 
 impl ImportView {
@@ -295,14 +313,12 @@ impl ImportView {
                 // Open per-group collection picker
                 if let Some(group) = self.groups.get(self.current_group) {
                     let current = group.target_collection.clone();
-                    // Default name = the last component of the group's source dir
-                    let default_name = std::path::Path::new(&group.name)
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(&group.name)
-                        .to_string();
+                    // Default name = the actual source folder name, not the
+                    // display label (which may include annotations such as
+                    // "mixed album tags").
+                    let default_name = default_collection_name(group);
                     self.collection_picker = Some(PickCollectionPopup::open(
-                        format!("Add to collection — {}", group.name),
+                        format!("Add to collection — {}", default_name),
                         default_name,
                         &current,
                         conn,
@@ -536,10 +552,12 @@ impl ImportView {
                 if let Ok((mut track, tag_data)) = tagger::read_track_with_tags(&abs_path) {
                     track.file_path = abs_path;
 
-                    // Group by source directory + normalized album tag so a
-                    // mixed folder does not stamp every track with the first
-                    // track's album during import.
-                    let group_key = importer::album_group_key(&track, Some(&tag_data), i, false);
+                    // Group by source directory. Mixed-album directories stay
+                    // a single group by design; the worker only creates an
+                    // album when the group's tags are coherent, otherwise the
+                    // tracks import loose and can be assigned to a collection
+                    // together.
+                    let group_key = importer::album_group_key(&track, i, false);
 
                     if !groups.contains_key(&group_key) {
                         group_order.push(group_key.clone());
@@ -957,5 +975,68 @@ fn short_mb_error(msg: &str) -> String {
         format!("{}…", truncated)
     } else {
         first.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::db::models::{AudioFormat, TagStatus, Track};
+
+    use super::*;
+
+    #[test]
+    fn collection_default_uses_source_folder_not_display_annotation() {
+        let source_dir = PathBuf::from("/inbox/Headphone Test 3");
+        let group = ImportGroup {
+            name: "/inbox/Headphone Test 3 — mixed album tags (7)".to_string(),
+            tracks: vec![(test_track(source_dir.join("a.mp3"), Some(source_dir)), None)],
+            action: GroupAction::AcceptAsIs,
+            mb_candidates: Vec::new(),
+            selected_candidate: None,
+            mb_state: MbMatchState::NotStarted,
+            target_collection: String::new(),
+            full_release_fetching: false,
+            user_decided: false,
+        };
+
+        assert_eq!(default_collection_name(&group), "Headphone Test 3");
+    }
+
+    #[test]
+    fn collection_default_fallback_strips_mixed_album_display_suffix() {
+        let group = ImportGroup {
+            name: "Headphone Test 3 — mixed album tags (7)".to_string(),
+            tracks: Vec::new(),
+            action: GroupAction::AcceptAsIs,
+            mb_candidates: Vec::new(),
+            selected_candidate: None,
+            mb_state: MbMatchState::NotStarted,
+            target_collection: String::new(),
+            full_release_fetching: false,
+            user_decided: false,
+        };
+
+        assert_eq!(default_collection_name(&group), "Headphone Test 3");
+    }
+
+    fn test_track(path: PathBuf, source_dir: Option<PathBuf>) -> Track {
+        Track {
+            id: None,
+            album_id: None,
+            title: "A".to_string(),
+            artist: Some("Artist".to_string()),
+            track_number: Some(1),
+            disc_number: 1,
+            duration_ms: None,
+            mbid: None,
+            file_path: path,
+            file_format: AudioFormat::Mp3,
+            bitrate: None,
+            sample_rate: None,
+            tag_status: TagStatus::Unmatched,
+            source_dir,
+        }
     }
 }

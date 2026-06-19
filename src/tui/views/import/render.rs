@@ -525,19 +525,26 @@ impl ImportView {
             GroupAction::Skip => Span::styled("[Skip]", Style::default().fg(theme.red)),
             GroupAction::Loose => Span::styled("[Import loose]", Style::default().fg(theme.yellow)),
         };
-        let mut nav_spans = vec![
-            Span::styled(
-                format!(
-                    " Group {}/{}: {} ({} tracks) ",
-                    self.current_group + 1,
-                    self.groups.len(),
-                    group.name,
-                    group.tracks.len(),
-                ),
-                Style::default().fg(theme.fg),
-            ),
-            action_label,
-        ];
+        let mut nav_spans = vec![Span::styled(
+            format!(" Group {}/{}: ", self.current_group + 1, self.groups.len()),
+            Style::default().fg(theme.fg),
+        )];
+        if let Some((path, suffix)) = group.name.split_once(" — mixed album tags") {
+            nav_spans.push(Span::styled(path.to_string(), Style::default().fg(theme.fg)));
+            nav_spans.push(Span::styled(
+                format!(" — mixed album tags{}", suffix),
+                Style::default()
+                    .fg(theme.yellow)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+        } else {
+            nav_spans.push(Span::styled(group.name.clone(), Style::default().fg(theme.fg)));
+        }
+        nav_spans.push(Span::styled(
+            format!(" ({} tracks) ", group.tracks.len()),
+            Style::default().fg(theme.fg),
+        ));
+        nav_spans.push(action_label);
         // Collection suffix only shows when the group will actually import —
         // otherwise it's contradictory (e.g. "[Skip] → coll: X" misleads the
         // user into thinking the group is still being routed somewhere).

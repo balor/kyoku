@@ -108,62 +108,60 @@ pub fn scan_audio_files_with_report(path: impl AsRef<Path>) -> ScanAudioResult {
 }
 
 /// Stable grouping key for album imports. Non-loose imports group by source
-/// directory plus normalized album tag, falling back to the directory name
-/// when the album tag is absent. The NUL separator keeps source and album
-/// components unambiguous while remaining an internal-only key.
-pub(crate) fn album_group_key(
-    track: &Track,
-    tag: Option<&tagger::TagData>,
-    index: usize,
-    loose: bool,
-) -> String {
+/// directory so a directory of hand-picked loose tracks can be reviewed and
+/// assigned to a collection as one unit. Album creation is guarded later by
+/// tag consistency, so mixed folders do not stamp every track with the first
+/// track's album.
+pub(crate) fn album_group_key(track: &Track, index: usize, loose: bool) -> String {
     if loose {
         return format!("__loose__{}", index);
     }
 
-    let source = track
+    track
         .source_dir
         .as_deref()
         .or_else(|| track.file_path.parent())
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "Unknown".to_string());
-    let fallback_album = track
-        .file_path
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|s| s.to_str())
-        .unwrap_or("Unknown");
-    let album = tag
-        .and_then(|td| td.album.as_deref())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(fallback_album)
-        .to_lowercase();
-
-    format!("{source}\0{album}")
+        .unwrap_or_else(|| "Unknown".to_string())
 }
 
-pub(crate) fn album_group_source_label(key: &str) -> &str {
-    key.split_once('\0').map_or(key, |(source, _)| source)
-}
-
-/// Group tracks by source directory + normalized album tag.
+/// Group tracks by source directory.
 /// Returns a map of group key -> list of tracks.
 /// If `loose` is true, each track is its own group (no album grouping).
-fn group_into_albums(
-    tracks: &[Track],
-    tag_data_map: &[Option<tagger::TagData>],
-    loose: bool,
-) -> HashMap<String, Vec<usize>> {
+fn group_into_albums(tracks: &[Track], loose: bool) -> HashMap<String, Vec<usize>> {
     let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
 
     for (i, track) in tracks.iter().enumerate() {
-        let tag = tag_data_map.get(i).and_then(|td| td.as_ref());
-        let key = album_group_key(track, tag, i, loose);
+        let key = album_group_key(track, i, loose);
         groups.entry(key).or_default().push(i);
     }
 
     groups
+}
+
+fn group_has_consistent_album_tags(
+    indices: &[usize],
+    tag_data_map: &[Option<tagger::TagData>],
+) -> bool {
+    let key = |idx: usize| -> Option<(String, Option<String>)> {
+        tag_data_map
+            .get(idx)
+            .and_then(|td| td.as_ref())
+            .and_then(|td| {
+                td.album.as_ref().map(|album| {
+                    (
+                        album.trim().to_lowercase(),
+                        td.album_artist
+                            .as_deref()
+                            .or(td.artist.as_deref())
+                            .map(|s| s.trim().to_lowercase()),
+                    )
+                })
+            })
+    };
+
+    let first_key = indices.first().and_then(|&idx| key(idx));
+    first_key.is_some() && indices.iter().all(|&idx| key(idx) == first_key)
 }
 
 fn ordered_group_indices(
@@ -316,8 +314,8 @@ pub fn import(
         return Ok(result);
     }
 
-    // Group into albums
-    let groups = group_into_albums(&tracks, &tag_data_map, loose);
+    // Group into import batches.
+    let groups = group_into_albums(&tracks, loose);
 
     if pretend {
         tracing::info!("Dry run — would import {} track(s):", tracks.len());
@@ -331,7 +329,7 @@ pub fn import(
                     .get(indices[0])
                     .and_then(|td| td.as_ref())
                     .and_then(|td| td.album.as_deref())
-                    .unwrap_or_else(|| album_group_source_label(key));
+                    .unwrap_or(key);
                 tracing::info!("  Album: {} ({} tracks)", album_name, indices.len());
                 for &i in indices {
                     tracing::info!("    - {}", tracks[i].title);
@@ -351,8 +349,10 @@ pub fn import(
     for indices in ordered_groups {
         let ordered_indices = ordered_group_indices(indices, &tracks, &tag_data_map);
 
-        // Create album if not loose and we have album info
-        let album_id = if !loose {
+        // Create album only when this batch has coherent album tags. Mixed
+        // source-directory groups are imported as loose tracks (and can still
+        // be assigned to a collection as one unit).
+        let album_id = if !loose && group_has_consistent_album_tags(indices, &tag_data_map) {
             let first_idx = ordered_indices.first().copied().unwrap_or(indices[0]);
             let first_tag = tag_data_map.get(first_idx).and_then(|td| td.as_ref());
 
@@ -530,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn group_into_albums_splits_mixed_album_tags_in_one_directory() {
+    fn group_into_albums_keeps_mixed_album_tags_in_one_directory_together() {
         let dir = PathBuf::from("/inbox/mixed");
         let tracks = vec![
             test_track(dir.join("a.mp3"), dir.clone(), "A"),
@@ -543,11 +543,11 @@ mod tests {
             Some(tag_with_album("Album B")),
         ];
 
-        let groups = group_into_albums(&tracks, &tags, false);
+        let groups = group_into_albums(&tracks, false);
 
-        assert_eq!(groups.len(), 2);
-        assert!(groups.values().any(|indices| indices == &vec![0, 1]));
-        assert!(groups.values().any(|indices| indices == &vec![2]));
+        assert_eq!(groups.len(), 1);
+        assert!(groups.values().any(|indices| indices == &vec![0, 1, 2]));
+        assert!(!group_has_consistent_album_tags(&[0, 1, 2], &tags));
     }
 
     #[test]
