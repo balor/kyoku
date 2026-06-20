@@ -64,6 +64,18 @@ fn default_collection_name(group: &ImportGroup) -> String {
         })
 }
 
+fn compare_mb_candidates(a: &MbCandidate, b: &MbCandidate) -> std::cmp::Ordering {
+    b.score
+        .total
+        .partial_cmp(&a.score.total)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            a.release
+                .is_pseudo_release()
+                .cmp(&b.release.is_pseudo_release())
+        })
+}
+
 impl ImportView {
     pub fn handle_key(&mut self, key: KeyEvent, conn: &Connection) {
         match self.step {
@@ -211,6 +223,10 @@ impl ImportView {
                     self.prev_group();
                 }
                 KeyCode::Enter => {
+                    self.ensure_summary_mb_fetches();
+                    if self.pending_full_mb_fetch_count() > 0 {
+                        return;
+                    }
                     if self.groups.iter().all(|g| g.action == GroupAction::Skip) {
                         // Nothing to import — emit an empty completion so the
                         // app can close the wizard on the next Enter.
@@ -356,8 +372,15 @@ impl ImportView {
         // time, run duplicate detection now so the summary can advertise
         // the count. Cached in `self.conflicts`; cleared when the user
         // hits `p` to go back.
-        if self.is_in_summary() && self.conflicts.is_empty() {
-            self.refresh_conflict_preview(conn);
+        if self.is_in_summary() {
+            self.ensure_summary_mb_fetches();
+            if self.pending_full_mb_fetch_count() > 0 {
+                self.conflicts.clear();
+                self.decisions.clear();
+                self.conflict_cursor = 0;
+            } else if self.conflicts.is_empty() {
+                self.refresh_conflict_preview(conn);
+            }
         }
     }
 
@@ -505,6 +528,33 @@ impl ImportView {
 
     pub(super) fn is_in_summary(&self) -> bool {
         !self.groups.is_empty() && self.current_group >= self.groups.len()
+    }
+
+    pub(super) fn pending_full_mb_fetch_count(&self) -> usize {
+        self.groups
+            .iter()
+            .filter(|g| g.action == GroupAction::AcceptMb && g.full_release_fetching)
+            .count()
+    }
+
+    fn ensure_summary_mb_fetches(&mut self) {
+        let indices: Vec<usize> = self
+            .groups
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, group)| {
+                if group.action != GroupAction::AcceptMb || group.full_release_fetching {
+                    return None;
+                }
+                let cand_idx = group.selected_candidate?;
+                let cand = group.mb_candidates.get(cand_idx)?;
+                cand.release.tracks.is_empty().then_some(idx)
+            })
+            .collect();
+
+        for idx in indices {
+            self.ensure_full_release_for_group(idx);
+        }
     }
 
     fn start_scan(&mut self, _conn: &Connection) {
@@ -673,13 +723,10 @@ impl ImportView {
                     }
                 };
 
-            // Initial sort by coarse score
-            candidates.sort_by(|a, b| {
-                b.score
-                    .total
-                    .partial_cmp(&a.score.total)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            // Initial sort by coarse score. Pseudo-releases are useful as
+            // translated/transliterated hints, but proper releases from the
+            // same release group should be shown first.
+            candidates.sort_by(compare_mb_candidates);
 
             // Tiebreaker: when top candidates are within 10% of the leader,
             // fetch the full release for each tied candidate so we can compare
@@ -731,12 +778,7 @@ impl ImportView {
                         }
                     }
                     // Re-sort after refetching
-                    candidates.sort_by(|a, b| {
-                        b.score
-                            .total
-                            .partial_cmp(&a.score.total)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    candidates.sort_by(compare_mb_candidates);
                 }
             }
 

@@ -17,6 +17,7 @@ pub struct MbRelease {
     pub year: Option<i32>,
     pub country: Option<String>,
     pub label: Option<String>,
+    pub status: Option<String>,
     pub track_count: u32,
     pub medium_count: u32,
     pub tracks: Vec<MbTrack>,
@@ -24,6 +25,14 @@ pub struct MbRelease {
     /// Release-group MBID, used to look up `first-release-date` when the
     /// release itself has no date exposed in the search response.
     pub release_group_id: Option<String>,
+}
+
+impl MbRelease {
+    pub fn is_pseudo_release(&self) -> bool {
+        self.status
+            .as_deref()
+            .is_some_and(|s| s.eq_ignore_ascii_case("Pseudo-Release"))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -287,6 +296,8 @@ impl MbClient {
             .map(parse_search_release)
             .collect();
 
+        self.expand_pseudo_release_groups(&mut releases, limit);
+
         // Year-fallback #4: when the search response carries no date info
         // for a release (e.g. MB's Maenarawanai — neither `date`,
         // `release-events`, nor `release-group.first-release-date` appear
@@ -297,6 +308,116 @@ impl MbClient {
         // path pays the cost.
         self.enrich_missing_years(&mut releases);
 
+        Ok(releases)
+    }
+
+    fn expand_pseudo_release_groups(&mut self, releases: &mut Vec<MbRelease>, _limit: u32) {
+        let pseudo_sources: Vec<MbRelease> = releases
+            .iter()
+            .filter(|r| r.is_pseudo_release())
+            .cloned()
+            .collect();
+        if pseudo_sources.is_empty() {
+            return;
+        }
+
+        let mut seen: std::collections::HashSet<String> =
+            releases.iter().map(|r| r.id.clone()).collect();
+        let mut additions = Vec::new();
+
+        for pseudo in pseudo_sources {
+            let Some(rg_id) = pseudo.release_group_id.as_deref() else {
+                continue;
+            };
+            match self.fetch_release_group_releases(rg_id, &pseudo) {
+                Ok(alternates) => {
+                    for alt in alternates {
+                        if seen.insert(alt.id.clone()) {
+                            additions.push(alt);
+                        }
+                    }
+                }
+                Err(e) => tracing::debug!(
+                    "MB release-group {} alternate release lookup failed: {}",
+                    rg_id,
+                    e
+                ),
+            }
+        }
+
+        if additions.is_empty() {
+            return;
+        }
+
+        // Keep proper releases ahead of pseudo-releases from the same group.
+        let mut merged = Vec::with_capacity(releases.len() + additions.len());
+        merged.extend(additions);
+        merged.append(releases);
+        *releases = merged;
+    }
+
+    fn fetch_release_group_releases(
+        &mut self,
+        rg_id: &str,
+        source: &MbRelease,
+    ) -> Result<Vec<MbRelease>> {
+        let url = format!("{}/release-group/{}?inc=releases&fmt=json", MB_BASE, rg_id);
+        let body = self.get_json_body(&url, "release-group-releases")?;
+        let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+            crate::error::KyokuError::External(format!(
+                "MB release-group releases parse failed: {}: body={}",
+                e,
+                truncate_for_log(&body, 200),
+            ))
+        })?;
+
+        let first_release_year = v["first-release-date"]
+            .as_str()
+            .and_then(|d| d.get(..4))
+            .and_then(|y| y.parse::<i32>().ok());
+
+        let mut releases: Vec<MbRelease> = v["releases"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| {
+                let id = r["id"].as_str()?.to_string();
+                let status = r["status"].as_str().map(|s| s.to_string());
+                if status
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case("Pseudo-Release"))
+                {
+                    return None;
+                }
+                let year = r["date"]
+                    .as_str()
+                    .or_else(|| {
+                        r["release-events"].as_array().and_then(|events| {
+                            events.iter().filter_map(|e| e["date"].as_str()).min()
+                        })
+                    })
+                    .and_then(|d| d.get(..4))
+                    .and_then(|y| y.parse::<i32>().ok())
+                    .or(first_release_year);
+
+                Some(MbRelease {
+                    id,
+                    title: r["title"].as_str().unwrap_or(&source.title).to_string(),
+                    artist: source.artist.clone(),
+                    year,
+                    country: r["country"].as_str().map(|s| s.to_string()),
+                    label: source.label.clone(),
+                    status,
+                    track_count: source.track_count,
+                    medium_count: source.medium_count,
+                    tracks: Vec::new(),
+                    api_score: source.api_score,
+                    release_group_id: Some(rg_id.to_string()),
+                })
+            })
+            .collect();
+
+        releases.sort_by_key(|r| (r.year.unwrap_or(i32::MAX), r.id.clone()));
         Ok(releases)
     }
 
@@ -564,6 +685,7 @@ struct MbSearchRelease {
     country: Option<String>,
     #[serde(rename = "track-count")]
     track_count: Option<u32>,
+    status: Option<String>,
     #[serde(rename = "artist-credit")]
     artist_credit: Option<Vec<MbArtistCredit>>,
     #[serde(rename = "label-info")]
@@ -653,6 +775,7 @@ fn parse_search_release(r: MbSearchRelease) -> MbRelease {
         year,
         country: r.country,
         label,
+        status: r.status,
         track_count: r.track_count.unwrap_or(0),
         medium_count: 0,
         tracks: Vec::new(), // Search results don't include tracks
@@ -710,6 +833,7 @@ fn parse_full_release(v: &serde_json::Value) -> ParsedFullRelease {
     let release_group_id = v["release-group"]["id"].as_str().map(|s| s.to_string());
 
     let country = v["country"].as_str().map(|s| s.to_string());
+    let status = v["status"].as_str().map(|s| s.to_string());
 
     let label = v["label-info"]
         .as_array()
@@ -770,6 +894,7 @@ fn parse_full_release(v: &serde_json::Value) -> ParsedFullRelease {
             year,
             country,
             label,
+            status,
             track_count,
             medium_count,
             tracks,

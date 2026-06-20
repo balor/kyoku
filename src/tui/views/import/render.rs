@@ -127,9 +127,10 @@ impl ImportView {
         // change while the fetch was in flight doesn't smash an unrelated
         // candidate. Preserve api_score (the full-release API returns 100
         // because it's not a search hit).
-        let mut release_fetch_landed = false;
+        let mut release_fetch_completed = false;
         if let Some(rx) = &self.release_fetch_rx {
             while let Ok(msg) = rx.try_recv() {
+                release_fetch_completed = true;
                 if let Some(group) = self.groups.get_mut(msg.group_idx) {
                     group.full_release_fetching = false;
                     if let Some(full) = msg.release
@@ -141,19 +142,23 @@ impl ImportView {
                         let preserved_api = cand.release.api_score;
                         cand.release = full;
                         cand.release.api_score = preserved_api;
-                        release_fetch_landed = true;
                     }
                 }
             }
         }
-        // If new MBIDs arrived and the user is already parked on the
-        // summary, re-run detection so the MBID pass can see them. The
+        // If release fetches finished and the user is already parked on the
+        // summary, re-run detection so the MBID pass can see any new MBIDs
+        // (or so non-MBID duplicate checks still run after a fetch failure). The
         // step check is load-bearing: `is_in_summary()` stays true during
         // ResolveDuplicates (entering the resolver doesn't change
         // current_group), and rebuilding the preview there would wipe the
         // user's keep/replace decisions mid-flight and snap the cursor
         // back to the first conflict.
-        if release_fetch_landed && self.step == ImportStep::Review && self.is_in_summary() {
+        if release_fetch_completed
+            && self.step == ImportStep::Review
+            && self.is_in_summary()
+            && self.pending_full_mb_fetch_count() == 0
+        {
             self.refresh_conflict_preview(conn);
         }
 
@@ -241,7 +246,9 @@ impl ImportView {
                 if self.groups.is_empty() {
                     vec![("Esc/q", "back")]
                 } else if self.is_in_summary() {
-                    if self.groups.iter().all(|g| g.action == GroupAction::Skip) {
+                    if self.pending_full_mb_fetch_count() > 0 {
+                        vec![("wait", "MB data"), ("p", "back"), ("Esc/q", "cancel")]
+                    } else if self.groups.iter().all(|g| g.action == GroupAction::Skip) {
                         vec![("Enter", "close"), ("p", "back"), ("Esc/q", "cancel")]
                     } else {
                         vec![("Enter", "import"), ("p", "back"), ("Esc/q", "cancel")]
@@ -609,6 +616,11 @@ impl ImportView {
                     .map(|y| format!(" ({})", y))
                     .unwrap_or_default();
                 let country = candidate.release.country.as_deref().unwrap_or("");
+                let status_label = if candidate.release.is_pseudo_release() {
+                    " pseudo-release"
+                } else {
+                    ""
+                };
 
                 let style = if is_selected {
                     Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)
@@ -658,6 +670,7 @@ impl ImportView {
                         Style::default().fg(theme.fg_muted),
                     ),
                     Span::styled(count_marker, count_marker_style),
+                    Span::styled(status_label, Style::default().fg(theme.yellow)),
                 ]));
             }
             let p = Paragraph::new(mb_lines);
@@ -751,6 +764,7 @@ impl ImportView {
         }
 
         let all_skipped = accept_asis == 0 && accept_mb == 0 && loose == 0;
+        let pending_mb_fetches = self.pending_full_mb_fetch_count();
 
         let mut lines = vec![
             Line::from(""),
@@ -842,10 +856,33 @@ impl ImportView {
             )));
         }
 
+        if pending_mb_fetches > 0 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "  Waiting: ",
+                    Style::default()
+                        .fg(theme.yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "fetching full MusicBrainz data for {} group(s)…",
+                        pending_mb_fetches
+                    ),
+                    Style::default().fg(theme.fg_dim),
+                ),
+            ]));
+            lines.push(Line::from(Span::styled(
+                "  Duplicate detection and import confirmation are blocked until this finishes.",
+                Style::default().fg(theme.fg_muted),
+            )));
+        }
+
         // Duplicate preview — detection runs when the user enters this
         // summary; the count is stashed on the view. Surfacing it here
         // so nobody is surprised by a mid-flow resolver screen.
-        if !self.conflicts.is_empty() {
+        if pending_mb_fetches == 0 && !self.conflicts.is_empty() {
             let (lib_count, batch_count) =
                 self.conflicts
                     .iter()
@@ -881,6 +918,8 @@ impl ImportView {
         lines.push(Line::from(Span::styled(
             if all_skipped {
                 "  Nothing to import. Press Enter or Esc to close, or p to go back and change."
+            } else if pending_mb_fetches > 0 {
+                "  Please wait for MusicBrainz data to finish fetching. Enter is disabled."
             } else if !self.conflicts.is_empty() {
                 "  Press Enter to resolve duplicates, p to go back and change, Esc to cancel."
             } else {

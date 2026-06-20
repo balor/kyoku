@@ -977,6 +977,7 @@ mod tests {
             year: None,
             country: None,
             label: None,
+            status: None,
             track_count: 2,
             medium_count: 2,
             tracks: vec![mbt.clone()],

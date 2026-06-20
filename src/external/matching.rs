@@ -173,11 +173,18 @@ pub fn score_release(
         total_weight += 0.20;
     }
 
-    let total = if total_weight > 0.0 {
+    let mut total = if total_weight > 0.0 {
         weighted_sum / total_weight
     } else {
         0.0
     };
+
+    // Pseudo-releases are translations/transliterations, not the release the
+    // user should normally import against. Keep them visible as a fallback,
+    // but rank real releases from the same release group above them.
+    if candidate.is_pseudo_release() {
+        total *= 0.85;
+    }
 
     MatchScore {
         total,
@@ -312,6 +319,7 @@ mod tests {
             year: Some(1997),
             country: Some("GB".to_string()),
             label: None,
+            status: None,
             track_count: tracks.len() as u32,
             medium_count: 1,
             release_group_id: None,

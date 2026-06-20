@@ -1061,6 +1061,7 @@ mod tests {
             year: None,
             country: None,
             label: None,
+            status: None,
             track_count: 1,
             medium_count: 1,
             tracks: vec![MbTrack {
@@ -1484,6 +1485,7 @@ mod tests {
             year: None,
             country: None,
             label: None,
+            status: None,
             track_count: discs * per_disc,
             medium_count: discs,
             tracks,
