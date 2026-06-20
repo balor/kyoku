@@ -519,6 +519,14 @@ impl App {
             }
         }
 
+        // Empty review has no in-progress import state to lose, so Esc/q can
+        // leave the wizard directly instead of asking for cancel confirmation.
+        if self.import.is_empty_review() && (keys::is_back(&key) || keys::is_quit(&key)) {
+            self.switch_view(AppView::Library);
+            self.refresh_counts();
+            return AppAction::None;
+        }
+
         // When the wizard is capturing text input (e.g. custom-path field),
         // Esc is handled inside the view (clear input / exit custom mode)
         // — don't cancel the whole wizard unless the view itself decides.

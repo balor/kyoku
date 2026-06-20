@@ -399,6 +399,10 @@ impl ImportView {
             || self.collection_picker.is_some()
     }
 
+    pub fn is_empty_review(&self) -> bool {
+        self.step == ImportStep::Review && self.groups.is_empty()
+    }
+
     pub fn can_cancel(&self) -> bool {
         // Scanning is cancellable: the scan thread is read-only, so
         // abandoning it is safe (it finishes in the background and its
