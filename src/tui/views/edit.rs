@@ -25,6 +25,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use rusqlite::Connection;
+use unicode_width::UnicodeWidthStr;
 
 use crate::config::Settings;
 use crate::core::tagger::{self, FrameEntry, FrameGroup, TagChanges, TagValue, display_name_for};
@@ -433,11 +434,12 @@ impl EditorView {
         ])
         .style(Style::default().add_modifier(Modifier::BOLD));
 
+        let (group_w, field_w) = edit_table_widths(area.width, &self.frames);
         let table = Table::new(
             rows,
             [
-                Constraint::Length(13),
-                Constraint::Length(18),
+                Constraint::Length(group_w),
+                Constraint::Length(field_w),
                 Constraint::Min(10),
             ],
         )
@@ -450,14 +452,12 @@ impl EditorView {
         // row is visible. ratatui's Table inserts a 1-col gap between
         // each column by default, so value_col_x must include the two
         // gaps after the first two fixed-width columns.
-        const GROUP_W: u16 = 13;
-        const FIELD_W: u16 = 18;
         const COL_GAP: u16 = 1;
         if self.editing && self.selected >= self.scroll_offset {
             let row_in_view = self.selected - self.scroll_offset;
             let y = area.y + 1 + row_in_view as u16; // +1 for table header
             if y < area.y + area.height {
-                let offset = GROUP_W + COL_GAP + FIELD_W + COL_GAP;
+                let offset = group_w + COL_GAP + field_w + COL_GAP;
                 let value_col_x = area.x + offset;
                 let value_col_w = area.width.saturating_sub(offset);
                 let input_area = Rect::new(value_col_x, y, value_col_w, 1);
@@ -500,6 +500,35 @@ impl EditorView {
         let p = Paragraph::new(line).style(Style::default().bg(theme.bg_alt));
         frame.render_widget(p, area);
     }
+}
+
+fn edit_table_widths(area_width: u16, frames: &[FrameRow]) -> (u16, u16) {
+    const GROUP_W: u16 = 13;
+    const MIN_FIELD_W: u16 = 18;
+    const MAX_FIELD_W: u16 = 42;
+    const MIN_VALUE_W: u16 = 20;
+    const COL_GAPS: u16 = 2;
+
+    let group_w = GROUP_W.min(area_width.saturating_sub(COL_GAPS + 1));
+    let remaining = area_width.saturating_sub(group_w + COL_GAPS);
+
+    let longest_field = frames
+        .iter()
+        .map(|row| row.display_name.as_str().width() as u16)
+        .max()
+        .unwrap_or(0)
+        .max("Field".width() as u16);
+    let desired_field = longest_field.clamp(MIN_FIELD_W, MAX_FIELD_W);
+
+    let field_w = if remaining > MIN_FIELD_W + MIN_VALUE_W {
+        desired_field.min(remaining.saturating_sub(MIN_VALUE_W))
+    } else {
+        // Very narrow terminals: split the remaining space instead of
+        // preserving a too-wide fixed field column that would erase Value.
+        remaining.saturating_mul(2).saturating_div(5).max(1)
+    };
+
+    (group_w, field_w)
 }
 
 fn frame_row_from_entry(e: FrameEntry) -> FrameRow {
