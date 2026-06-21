@@ -511,7 +511,7 @@ impl ImportView {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),         // group nav
+                Constraint::Length(3),         // group header + spacer
                 Constraint::Min(3),            // tracks
                 Constraint::Length(mb_height), // MB candidates
             ])
@@ -532,39 +532,55 @@ impl ImportView {
             GroupAction::Skip => Span::styled("[Skip]", Style::default().fg(theme.red)),
             GroupAction::Loose => Span::styled("[Import loose]", Style::default().fg(theme.yellow)),
         };
-        let mut nav_spans = vec![Span::styled(
-            format!(" Group {}/{}: ", self.current_group + 1, self.groups.len()),
-            Style::default().fg(theme.fg),
-        )];
-        if let Some((path, suffix)) = group.name.split_once(" — mixed album tags") {
-            nav_spans.push(Span::styled(path.to_string(), Style::default().fg(theme.fg)));
-            nav_spans.push(Span::styled(
-                format!(" — mixed album tags{}", suffix),
+        let source_line = Line::from(vec![
+            Span::styled(
+                format!(" Group {}/{}: ", self.current_group + 1, self.groups.len()),
+                Style::default().fg(theme.fg_dim),
+            ),
+            Span::styled(group_source_display(group), Style::default().fg(theme.fg)),
+        ]);
+
+        let albums = group_album_tags(group);
+        let mut meta_spans = vec![Span::styled(" Album tag: ", Style::default().fg(theme.fg_muted))];
+        match albums.as_slice() {
+            [] => meta_spans.push(Span::styled(
+                "(none)",
+                Style::default()
+                    .fg(theme.fg_muted)
+                    .add_modifier(Modifier::ITALIC),
+            )),
+            [album] => meta_spans.push(Span::styled(
+                album.clone(),
+                Style::default()
+                    .fg(theme.accent_alt)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            many => meta_spans.push(Span::styled(
+                format!("mixed album tags ({})", many.len()),
                 Style::default()
                     .fg(theme.yellow)
                     .add_modifier(Modifier::ITALIC),
-            ));
-        } else {
-            nav_spans.push(Span::styled(group.name.clone(), Style::default().fg(theme.fg)));
+            )),
         }
-        nav_spans.push(Span::styled(
-            format!(" ({} tracks) ", group.tracks.len()),
-            Style::default().fg(theme.fg),
+        meta_spans.push(Span::styled(" · ", Style::default().fg(theme.fg_muted)));
+        meta_spans.push(Span::styled(
+            format!("{} tracks ", group.tracks.len()),
+            Style::default().fg(theme.fg_dim),
         ));
-        nav_spans.push(action_label);
+        meta_spans.push(action_label);
         // Collection suffix only shows when the group will actually import —
         // otherwise it's contradictory (e.g. "[Skip] → coll: X" misleads the
         // user into thinking the group is still being routed somewhere).
         if !group.target_collection.is_empty() && group.action != GroupAction::Skip {
-            nav_spans.push(Span::styled(
-                format!(" → coll: {}", group.target_collection),
+            meta_spans.push(Span::styled(" · collection: ", Style::default().fg(theme.fg_muted)));
+            meta_spans.push(Span::styled(
+                group.target_collection.clone(),
                 Style::default()
                     .fg(theme.accent_alt)
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        let nav = Line::from(nav_spans);
-        let p = Paragraph::new(nav);
+        let p = Paragraph::new(vec![source_line, Line::from(meta_spans), Line::from("")]);
         frame.render_widget(p, chunks[0]);
 
         // Track list
@@ -1252,4 +1268,34 @@ impl ImportView {
         let p = Paragraph::new(lines);
         frame.render_widget(p, inner);
     }
+}
+
+fn group_source_display(group: &super::ImportGroup) -> String {
+    group
+        .tracks
+        .first()
+        .and_then(|(track, _)| track.source_dir.as_deref().or_else(|| track.file_path.parent()))
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| {
+            group
+                .name
+                .split(" — mixed album tags")
+                .next()
+                .unwrap_or(&group.name)
+                .to_string()
+        })
+}
+
+fn group_album_tags(group: &super::ImportGroup) -> Vec<String> {
+    let mut albums: Vec<String> = group
+        .tracks
+        .iter()
+        .filter_map(|(_, tag)| tag.as_ref()?.album.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    albums.sort();
+    albums.dedup();
+    albums
 }
