@@ -568,19 +568,32 @@ fn abbreviate_formats(formats: &str) -> String {
     }
 }
 
+fn delete_file_count_label(plan: &pruner::DeletePlan) -> String {
+    let audio = plan.files_to_delete.len() + plan.collection_copies_to_delete.len();
+    let covers = plan.cover_files_to_delete.len();
+    let total = plan.deletable_file_count();
+    if covers == 0 {
+        format!("{} file(s)", total)
+    } else if audio == 0 {
+        format!("{} file(s): {} cover file(s)", total, covers)
+    } else {
+        format!(
+            "{} file(s): {} audio file(s) + {} cover file(s)",
+            total, audio, covers
+        )
+    }
+}
+
 fn build_loose_confirm(plan: &pruner::DeletePlan) -> ConfirmDelete {
     let primary = format!("Delete {} loose track(s)?", plan.track_ids.len());
-    let summary = format!(
-        "{} file(s) on disk",
-        plan.files_to_delete.len() + plan.collection_copies_to_delete.len()
-    );
+    let summary = format!("{} on disk", delete_file_count_label(plan));
     let mut popup = ConfirmDelete::new("Confirm delete", primary).with_summary(summary);
     if plan.deletable_file_count() == 0 {
         popup = popup.without_checkbox();
     } else {
         popup = popup.with_checkbox_label(format!(
-            "Also delete {} file(s) from disk",
-            plan.deletable_file_count()
+            "Also delete {} from disk",
+            delete_file_count_label(plan)
         ));
     }
     popup
@@ -593,9 +606,9 @@ fn build_album_confirm(plan: &pruner::DeletePlan, album_count: usize) -> Confirm
         format!("Delete {} albums?", album_count)
     };
     let summary = format!(
-        "{} track(s), {} file(s) on disk",
+        "{} track(s), {} on disk",
         plan.track_ids.len(),
-        plan.deletable_file_count(),
+        delete_file_count_label(plan),
     );
     let mut popup = ConfirmDelete::new("Confirm delete", primary).with_summary(summary);
     if !plan.track_ids.is_empty() {
@@ -631,8 +644,8 @@ fn build_album_confirm(plan: &pruner::DeletePlan, album_count: usize) -> Confirm
         popup = popup.without_checkbox();
     } else {
         popup = popup.with_checkbox_label(format!(
-            "Also delete {} file(s) from disk",
-            plan.deletable_file_count()
+            "Also delete {} from disk",
+            delete_file_count_label(plan)
         ));
     }
     popup

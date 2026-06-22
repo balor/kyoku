@@ -35,8 +35,10 @@ pub struct DeletePlan {
     pub album_survivor_track_ids: Vec<i64>,
     /// Surviving tracks whose primary path will be promoted to a collection copy before deletion.
     pub promote_paths: Vec<(i64, String)>,
-    /// Primary files (tracks.file_path) eligible for deletion.
+    /// Primary audio files (tracks.file_path) eligible for deletion.
     pub files_to_delete: Vec<PathBuf>,
+    /// Album cover-art files eligible for deletion when deleting album rows.
+    pub cover_files_to_delete: Vec<PathBuf>,
     /// Collection-copy paths (collection_tracks.collection_file_path) that
     /// will be deleted alongside their primary files.
     pub collection_copies_to_delete: Vec<PathBuf>,
@@ -63,9 +65,11 @@ impl DeletePlan {
         self.track_ids.is_empty() && self.album_ids.is_empty()
     }
 
-    /// Total file count the user can opt into deleting (primaries + copies).
+    /// Total file count the user can opt into deleting (audio + covers + copies).
     pub fn deletable_file_count(&self) -> usize {
-        self.files_to_delete.len() + self.collection_copies_to_delete.len()
+        self.files_to_delete.len()
+            + self.cover_files_to_delete.len()
+            + self.collection_copies_to_delete.len()
     }
 }
 
@@ -83,6 +87,14 @@ fn classify_file(
         } else {
             plan.files_to_delete.push(path);
         }
+    } else {
+        plan.files_outside_managed.push(path);
+    }
+}
+
+fn classify_cover_file(plan: &mut DeletePlan, path: PathBuf, managed_roots: &[PathBuf]) {
+    if path_is_strictly_inside(&path, managed_roots) {
+        plan.cover_files_to_delete.push(path);
     } else {
         plan.files_outside_managed.push(path);
     }
@@ -206,6 +218,15 @@ pub fn plan_delete_albums(
     plan.album_ids.sort_unstable();
     plan.album_ids.dedup();
 
+    let planned_album_ids = plan.album_ids.clone();
+    for aid in planned_album_ids {
+        if let Some(path) = queries::get_album_cover_path(conn, music_dir, aid)? {
+            classify_cover_file(&mut plan, PathBuf::from(path), managed_roots);
+        }
+    }
+    plan.cover_files_to_delete.sort();
+    plan.cover_files_to_delete.dedup();
+
     fill_album_summary(conn, &mut plan, album_counts);
     Ok(plan)
 }
@@ -250,6 +271,7 @@ pub fn apply_delete_plan(
         for p in plan
             .files_to_delete
             .iter()
+            .chain(plan.cover_files_to_delete.iter())
             .chain(plan.collection_copies_to_delete.iter())
         {
             if !p.exists() {

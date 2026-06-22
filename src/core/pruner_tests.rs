@@ -149,6 +149,55 @@ fn plan_delete_album_lists_tracks_and_album_row() {
 }
 
 #[test]
+fn delete_album_deletes_cover_file_when_file_delete_enabled() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    let track = music.join("Artist/Album/01.mp3");
+    let tid = add_album_track(&conn, track.clone(), "Artist", "Album", 1, "One", None);
+    let aid: i64 = conn
+        .query_row("SELECT album_id FROM tracks WHERE id = ?1", [tid], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let cover = music.join("Artist/Album/cover.jpg");
+    touch(&cover);
+    queries::set_album_cover_path(&conn, &music, aid, &cover.display().to_string()).unwrap();
+
+    let plan = plan_delete_albums(&conn, &music, &[aid], std::slice::from_ref(&music)).unwrap();
+    assert_eq!(plan.cover_files_to_delete, vec![cover.clone()]);
+    assert_eq!(plan.deletable_file_count(), 2);
+
+    let report =
+        apply_delete_plan(&conn, &music, &plan, true, std::slice::from_ref(&music)).unwrap();
+
+    assert_eq!(report.files_deleted, 2);
+    assert!(!track.exists());
+    assert!(!cover.exists());
+}
+
+#[test]
+fn delete_album_keeps_cover_file_when_file_delete_disabled() {
+    let (_tmp, _src, music, conn) = fresh_world();
+    let track = music.join("Artist/Album/01.mp3");
+    let tid = add_album_track(&conn, track.clone(), "Artist", "Album", 1, "One", None);
+    let aid: i64 = conn
+        .query_row("SELECT album_id FROM tracks WHERE id = ?1", [tid], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let cover = music.join("Artist/Album/cover.jpg");
+    touch(&cover);
+    queries::set_album_cover_path(&conn, &music, aid, &cover.display().to_string()).unwrap();
+
+    let plan = plan_delete_albums(&conn, &music, &[aid], std::slice::from_ref(&music)).unwrap();
+    let report =
+        apply_delete_plan(&conn, &music, &plan, false, std::slice::from_ref(&music)).unwrap();
+
+    assert_eq!(report.files_deleted, 0);
+    assert!(track.exists());
+    assert!(cover.exists());
+}
+
+#[test]
 fn collection_only_tracks_are_not_loose() {
     let (_tmp, _src, music, conn) = fresh_world();
     let p = music.join("Collections/Mix/song.mp3");
