@@ -12,7 +12,30 @@ use rusqlite::Connection;
 use crate::tui::themes::Theme;
 
 use super::dup_detect::{ConflictDecision, DupOther, DupSignal};
-use super::{GroupAction, ImportMessage, ImportStep, ImportView, MbMatchState, ScanMessage};
+use super::{
+    GroupAction, ImportGroup, ImportMessage, ImportStep, ImportView, MbMatchState, ScanMessage,
+};
+
+fn throbber_frame() -> &'static str {
+    const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let frame_idx = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() / 80)
+        .unwrap_or(0) as usize)
+        % FRAMES.len();
+    FRAMES[frame_idx]
+}
+
+fn common_tag_release_mbid(group: &ImportGroup) -> Option<String> {
+    let mut ids = group.tracks.iter().map(|(_, td)| {
+        td.as_ref()
+            .and_then(|td| td.mb_release_id.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    });
+    let first = ids.next().flatten()?.to_string();
+    ids.all(|id| id == Some(first.as_str())).then_some(first)
+}
 
 impl ImportView {
     pub fn tick(&mut self, conn: &Connection) {
@@ -602,14 +625,8 @@ impl ImportView {
 
         // MB candidates
         if group.mb_state == MbMatchState::Searching {
-            const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let frame_idx = (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() / 80)
-                .unwrap_or(0) as usize)
-                % FRAMES.len();
             let p = Paragraph::new(Span::styled(
-                format!(" {} Searching MusicBrainz...", FRAMES[frame_idx]),
+                format!(" {} Searching MusicBrainz...", throbber_frame()),
                 Style::default()
                     .fg(theme.accent_alt)
                     .add_modifier(Modifier::ITALIC),
@@ -622,6 +639,7 @@ impl ImportView {
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ))];
+            let tagged_release_mbid = common_tag_release_mbid(group);
             for (i, candidate) in group.mb_candidates.iter().enumerate() {
                 let is_selected = group.selected_candidate == Some(i);
                 let marker = if is_selected { "▶" } else { " " };
@@ -634,6 +652,13 @@ impl ImportView {
                 let country = candidate.release.country.as_deref().unwrap_or("");
                 let status_label = if candidate.release.is_pseudo_release() {
                     " pseudo-release"
+                } else {
+                    ""
+                };
+                let tag_label = if tagged_release_mbid.as_deref()
+                    == Some(candidate.release.id.as_str())
+                {
+                    " tagged-MBID"
                 } else {
                     ""
                 };
@@ -687,6 +712,7 @@ impl ImportView {
                     ),
                     Span::styled(count_marker, count_marker_style),
                     Span::styled(status_label, Style::default().fg(theme.yellow)),
+                    Span::styled(tag_label, Style::default().fg(theme.accent_alt)),
                 ]));
             }
             let p = Paragraph::new(mb_lines);
@@ -876,7 +902,7 @@ impl ImportView {
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
                 Span::styled(
-                    "  Waiting: ",
+                    format!("  {} Waiting: ", throbber_frame()),
                     Style::default()
                         .fg(theme.yellow)
                         .add_modifier(Modifier::BOLD),

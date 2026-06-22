@@ -738,6 +738,7 @@ mod tests {
             disc_number: None,
             genre: None,
             duration: None,
+            mb_release_id: None,
         };
         (t, Some(td))
     }
@@ -772,6 +773,7 @@ mod tests {
             disc_number: None,
             genre: None,
             duration: None,
+            mb_release_id: None,
         };
         (t, Some(td))
     }

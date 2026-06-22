@@ -122,20 +122,23 @@ impl MbClient {
             }
         }
 
-        // Resolve the artist to an MBID via the artist endpoint, which indexes
-        // aliases (sort-name, romanizations, etc). Cache the None case too so
-        // we don't re-resolve on every fallback step.
-        let arid = if !clean_artist.trim().is_empty() {
-            self.resolve_artist_mbid(&clean_artist)?
+        // Resolve the artist to candidate MBIDs via the artist endpoint,
+        // which indexes aliases (sort-name, romanizations, etc). Do not lock
+        // onto the first hit: short Latin aliases can be very ambiguous
+        // ("Minami" has many exact-name artists; the desired 美波 hit is a
+        // lower-ranked alias). Constrain the candidate artist set by the album
+        // title in one release query instead.
+        let arids = if !clean_artist.trim().is_empty() {
+            self.resolve_artist_mbids(&clean_artist, 25)?
         } else {
-            None
+            Vec::new()
         };
 
-        // Fallback 1: arid + album — catches releases whose credit uses a
-        // different script/name than the file tags. Keep the Album/EP filter
-        // here too — same reasoning as the first pass.
-        if let Some(ref mbid) = arid {
-            let releases = self.run_search_arid(mbid, Some(&clean_album), limit, type_filter)?;
+        // Fallback 1: candidate arids + album — catches releases whose credit
+        // uses a different script/name than the file tags. Keep the Album/EP
+        // filter here too — same reasoning as the first pass.
+        if !arids.is_empty() {
+            let releases = self.run_search_arids(&arids, Some(&clean_album), limit, type_filter)?;
             if !releases.is_empty() {
                 return Ok(releases);
             }
@@ -160,8 +163,8 @@ impl MbClient {
                     return Ok(releases);
                 }
             }
-            if let Some(ref mbid) = arid {
-                let releases = self.run_search_arid(mbid, Some(&clean_album), limit, None)?;
+            if !arids.is_empty() {
+                let releases = self.run_search_arids(&arids, Some(&clean_album), limit, None)?;
                 if !releases.is_empty() {
                     return Ok(releases);
                 }
@@ -176,9 +179,11 @@ impl MbClient {
             }
         }
 
-        // Fallback 4: arid only (all releases by that artist, any credit)
-        if let Some(ref mbid) = arid {
-            let releases = self.run_search_arid(mbid, None, limit, None)?;
+        // Fallback 4: arid only (all releases by that artist, any credit).
+        // Only do this for unambiguous artist resolution; querying every
+        // candidate for a short alias like "Minami" produces unrelated noise.
+        if arids.len() == 1 {
+            let releases = self.run_search_arids(&arids, None, limit, None)?;
             if !releases.is_empty() {
                 return Ok(releases);
             }
@@ -195,19 +200,22 @@ impl MbClient {
         Ok(Vec::new())
     }
 
-    /// Resolve an artist name (or alias) to its MusicBrainz artist MBID.
-    /// Returns None if no plausible match is found.
+    /// Resolve an artist name (or alias) to plausible MusicBrainz artist MBIDs.
     ///
     /// Note: uses an unprefixed query (no `artist:` field qualifier). With
     /// `artist:(X)` MB only matches the canonical `name`; an unprefixed
     /// query fans out across `name`, `sortname`, and `alias`, which is what
     /// lets e.g. "HANABIE" resolve to 花冷え。's MBID via its Latin alias.
-    fn resolve_artist_mbid(&mut self, name: &str) -> Result<Option<String>> {
+    ///
+    /// Short Latin aliases are ambiguous, so callers should constrain these
+    /// candidates with album/release data before accepting one.
+    fn resolve_artist_mbids(&mut self, name: &str, limit: u32) -> Result<Vec<String>> {
         let query = escape_lucene(name);
         let url = format!(
-            "{}/artist/?query={}&fmt=json&limit=1",
+            "{}/artist/?query={}&fmt=json&limit={}",
             MB_BASE,
             urlencoding(&query),
+            limit,
         );
         let body = self.get_json_body(&url, "artist-search")?;
         let resp: MbArtistSearchResponse = serde_json::from_str(&body).map_err(|e| {
@@ -218,13 +226,17 @@ impl MbClient {
             ))
         })?;
 
-        // Require a reasonable MB score so we don't misroute to an unrelated
-        // artist when the name is absent.
+        let mut seen = std::collections::HashSet::new();
         Ok(resp
             .artists
             .into_iter()
-            .find(|a| a.score.unwrap_or(0) >= 90)
-            .map(|a| a.id))
+            // Keep strong alias/sort-name hits. This intentionally includes
+            // scores below 90 so romanized aliases ranked under exact-name
+            // collisions (e.g. 美波 alias "Minami") can still be validated
+            // by the release query.
+            .filter(|a| a.score.unwrap_or(0) >= 80)
+            .filter_map(|a| seen.insert(a.id.clone()).then_some(a.id))
+            .collect())
     }
 
     fn run_search_artist(
@@ -254,17 +266,32 @@ impl MbClient {
         self.run_release_query(&query, limit)
     }
 
-    fn run_search_arid(
+    fn run_search_arids(
         &mut self,
-        arid: &str,
+        arids: &[String],
         album: Option<&str>,
         limit: u32,
         type_filter: Option<&str>,
     ) -> Result<Vec<MbRelease>> {
-        let mut query = if let Some(album) = album {
-            format!("arid:{} AND release:({})", arid, escape_lucene(album),)
+        if arids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let arid_clause = if arids.len() == 1 {
+            format!("arid:{}", arids[0])
         } else {
-            format!("arid:{}", arid)
+            format!(
+                "({})",
+                arids
+                    .iter()
+                    .map(|id| format!("arid:{}", id))
+                    .collect::<Vec<_>>()
+                    .join(" OR ")
+            )
+        };
+        let mut query = if let Some(album) = album {
+            format!("{} AND release:({})", arid_clause, escape_lucene(album))
+        } else {
+            arid_clause
         };
         if let Some(tf) = type_filter {
             query.push_str(" AND ");

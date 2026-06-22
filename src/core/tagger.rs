@@ -51,6 +51,10 @@ pub struct TagData {
     pub disc_number: Option<u32>,
     pub genre: Option<String>,
     pub duration: Option<Duration>,
+    /// MusicBrainz release MBID, if present in the file tags.
+    /// Vorbis/FLAC commonly stores this as `MUSICBRAINZ_ALBUMID`; lofty
+    /// exposes it through the generic release-id key.
+    pub mb_release_id: Option<String>,
 }
 
 /// Extract [`TagData`] from an already-parsed tagged file.
@@ -79,6 +83,11 @@ fn tag_data_from_tagged_file(tagged_file: &lofty::file::TaggedFile) -> TagData {
         disc_number: tag.and_then(|t| t.disk()),
         genre: tag.and_then(|t| t.genre().map(|s: std::borrow::Cow<str>| s.into_owned())),
         duration: Some(properties.duration()),
+        mb_release_id: tag.and_then(|t| {
+            t.get_string(ItemKey::MusicBrainzReleaseId)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        }),
     }
 }
 

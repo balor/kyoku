@@ -64,6 +64,19 @@ fn default_collection_name(group: &ImportGroup) -> String {
         })
 }
 
+fn common_tag_release_mbid(
+    tracks: &[(crate::db::models::Track, Option<tagger::TagData>)],
+) -> Option<String> {
+    let mut ids = tracks.iter().map(|(_, td)| {
+        td.as_ref()
+            .and_then(|td| td.mb_release_id.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    });
+    let first = ids.next().flatten()?.to_string();
+    ids.all(|id| id == Some(first.as_str())).then_some(first)
+}
+
 fn compare_mb_candidates(a: &MbCandidate, b: &MbCandidate) -> std::cmp::Ordering {
     b.score
         .total
@@ -74,6 +87,19 @@ fn compare_mb_candidates(a: &MbCandidate, b: &MbCandidate) -> std::cmp::Ordering
                 .is_pseudo_release()
                 .cmp(&b.release.is_pseudo_release())
         })
+}
+
+fn promote_tagged_candidate(candidates: &mut Vec<MbCandidate>, tagged_mbid: Option<&str>) {
+    let Some(tagged_mbid) = tagged_mbid else {
+        return;
+    };
+    if let Some(pos) = candidates
+        .iter()
+        .position(|c| c.release.id == tagged_mbid)
+    {
+        let tagged = candidates.remove(pos);
+        candidates.insert(0, tagged);
+    }
 }
 
 impl ImportView {
@@ -670,6 +696,7 @@ impl ImportView {
             .iter()
             .map(|(t, _)| t.duration_ms.unwrap_or(0))
             .sum();
+        let tag_release_mbid = common_tag_release_mbid(&group.tracks);
         let limit = self.match_candidates;
 
         self.ensure_mb_infra();
@@ -678,7 +705,7 @@ impl ImportView {
         let client = self.mb_client.as_ref().unwrap().clone();
 
         std::thread::spawn(move || {
-            if artist.is_empty() && album.is_empty() {
+            if artist.is_empty() && album.is_empty() && tag_release_mbid.is_none() {
                 let _ = tx.send(MbResult {
                     group_idx: idx,
                     candidates: Vec::new(),
@@ -693,8 +720,43 @@ impl ImportView {
             let mut client = client
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+            // If every track already carries the same MB release ID, fetch it
+            // as an exact candidate. Still run normal search afterwards so the
+            // review screen shows alternatives; the tagged MBID is promoted to
+            // #1 and labelled in the renderer.
+            let tagged_release_id = tag_release_mbid.clone();
+            let tagged_candidate = if let Some(mbid) = tag_release_mbid.as_deref() {
+                match client.fetch_release(mbid) {
+                    Ok(release) => {
+                        let score = matching::score_release(
+                            &artist,
+                            &album,
+                            year,
+                            track_count,
+                            &titles,
+                            total_ms,
+                            &release,
+                        );
+                        Some(MbCandidate { release, score })
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "MB fetch_release from embedded tag MBID {} failed: {}",
+                            mbid,
+                            e
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             let mut search_error: Option<String> = None;
-            let mut candidates: Vec<MbCandidate> =
+            let mut candidates: Vec<MbCandidate> = if artist.is_empty() && album.is_empty() {
+                Vec::new()
+            } else {
                 match client.search_releases(&artist, &album, track_count, limit) {
                     Ok(releases) => releases
                         .into_iter()
@@ -721,12 +783,21 @@ impl ImportView {
                         search_error = Some(short_mb_error(&e.to_string()));
                         Vec::new()
                     }
-                };
+                }
+            };
+
+            if let Some(tagged) = tagged_candidate {
+                let tagged_id = tagged.release.id.clone();
+                candidates.retain(|c| c.release.id != tagged_id);
+                candidates.push(tagged);
+            }
 
             // Initial sort by coarse score. Pseudo-releases are useful as
             // translated/transliterated hints, but proper releases from the
             // same release group should be shown first.
             candidates.sort_by(compare_mb_candidates);
+            promote_tagged_candidate(&mut candidates, tagged_release_id.as_deref());
+            candidates.truncate(limit as usize);
 
             // Tiebreaker: when top candidates are within 10% of the leader,
             // fetch the full release for each tied candidate so we can compare
@@ -779,13 +850,15 @@ impl ImportView {
                     }
                     // Re-sort after refetching
                     candidates.sort_by(compare_mb_candidates);
+                    promote_tagged_candidate(&mut candidates, tagged_release_id.as_deref());
                 }
             }
 
+            let error = if candidates.is_empty() { search_error } else { None };
             let _ = tx.send(MbResult {
                 group_idx: idx,
                 candidates,
-                error: search_error,
+                error,
             });
         });
     }

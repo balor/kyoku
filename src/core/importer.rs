@@ -526,6 +526,7 @@ mod tests {
             disc_number: Some(1),
             genre: None,
             duration: None,
+            mb_release_id: None,
         }
     }
 
