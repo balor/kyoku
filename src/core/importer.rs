@@ -713,7 +713,15 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let bad = tmp.path().join(std::ffi::OsStr::from_bytes(b"bad\xFF.mp3"));
-        std::fs::write(&bad, b"").unwrap();
+        if let Err(e) = std::fs::write(&bad, b"") {
+            // Some Unix filesystems / platform layers (notably macOS/APFS)
+            // reject arbitrary non-UTF-8 byte sequences before our scanner
+            // can see them. The scanner behavior is still exercised on
+            // filesystems that allow such names; elsewhere this test is not
+            // applicable.
+            eprintln!("skipping non-UTF-8 path test: filesystem rejected filename: {e}");
+            return;
+        }
 
         let result = scan_audio_files_with_report(tmp.path());
         assert!(result.files.is_empty());
