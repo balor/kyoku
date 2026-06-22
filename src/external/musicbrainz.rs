@@ -338,6 +338,19 @@ impl MbClient {
         Ok(releases)
     }
 
+    pub fn fetch_release_group_alternates(
+        &mut self,
+        source: &MbRelease,
+        limit: u32,
+    ) -> Result<Vec<MbRelease>> {
+        let Some(rg_id) = source.release_group_id.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let mut releases = self.fetch_release_group_releases(rg_id, source)?;
+        releases.truncate(limit as usize);
+        Ok(releases)
+    }
+
     fn expand_pseudo_release_groups(&mut self, releases: &mut Vec<MbRelease>, _limit: u32) {
         let pseudo_sources: Vec<MbRelease> = releases
             .iter()
@@ -495,7 +508,7 @@ impl MbClient {
     /// separate `/artist/{mbid}` lookup and are cached on the client.
     pub fn fetch_release(&mut self, mbid: &str) -> Result<MbRelease> {
         let url = format!(
-            "{}/release/{}?inc=recordings+artists+labels+aliases&fmt=json",
+            "{}/release/{}?inc=recordings+artists+labels+aliases+release-groups&fmt=json",
             MB_BASE, mbid,
         );
 

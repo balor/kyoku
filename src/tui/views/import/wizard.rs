@@ -78,6 +78,15 @@ fn common_tag_release_mbid(
 }
 
 fn compare_mb_candidates(a: &MbCandidate, b: &MbCandidate) -> std::cmp::Ordering {
+    let same_release_group = a.release.release_group_id.is_some()
+        && a.release.release_group_id == b.release.release_group_id;
+    if same_release_group && a.release.is_pseudo_release() != b.release.is_pseudo_release() {
+        return a
+            .release
+            .is_pseudo_release()
+            .cmp(&b.release.is_pseudo_release());
+    }
+
     b.score
         .total
         .partial_cmp(&a.score.total)
@@ -93,13 +102,30 @@ fn promote_tagged_candidate(candidates: &mut Vec<MbCandidate>, tagged_mbid: Opti
     let Some(tagged_mbid) = tagged_mbid else {
         return;
     };
-    if let Some(pos) = candidates
-        .iter()
-        .position(|c| c.release.id == tagged_mbid)
-    {
+    if let Some(pos) = candidates.iter().position(|c| {
+        c.release.id == tagged_mbid && !c.release.is_pseudo_release()
+    }) {
         let tagged = candidates.remove(pos);
         candidates.insert(0, tagged);
     }
+}
+
+fn prune_weak_candidates_after_obvious_leader(candidates: &mut Vec<MbCandidate>) {
+    let Some(leader) = candidates.first() else {
+        return;
+    };
+    if leader.score.total < 0.85 {
+        return;
+    }
+
+    let leader_id = leader.release.id.clone();
+    let leader_group = leader.release.release_group_id.clone();
+    candidates.retain(|candidate| {
+        let same_group = leader_group
+            .as_deref()
+            .is_some_and(|rg| candidate.release.release_group_id.as_deref() == Some(rg));
+        candidate.release.id == leader_id || candidate.score.total >= 0.70 || same_group
+    });
 }
 
 impl ImportView {
@@ -721,14 +747,15 @@ impl ImportView {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-            // If every track already carries the same MB release ID, fetch it
-            // as an exact candidate. Still run normal search afterwards so the
-            // review screen shows alternatives; the tagged MBID is promoted to
-            // #1 and labelled in the renderer.
-            let tagged_release_id = tag_release_mbid.clone();
-            let tagged_candidate = if let Some(mbid) = tag_release_mbid.as_deref() {
+            // If every track already carries the same MB release ID, trust it
+            // as the anchor and only show alternate editions from that release
+            // group. A normal fuzzy MB search for a precise title can still
+            // return token-overlap garbage ("Jordan" + "Home"), which is not
+            // useful once we know the exact release group.
+            if let Some(mbid) = tag_release_mbid.as_deref() {
                 match client.fetch_release(mbid) {
                     Ok(release) => {
+                        let tagged_id = release.id.clone();
                         let score = matching::score_release(
                             &artist,
                             &album,
@@ -738,7 +765,45 @@ impl ImportView {
                             total_ms,
                             &release,
                         );
-                        Some(MbCandidate { release, score })
+                        let mut candidates = vec![MbCandidate { release, score }];
+
+                        match client
+                            .fetch_release_group_alternates(&candidates[0].release, limit)
+                        {
+                            Ok(alternates) => {
+                                for alt in alternates {
+                                    if alt.id == tagged_id {
+                                        continue;
+                                    }
+                                    let score = matching::score_release(
+                                        &artist,
+                                        &album,
+                                        year,
+                                        track_count,
+                                        &titles,
+                                        total_ms,
+                                        &alt,
+                                    );
+                                    candidates.push(MbCandidate { release: alt, score });
+                                }
+                            }
+                            Err(e) => tracing::debug!(
+                                "MB release-group alternates for tagged MBID {} failed: {}",
+                                mbid,
+                                e
+                            ),
+                        }
+
+                        candidates.sort_by(compare_mb_candidates);
+                        promote_tagged_candidate(&mut candidates, Some(tagged_id.as_str()));
+                        prune_weak_candidates_after_obvious_leader(&mut candidates);
+                        candidates.truncate(limit as usize);
+                        let _ = tx.send(MbResult {
+                            group_idx: idx,
+                            candidates,
+                            error: None,
+                        });
+                        return;
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -746,12 +811,9 @@ impl ImportView {
                             mbid,
                             e
                         );
-                        None
                     }
                 }
-            } else {
-                None
-            };
+            }
 
             let mut search_error: Option<String> = None;
             let mut candidates: Vec<MbCandidate> = if artist.is_empty() && album.is_empty() {
@@ -786,17 +848,11 @@ impl ImportView {
                 }
             };
 
-            if let Some(tagged) = tagged_candidate {
-                let tagged_id = tagged.release.id.clone();
-                candidates.retain(|c| c.release.id != tagged_id);
-                candidates.push(tagged);
-            }
-
             // Initial sort by coarse score. Pseudo-releases are useful as
             // translated/transliterated hints, but proper releases from the
             // same release group should be shown first.
             candidates.sort_by(compare_mb_candidates);
-            promote_tagged_candidate(&mut candidates, tagged_release_id.as_deref());
+            prune_weak_candidates_after_obvious_leader(&mut candidates);
             candidates.truncate(limit as usize);
 
             // Tiebreaker: when top candidates are within 10% of the leader,
@@ -850,7 +906,7 @@ impl ImportView {
                     }
                     // Re-sort after refetching
                     candidates.sort_by(compare_mb_candidates);
-                    promote_tagged_candidate(&mut candidates, tagged_release_id.as_deref());
+                    prune_weak_candidates_after_obvious_leader(&mut candidates);
                 }
             }
 
