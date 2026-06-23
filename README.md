@@ -58,7 +58,11 @@ kyoku previews and confirms every destructive operation, but it does move and re
 
 ## Install
 
-Build from source:
+### Prebuilt binaries
+
+Download the binary for your platform from the repository's Releases page and put `kyoku` somewhere on your `PATH`.
+
+### Build from source
 
 ```sh
 cargo install --path .
@@ -71,7 +75,7 @@ Requires a recent stable Rust toolchain (2024 edition). No system libraries requ
 
 ### macOS binary note
 
-Tagged commits trigger a CI build that uploads tarballs to the corresponding GitHub Release, but those binaries are not Apple-notarized, so Gatekeeper will block them on first run with "Apple could not verify…". Strip the quarantine attribute after extracting:
+The macOS release binaries are not Apple-notarized, so Gatekeeper will block them on first run with "Apple could not verify…". Strip the quarantine attribute after extracting:
 
 ```sh
 xattr -d com.apple.quarantine ./kyoku
@@ -91,18 +95,6 @@ kyoku             # launch the TUI — everything else lives in there
 The CLI subcommands (`import`, `scan`, `organize`, …) are there for scripting, but day-to-day use happens mostly in the TUI. MusicBrainz review/matching currently lives in the TUI import wizard; CLI import is a simpler as-is cataloging path. Run `kyoku --help` if you want to see the commands.
 
 Config lives at `$XDG_CONFIG_HOME/kyoku/config.toml`, or `~/.config/kyoku/config.toml` if that variable isn't set. The database location is configurable during setup. Run `kyoku paths` to see the exact locations on your machine.
-
----
-
-## Design principles
-
-1. **TUI-first** — the TUI is the primary interface; CLI subcommands are for automation and scripting.
-2. **The filesystem is the product** — the real output is a browsable directory tree, not a database.
-3. **File operations are deliberate** — import reads and catalogs; rename / move / organize are separate, explicit actions.
-4. **Safety first** — never modify files without explicit confirmation; always show a dry-run diff.
-5. **Offline-capable** — core library management works without network; MusicBrainz lookups are optional enrichment.
-6. **Unmatched content is normal** — files without MB matches are fully functional library members.
-7. **Unicode-native** — CJK characters, diacritics, and mixed-script content work correctly throughout the pipeline.
 
 ---
 
