@@ -18,6 +18,9 @@ pub struct Settings {
     pub musicbrainz: MusicBrainzSettings,
 
     #[serde(default)]
+    pub player: PlayerSettings,
+
+    #[serde(default)]
     pub ui: UiSettings,
 }
 
@@ -143,6 +146,27 @@ pub enum NameScriptPreference {
     Latin,
 }
 
+/// External music player used by the `p`/`P` keys and `kyoku play`.
+///
+/// Resolution order: `command` (full argv template) wins, then `app`
+/// (macOS only), then built-in auto-detection (mpv, VLC, IINA, …), then
+/// the OS default handler. Both fields unset = auto-detect.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlayerSettings {
+    /// Full argv template, e.g. `["mpv", "--playlist={playlist}"]`.
+    /// Placeholders: `{playlist}` (path to the generated .m3u8 or the
+    /// single audio file), `{files}` (expands to one argv item per file),
+    /// `{files-csv}` (comma-joined, for Quod Libet-style players). With
+    /// no placeholder, the target path(s) are appended as trailing args.
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+
+    /// macOS only: app name launched via `open -a <app> <target>`.
+    /// Ignored on other platforms.
+    #[serde(default)]
+    pub app: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiSettings {
     #[serde(default = "default_theme")]
@@ -218,6 +242,7 @@ impl Default for Settings {
             import: ImportSettings::default(),
             tagging: TaggingSettings::default(),
             musicbrainz: MusicBrainzSettings::default(),
+            player: PlayerSettings::default(),
             ui: UiSettings::default(),
         }
     }

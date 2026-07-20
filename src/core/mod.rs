@@ -3,6 +3,7 @@ pub mod importer;
 pub mod organize_preview;
 pub mod organizer;
 pub mod paths;
+pub mod player;
 pub mod pruner;
 pub mod tagger;
 pub mod template;
