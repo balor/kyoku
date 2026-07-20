@@ -94,3 +94,15 @@ pub fn is_delete(key: &KeyEvent) -> bool {
 pub fn is_fetch_cover(key: &KeyEvent) -> bool {
     key.code == KeyCode::Char('C')
 }
+
+/// "p" — play the natural unit of the current view (album / track /
+/// collection, or the marked selection) in the external music player.
+pub fn is_play(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('p') && key.modifiers.is_empty()
+}
+
+/// "P" — play the larger scope (whole album / whole collection) from a
+/// track-level view. Reserved for "enqueue" in other views later.
+pub fn is_play_scope(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('P')
+}

@@ -465,6 +465,69 @@ impl AlbumDetailView {
             }
         }
 
+        // p — play marked tracks (track-list order) or the track under
+        // the cursor. P — play the whole album (or all loose tracks).
+        if keys::is_play(&key) {
+            let rows: Vec<TrackRow> = if !self.selection.is_empty() {
+                self.tracks
+                    .iter()
+                    .filter(|t| self.selection.contains(t.id))
+                    .cloned()
+                    .collect()
+            } else {
+                current_track.cloned().into_iter().collect()
+            };
+            let context = if rows.len() == 1 {
+                rows[0].title.clone()
+            } else {
+                format!("{} tracks", rows.len())
+            };
+            let items = crate::core::player::items_from_rows(&rows, None);
+            match crate::core::player::play(settings, items) {
+                Ok(outcome) => {
+                    self.notice = Some((
+                        NoticeKind::Success,
+                        crate::core::player::outcome_notice(&outcome, &context),
+                    ));
+                }
+                Err(e) => {
+                    self.notice =
+                        Some((NoticeKind::Warning, format!("Play failed: {}", e)));
+                }
+            }
+            return DetailAction::None;
+        }
+        if keys::is_play_scope(&key) {
+            let music_dir = &settings.library.music_dir;
+            let (items, context) = if let Some(album) = &self.album {
+                (
+                    crate::core::player::album_items(conn, music_dir, album.id)
+                        .unwrap_or_default(),
+                    album.title.clone(),
+                )
+            } else {
+                let rows = queries::list_loose_tracks(conn, music_dir, 0, 5000)
+                    .unwrap_or_default();
+                (
+                    crate::core::player::items_from_rows(&rows, None),
+                    "loose tracks".to_string(),
+                )
+            };
+            match crate::core::player::play(settings, items) {
+                Ok(outcome) => {
+                    self.notice = Some((
+                        NoticeKind::Success,
+                        crate::core::player::outcome_notice(&outcome, &context),
+                    ));
+                }
+                Err(e) => {
+                    self.notice =
+                        Some((NoticeKind::Warning, format!("Play failed: {}", e)));
+                }
+            }
+            return DetailAction::None;
+        }
+
         if key.code == KeyCode::Char('O') {
             return DetailAction::Organize;
         }
