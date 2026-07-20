@@ -26,7 +26,7 @@ None of these are damning critiques of beets — it's a different design point a
 
 ## What kyoku isn't
 
-- Not a music player — no playback.
+- Not a music player — no *built-in* playback; kyoku hands files to your external player (`p` in the TUI, `kyoku play` in the CLI).
 - Not a streaming client.
 - Not a recommendation engine.
 - Not a web app.
@@ -37,6 +37,7 @@ None of these are damning critiques of beets — it's a different design point a
 
 ## Features
 
+- **External player hand-off** — play an album, a collection, a track, or a marked selection with one key (`p`/`P`) or with `kyoku play`. Auto-detects mpv, VLC, Celluloid, Haruna, Strawberry, Clementine, Audacious, DeaDBeeF, Amberol, Quod Libet on Linux and IINA, VLC, foobar2000, Swinsian, Cog, Music on macOS; falls back to the OS default handler.
 - **Import wizard** with MusicBrainz matching, manual MBID lookup, and per-group decisions (accept, skip, import-loose, assign to a collection).
 - **Duplicate detection** against the library and within the batch — surfaced as side-by-side "keep A vs. B" decisions before anything touches disk.
 - **Library browser** with sortable album list, cover-art previews, album detail, and theme support.
@@ -95,6 +96,16 @@ kyoku             # launch the TUI — everything else lives in there
 The CLI subcommands (`import`, `scan`, `organize`, …) are there for scripting, but day-to-day use happens mostly in the TUI. MusicBrainz review/matching currently lives in the TUI import wizard; CLI import is a simpler as-is cataloging path. Run `kyoku --help` if you want to see the commands.
 
 Config lives at `$XDG_CONFIG_HOME/kyoku/config.toml`, or `~/.config/kyoku/config.toml` if that variable isn't set. The database location is configurable during setup. Run `kyoku paths` to see the exact locations on your machine.
+
+To pin a specific music player for `p`/`kyoku play` (otherwise auto-detected):
+
+```toml
+[player]
+# argv template; {playlist} is replaced with the generated .m3u8 path
+command = ["mpv", "--playlist={playlist}"]
+# or, on macOS only, an app name launched via `open -a`:
+# app = "IINA"
+```
 
 ---
 

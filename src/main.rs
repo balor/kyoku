@@ -332,6 +332,93 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Some(Command::Play {
+            album,
+            collection,
+            path,
+            dry_run,
+        }) => {
+            use crate::core::player;
+
+            let conn = db::open_database(settings.database_file(), &settings.library.music_dir)?;
+            let music_dir = &settings.library.music_dir;
+
+            let (items, context): (Vec<player::PlayItem>, String) = if let Some(title) = album {
+                let matches = db::queries::find_albums_by_title(&conn, &title)?;
+                match matches.len() {
+                    0 => {
+                        eprintln!("No album titled {:?} in the library.", title);
+                        std::process::exit(1);
+                    }
+                    1 => {
+                        let (id, title, artist) = matches.into_iter().next().unwrap();
+                        let context = match artist {
+                            Some(a) if !a.is_empty() => format!("{} — {}", a, title),
+                            _ => title,
+                        };
+                        (player::album_items(&conn, music_dir, id)?, context)
+                    }
+                    _ => {
+                        eprintln!("Album title {:?} is ambiguous:", title);
+                        for (_, title, artist) in matches {
+                            eprintln!(
+                                "  {} — {}",
+                                artist.as_deref().unwrap_or("(unknown)"),
+                                title
+                            );
+                        }
+                        eprintln!("Open the TUI and pick one, or use a more specific title.");
+                        std::process::exit(2);
+                    }
+                }
+            } else if let Some(name) = collection {
+                let Some((id, canonical_name)) = db::queries::find_collection_id_by_name(&conn, &name)? else {
+                    eprintln!("No collection named {:?} in the library.", name);
+                    std::process::exit(1);
+                };
+                (player::collection_items(&conn, music_dir, id)?, canonical_name)
+            } else if let Some(p) = path {
+                if !p.exists() {
+                    eprintln!("File not found: {}", p.display());
+                    std::process::exit(1);
+                }
+                let context = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file")
+                    .to_string();
+                (vec![player::PlayItem::from_path(p)], context)
+            } else {
+                eprintln!("Nothing to play — pass --album, --collection, or a file path.");
+                eprintln!("(see `kyoku play --help`)");
+                std::process::exit(1);
+            };
+
+            if dry_run {
+                let prepared = player::prepare(&settings, items)?;
+                println!("player:   {}", prepared.player_label);
+                println!("argv:     {}", prepared.argv.join(" "));
+                if let Some(p) = &prepared.playlist_path {
+                    println!("playlist: {}", p.display());
+                }
+                println!(
+                    "items:    {} playable, {} skipped (missing)",
+                    prepared.played, prepared.skipped_missing
+                );
+            } else {
+                let outcome = player::play(&settings, items)?;
+                println!(
+                    "Playing: {} ({} track{}) via {}",
+                    context,
+                    outcome.played,
+                    if outcome.played == 1 { "" } else { "s" },
+                    outcome.player_label,
+                );
+                if outcome.skipped_missing > 0 {
+                    println!("  ({} skipped: files missing)", outcome.skipped_missing);
+                }
+            }
+        }
         Some(Command::Organize {
             apply,
             yes,

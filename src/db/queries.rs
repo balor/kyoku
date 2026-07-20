@@ -204,6 +204,45 @@ pub fn get_or_create_collection(conn: &Connection, name: &str) -> Result<(i64, b
     Ok((conn.last_insert_rowid(), true))
 }
 
+/// Look up a collection id by exact name, case-insensitively. Unlike
+/// `get_or_create_collection` this never creates anything — used by
+/// `kyoku play --collection`, where a typo should be an error, not a new
+/// empty collection.
+pub fn find_collection_id_by_name(conn: &Connection, name: &str) -> Result<Option<(i64, String)>> {
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, name FROM collections WHERE name = ?1 COLLATE NOCASE",
+            [name],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(row)
+}
+
+/// Find albums by exact title, case-insensitively. Several albums can
+/// share a title (different artists, different pressings) — the caller
+/// decides how to disambiguate. Returns (id, title, album_artist).
+pub fn find_albums_by_title(
+    conn: &Connection,
+    title: &str,
+) -> Result<Vec<(i64, String, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title, album_artist FROM albums WHERE title = ?1 COLLATE NOCASE ORDER BY album_artist",
+    )?;
+    let rows = stmt.query_map([title], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 /// Add a track to a collection. Returns true if the track was newly added.
 ///
 /// New memberships get an append position. Existing memberships are left

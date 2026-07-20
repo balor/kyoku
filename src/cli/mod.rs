@@ -45,6 +45,29 @@ pub enum Command {
     /// Scan inbox directories for unimported files
     Scan,
 
+    /// Play an album, collection, or audio file with the external music player
+    #[command(group(
+        ArgGroup::new("play-target")
+            .args(["album", "collection", "path"])
+            .multiple(false)
+    ))]
+    Play {
+        /// Play this album (exact, case-insensitive title match)
+        #[arg(long)]
+        album: Option<String>,
+
+        /// Play this collection (exact, case-insensitive name match)
+        #[arg(long)]
+        collection: Option<String>,
+
+        /// Audio file to open directly
+        path: Option<PathBuf>,
+
+        /// Print the resolved player command and playlist without launching
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Preview and apply file reorganization
     #[command(group(
         ArgGroup::new("organize-filter")
