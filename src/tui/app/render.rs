@@ -132,7 +132,6 @@ impl App {
                 ("p", "play"),
                 ("a", "add to coll"),
                 ("d", "delete"),
-                ("Space", "mark"),
                 ("s", "sort"),
                 ("Tab", "colls"),
                 ("?", "keybinds"),
@@ -207,10 +206,8 @@ impl App {
                 ("P", "play album"),
                 ("a", "add to coll"),
                 ("d", "delete"),
-                ("Space", "mark"),
                 ("o", "open dir"),
                 ("?", "keybinds"),
-                ("Esc", "back"),
             ],
             #[cfg(target_os = "windows")]
             &[
@@ -222,9 +219,7 @@ impl App {
                 ("P", "play album"),
                 ("a", "add to coll"),
                 ("d", "delete"),
-                ("Space", "mark"),
                 ("?", "keybinds"),
-                ("Esc", "back"),
             ],
         );
     }
@@ -256,9 +251,7 @@ impl App {
                 ("o", "open dir"),
                 ("x", "remove"),
                 ("d", "delete"),
-                ("Space", "mark"),
                 ("?", "keybinds"),
-                ("Esc", "back"),
             ],
             #[cfg(target_os = "windows")]
             &[
@@ -269,9 +262,7 @@ impl App {
                 ("P", "play coll"),
                 ("x", "remove"),
                 ("d", "delete"),
-                ("Space", "mark"),
                 ("?", "keybinds"),
-                ("Esc", "back"),
             ],
         );
     }
@@ -317,7 +308,6 @@ impl App {
                 ("Enter", "edit field"),
                 ("Tab", "next"),
                 ("Ctrl+S", "save"),
-                ("Esc", "cancel"),
             ],
         );
     }
