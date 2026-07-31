@@ -251,30 +251,22 @@ impl ImportView {
         match self.step {
             ImportStep::SelectSource => {
                 if self.use_custom_path {
-                    vec![
-                        ("Enter", "scan path"),
-                        ("Tab", "use inbox"),
-                        ("Esc/q", "cancel"),
-                    ]
+                    vec![("Enter", "scan path"), ("Tab", "use inbox")]
                 } else {
-                    vec![
-                        ("Enter", "scan inbox"),
-                        ("Tab", "enter path"),
-                        ("Esc/q", "cancel"),
-                    ]
+                    vec![("Enter", "scan inbox"), ("Tab", "enter path")]
                 }
             }
             ImportStep::Scanning => vec![],
             ImportStep::Review => {
                 if self.groups.is_empty() {
-                    vec![("Esc/q", "back")]
+                    vec![]
                 } else if self.is_in_summary() {
                     if self.pending_full_mb_fetch_count() > 0 {
-                        vec![("wait", "MB data"), ("p", "back"), ("Esc/q", "cancel")]
+                        vec![("wait", "MB data"), ("p", "back")]
                     } else if self.groups.iter().all(|g| g.action == GroupAction::Skip) {
-                        vec![("Enter", "close"), ("p", "back"), ("Esc/q", "cancel")]
+                        vec![("Enter", "close"), ("p", "back")]
                     } else {
-                        vec![("Enter", "import"), ("p", "back"), ("Esc/q", "cancel")]
+                        vec![("Enter", "import"), ("p", "back")]
                     }
                 } else {
                     let cur_failed = self
@@ -302,7 +294,6 @@ impl ImportView {
                         ("L", "loose"),
                         ("F", "skip rest"),
                         ("Enter/n/p", "nav"),
-                        ("Esc/q", "cancel"),
                     ];
                     if cur_failed {
                         hints.insert(0, ("r", "retry MB"));
@@ -315,7 +306,6 @@ impl ImportView {
                 ("2", "keep B"),
                 ("n/p", "nav"),
                 ("Enter", "confirm & import"),
-                ("Esc/q", "cancel"),
             ],
             ImportStep::Importing => vec![],
             ImportStep::Complete => vec![("any key", "done")],

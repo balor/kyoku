@@ -1,8 +1,20 @@
 # Design: external-player playback (`p` / `kyoku play`)
 
-Status: **proposal** — not yet implemented. When accepted, fold the
-normative parts into `kyoku-spec.md` (§6 features, §7 keybindings, §5
-config reference) and delete this note's "spec drift" section.
+Status: **implemented** (branch `feature/external-player`). The normative
+parts should be folded into `kyoku-spec.md` (§6 features, §7 keybindings,
+§5 config reference) — tracked as a follow-up.
+
+Implementation deltas from this proposal:
+- Transport is *derived from the argv template* (any `{files}`/
+  `{files-csv}` placeholder ⇒ FileList) instead of an explicit table
+  field — custom `[player] command`s self-describe.
+- `P` on Library/Collections behaves identically to `p` for now
+  (reserved for enqueue).
+- The optional setup-wizard `[player]` step was skipped (auto-detect
+  covers it); noted here per §7.
+- Detection probes run through a `Probes` trait so tests can fake a
+  machine; spawn E2E uses a fake-player shell script
+  (`tests/play_e2e.rs`).
 
 ## 1. Goal & product framing
 

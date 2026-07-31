@@ -314,6 +314,36 @@ impl CollectionsView {
         if key.code == KeyCode::Char('O') {
             return CollectionsAction::OrganizeAll;
         }
+
+        // p/P — play marked collections (list order) or the one under the
+        // cursor, in each collection's own track order.
+        if keys::is_play(&key) || keys::is_play_scope(&key) {
+            let music_dir = &settings.library.music_dir;
+            let colls: Vec<&CollectionRow> = if !self.selection.is_empty() {
+                self.collections
+                    .iter()
+                    .filter(|c| self.selection.contains(c.id))
+                    .collect()
+            } else {
+                self.collections.get(self.selected).into_iter().collect()
+            };
+            let mut items = Vec::new();
+            for c in &colls {
+                if let Ok(tracks) = crate::core::player::collection_items(conn, music_dir, c.id) {
+                    items.extend(tracks);
+                }
+            }
+            let context = if colls.len() == 1 {
+                colls[0].name.clone()
+            } else {
+                format!("{} collections", colls.len())
+            };
+            self.notice = Some(match crate::core::player::play(settings, items) {
+                Ok(outcome) => crate::core::player::outcome_notice(&outcome, &context),
+                Err(e) => format!("Play failed: {}", e),
+            });
+            return CollectionsAction::None;
+        }
         if keys::is_back(&key) && !self.selection.is_empty() {
             self.selection.clear();
             return CollectionsAction::None;
@@ -1035,6 +1065,49 @@ impl CollectionDetailView {
             }
             return CollectionDetailAction::None;
         }
+        // p — play marked tracks (collection order, collection copy when
+        // present) or the track under the cursor. P — play the whole
+        // collection in collection order.
+        if keys::is_play(&key) {
+            let rows: Vec<TrackRow> = if !self.selection.is_empty() {
+                self.tracks
+                    .iter()
+                    .filter(|t| self.selection.contains(t.id))
+                    .cloned()
+                    .collect()
+            } else {
+                current_track.cloned().into_iter().collect()
+            };
+            let context = if rows.len() == 1 {
+                rows[0].title.clone()
+            } else {
+                format!("{} tracks", rows.len())
+            };
+            let items =
+                crate::core::player::items_from_rows(&rows, Some(&self.collection_paths));
+            self.notice = Some(match crate::core::player::play(settings, items) {
+                Ok(outcome) => crate::core::player::outcome_notice(&outcome, &context),
+                Err(e) => format!("Play failed: {}", e),
+            });
+            return CollectionDetailAction::None;
+        }
+        if keys::is_play_scope(&key) {
+            let music_dir = &settings.library.music_dir;
+            let (items, context) = match &self.collection {
+                Some(coll) => (
+                    crate::core::player::collection_items(conn, music_dir, coll.id)
+                        .unwrap_or_default(),
+                    coll.name.clone(),
+                ),
+                None => (Vec::new(), String::new()),
+            };
+            self.notice = Some(match crate::core::player::play(settings, items) {
+                Ok(outcome) => crate::core::player::outcome_notice(&outcome, &context),
+                Err(e) => format!("Play failed: {}", e),
+            });
+            return CollectionDetailAction::None;
+        }
+
         if key.code == KeyCode::Char('O') {
             return CollectionDetailAction::Organize;
         }

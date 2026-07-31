@@ -129,9 +129,9 @@ impl App {
             &[
                 ("i", "import"),
                 ("O", "organize"),
+                ("p", "play"),
                 ("a", "add to coll"),
                 ("d", "delete"),
-                ("Space", "mark"),
                 ("s", "sort"),
                 ("Tab", "colls"),
                 ("?", "keybinds"),
@@ -165,6 +165,7 @@ impl App {
                 ("n", "new"),
                 ("R", "rename"),
                 ("O", "organize all"),
+                ("p", "play"),
                 ("d", "delete"),
                 ("Tab", "albums"),
                 ("?", "keybinds"),
@@ -201,12 +202,12 @@ impl App {
                 ("R", "rename"),
                 ("O", "organize"),
                 ("C", "fetch cover"),
+                ("p", "play"),
+                ("P", "play album"),
                 ("a", "add to coll"),
                 ("d", "delete"),
-                ("Space", "mark"),
                 ("o", "open dir"),
                 ("?", "keybinds"),
-                ("Esc", "back"),
             ],
             #[cfg(target_os = "windows")]
             &[
@@ -214,11 +215,11 @@ impl App {
                 ("R", "rename"),
                 ("O", "organize"),
                 ("C", "fetch cover"),
+                ("p", "play"),
+                ("P", "play album"),
                 ("a", "add to coll"),
                 ("d", "delete"),
-                ("Space", "mark"),
                 ("?", "keybinds"),
-                ("Esc", "back"),
             ],
         );
     }
@@ -245,23 +246,23 @@ impl App {
                 ("e", "edit"),
                 ("R", "rename"),
                 ("O", "organize"),
+                ("p", "play"),
+                ("P", "play coll"),
                 ("o", "open dir"),
                 ("x", "remove"),
                 ("d", "delete"),
-                ("Space", "mark"),
                 ("?", "keybinds"),
-                ("Esc", "back"),
             ],
             #[cfg(target_os = "windows")]
             &[
                 ("e", "edit"),
                 ("R", "rename"),
                 ("O", "organize"),
+                ("p", "play"),
+                ("P", "play coll"),
                 ("x", "remove"),
                 ("d", "delete"),
-                ("Space", "mark"),
                 ("?", "keybinds"),
-                ("Esc", "back"),
             ],
         );
     }
@@ -307,7 +308,6 @@ impl App {
                 ("Enter", "edit field"),
                 ("Tab", "next"),
                 ("Ctrl+S", "save"),
-                ("Esc", "cancel"),
             ],
         );
     }

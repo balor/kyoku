@@ -26,7 +26,7 @@ None of these are damning critiques of beets — it's a different design point a
 
 ## What kyoku isn't
 
-- Not a music player — no playback.
+- Not a music player — no *built-in* playback; kyoku hands files to your external player (`p` in the TUI, `kyoku play` in the CLI).
 - Not a streaming client.
 - Not a recommendation engine.
 - Not a web app.
@@ -47,6 +47,7 @@ None of these are damning critiques of beets — it's a different design point a
 - **Relative media paths** for music and cover art under `music_dir`, so DB-next-to-media libraries can move without rebasing.
 - **Scriptable CLI** for common automation (`import`, `scan`, `organize`, `info`, `paths`, `setup`).
 - **Preview-first file operations** for moving, copying, deleting, and reorganizing music.
+- **External player hand-off** — play an album, a collection, a track, or a marked selection with one key (`p`/`P`) or with `kyoku play`. Auto-detects mpv, VLC, Celluloid, Haruna, Strawberry, Clementine, Audacious, DeaDBeeF, Amberol, Quod Libet on Linux and IINA, VLC, foobar2000, Swinsian, Cog, Music on macOS; falls back to the OS default handler.
 
 ---
 
@@ -96,11 +97,69 @@ The CLI subcommands (`import`, `scan`, `organize`, …) are there for scripting,
 
 Config lives at `$XDG_CONFIG_HOME/kyoku/config.toml`, or `~/.config/kyoku/config.toml` if that variable isn't set. The database location is configurable during setup. Run `kyoku paths` to see the exact locations on your machine.
 
+To pin a specific music player for `p`/`kyoku play` (otherwise auto-detected), set `[player] command` or, on macOS only, `[player] app` — see [External player hand-off](#external-player-hand-off) for the full auto-detect tables per platform.
+
 ---
 
 ## Tech stack
 
 Rust 2024 · ratatui + crossterm (TUI) · rusqlite bundled (SQLite) · lofty (tag I/O) · reqwest + rustls (HTTP) · strsim (fuzzy matching) · walkdir · inquire (setup prompts). Zero system dependencies; the same source compiles on macOS and Linux without conditional code.
+
+---
+
+## External player hand-off
+
+kyoku is not a player. `p`/`P` in the TUI and `kyoku play` in the CLI hand your selection off to an external player. Player resolution order (see `src/core/player.rs`):
+
+1. **`[player].command`** — an explicit argv template wins. Placeholders: `{playlist}` (path to the generated `.m3u8`, or the single audio file for a one-track play), `{files}` (expands to one argv item per file), `{files-csv}` (comma-joined, for Quod Libet-style players). With no placeholder, the target path(s) are appended as trailing args.
+2. **`[player].app`** (macOS only) — an app bundle launched via `open -a <app> <playlist>`. Ignored on other platforms.
+3. **Auto-detect table** — platform-specific, first match wins. PATH binaries are found via `which`; macOS app bundles via `.app` in `/Applications` or `~/Applications`.
+4. **OS default handler** — never fails: `xdg-open {playlist}` on Linux, `open {playlist}` on macOS.
+
+All default players use the **Playlist** transport (a UTF-8 M3U8 is written to the cache dir as `kyoku-play.m3u8`); Amberol and Quod Libet instead receive the files directly as argv (**FileList** transport). A single-item play always opens the audio file directly — no playlist is written.
+
+### Linux (first match wins)
+
+| # | Player | Binary | Argv | Transport |
+|---|--------|--------|------|-----------|
+| 1 | mpv | `mpv` | `mpv --playlist={playlist}` | Playlist |
+| 2 | VLC | `vlc` | `vlc {playlist}` | Playlist |
+| 3 | Celluloid | `celluloid` | `celluloid {playlist}` | Playlist |
+| 4 | Haruna | `haruna` | `haruna {playlist}` | Playlist |
+| 5 | Strawberry | `strawberry` | `strawberry --load {playlist}` | Playlist |
+| 6 | Clementine | `clementine` | `clementine --load {playlist}` | Playlist |
+| 7 | Audacious | `audacious` | `audacious -E {playlist}` | Playlist |
+| 8 | DeaDBeeF | `deadbeef` | `deadbeef {playlist}` | Playlist |
+| 9 | Amberol | `amberol` | `amberol {files}` | FileList |
+| 10 | Quod Libet | `quodlibet` | `quodlibet --enqueue-files={files-csv}` | FileList |
+| — | (fallback) | — | `xdg-open {playlist}` | Playlist |
+
+### macOS (first match wins)
+
+| # | Player | Detection | Argv | Transport |
+|---|--------|-----------|------|-----------|
+| 1 | mpv | PATH binary `mpv` | `mpv --playlist={playlist}` | Playlist |
+| 2 | IINA | `IINA.app` | `open -a IINA {playlist}` | Playlist |
+| 3 | VLC | `VLC.app` | `open -a VLC {playlist}` | Playlist |
+| 4 | foobar2000 | `foobar2000.app` | `open -a foobar2000 {playlist}` | Playlist |
+| 5 | Swinsian | `Swinsian.app` | `open -a Swinsian {playlist}` | Playlist |
+| 6 | Cog | `Cog.app` | `open -a Cog {playlist}` | Playlist |
+| 7 | Music | `Music.app` | `open -a Music {playlist}` | Playlist |
+| — | (fallback) | — | `open {playlist}` | Playlist |
+
+> **macOS note:** mpv is the only macOS entry that checks a PATH binary (it ships as a CLI tool, often via Homebrew); the rest are `.app` bundles launched through `open -a`. **Music.app** is deliberately last — its "Copy files to Media folder when adding to library" setting can duplicate your files (Apple Support mus3081), so kyoku prefers an existing copy-aware player first.
+
+### Configuration
+
+```toml
+[player]
+# Full argv template (both platforms):
+command = ["mpv", "--playlist={playlist}"]
+# macOS-only app name launched via `open -a` (ignored on Linux):
+# app = "IINA"
+```
+
+Leave both fields unset to use auto-detection.
 
 ---
 

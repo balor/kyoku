@@ -350,6 +350,59 @@ impl LibraryView {
             return LibraryAction::OrganizeAll;
         }
 
+        // p/P — play marked albums (list order) or the album under the
+        // cursor; the [loose] row plays all loose tracks. P is reserved
+        // for enqueue later and currently behaves the same as p.
+        if keys::is_play(&key) || keys::is_play_scope(&key) {
+            let music_dir = &settings.library.music_dir;
+            let album_ids: Vec<i64> = if !self.selection.is_empty() {
+                self.albums
+                    .iter()
+                    .filter(|a| self.selection.contains(a.id))
+                    .map(|a| a.id)
+                    .collect()
+            } else if self.selected < self.albums.len() {
+                vec![self.albums[self.selected].id]
+            } else {
+                Vec::new()
+            };
+
+            let (items, context): (Vec<crate::core::player::PlayItem>, String) =
+                if !album_ids.is_empty() {
+                    let mut items = Vec::new();
+                    let mut names = Vec::new();
+                    for id in &album_ids {
+                        if let Ok(tracks) = crate::core::player::album_items(conn, music_dir, *id)
+                        {
+                            items.extend(tracks);
+                        }
+                        if let Some(a) = self.albums.iter().find(|a| &a.id == id) {
+                            names.push(a.title.clone());
+                        }
+                    }
+                    let context = if names.len() == 1 {
+                        names.pop().unwrap_or_default()
+                    } else {
+                        format!("{} albums", names.len())
+                    };
+                    (items, context)
+                } else {
+                    // [loose] virtual row.
+                    let rows = queries::list_loose_tracks(conn, music_dir, 0, 5000)
+                        .unwrap_or_default();
+                    (
+                        crate::core::player::items_from_rows(&rows, None),
+                        "loose tracks".to_string(),
+                    )
+                };
+
+            self.notice = Some(match crate::core::player::play(settings, items) {
+                Ok(outcome) => crate::core::player::outcome_notice(&outcome, &context),
+                Err(e) => format!("Play failed: {}", e),
+            });
+            return LibraryAction::None;
+        }
+
         if key.code == KeyCode::Char('a') {
             // Add whole album (all tracks of selected album) to a collection
             if self.selected < self.albums.len() {
