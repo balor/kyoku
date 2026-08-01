@@ -30,7 +30,7 @@ None of these are damning critiques of beets — it's a different design point a
 - Not a streaming client.
 - Not a recommendation engine.
 - Not a web app.
-- Not a native Windows GUI (runs on Windows via WSL).
+- Not a native Windows GUI — but the TUI runs natively on Windows (Windows Terminal or WezTerm recommended; the legacy console host works too, minus cover previews).
 - Not automatic — kyoku will never move or rename files without an explicit action from you.
 
 ---
@@ -47,7 +47,7 @@ None of these are damning critiques of beets — it's a different design point a
 - **Relative media paths** for music and cover art under `music_dir`, so DB-next-to-media libraries can move without rebasing.
 - **Scriptable CLI** for common automation (`import`, `scan`, `organize`, `info`, `paths`, `setup`).
 - **Preview-first file operations** for moving, copying, deleting, and reorganizing music.
-- **External player hand-off** — play an album, a collection, a track, or a marked selection with one key (`p`/`P`) or with `kyoku play`. Auto-detects mpv, VLC, Celluloid, Haruna, Strawberry, Clementine, Audacious, DeaDBeeF, Amberol, Quod Libet on Linux and IINA, VLC, foobar2000, Swinsian, Cog, Music on macOS; falls back to the OS default handler.
+- **External player hand-off** — play an album, a collection, a track, or a marked selection with one key (`p`/`P`) or with `kyoku play`. Auto-detects mpv, VLC, Celluloid, Haruna, Strawberry, Clementine, Audacious, DeaDBeeF, Amberol, Quod Libet on Linux, IINA, VLC, foobar2000, Swinsian, Cog, Music on macOS, and mpv, VLC, foobar2000 on Windows; falls back to the OS default handler.
 
 ---
 
@@ -84,6 +84,20 @@ xattr -d com.apple.quarantine ./kyoku
 
 Or use System Settings → Privacy & Security → "Open Anyway".
 
+### Windows binary note
+
+Download `kyoku-<version>-x86_64-pc-windows-msvc.zip` from Releases and put `kyoku.exe` somewhere on your `PATH`. The exe is statically linked (no VC++ redistributable needed) but **not code-signed**, so SmartScreen shows a one-time "Windows protected your PC" prompt on first run — click "More info" → "Run anyway", or unblock after extracting:
+
+```powershell
+Unblock-File .\kyoku.exe
+```
+
+Runs on Windows 10/11. **Windows Terminal** (preinstalled on Windows 11) is the recommended host: full color/Unicode, and album-cover previews render via sixel. WezTerm works great too (iTerm2 protocol). In the legacy console host or IDE-integrated terminals everything works *except* cover previews — kyoku detects the limitation and simply hides the preview slot.
+
+Two platform differences worth knowing: Windows won't move or rename files that are currently open (e.g. playing in your music player), so an organize run may report per-file errors for now-playing files — close the player and re-run. And paths longer than 260 characters still fail on stock Windows; kyoku's binary is `longPathAware`, so enabling `LongPathsEnabled` in the registry (or the "Enable Win32 long paths" group policy) lifts that limit.
+
+Config follows the same XDG convention as the Unix builds: `%USERPROFILE%\.config\kyoku\config.toml` (run `kyoku paths` to see exact locations).
+
 ---
 
 ## Quick start
@@ -113,8 +127,8 @@ kyoku is not a player. `p`/`P` in the TUI and `kyoku play` in the CLI hand your 
 
 1. **`[player].command`** — an explicit argv template wins. Placeholders: `{playlist}` (path to the generated `.m3u8`, or the single audio file for a one-track play), `{files}` (expands to one argv item per file), `{files-csv}` (comma-joined, for Quod Libet-style players). With no placeholder, the target path(s) are appended as trailing args.
 2. **`[player].app`** (macOS only) — an app bundle launched via `open -a <app> <playlist>`. Ignored on other platforms.
-3. **Auto-detect table** — platform-specific, first match wins. PATH binaries are found via `which`; macOS app bundles via `.app` in `/Applications` or `~/Applications`.
-4. **OS default handler** — never fails: `xdg-open {playlist}` on Linux, `open {playlist}` on macOS.
+3. **Auto-detect table** — platform-specific, first match wins. PATH binaries are found via `which` (PATHEXT-aware on Windows); macOS app bundles via `.app` in `/Applications` or `~/Applications`; Windows install-dir probes check `%ProgramFiles%` / `%ProgramFiles(x86)%`.
+4. **OS default handler** — never fails: `xdg-open {playlist}` on Linux, `open {playlist}` on macOS, `explorer.exe {playlist}` on Windows (opens the file association; .m3u8 works if your player registered the extension — set `[player] command` if not).
 
 All default players use the **Playlist** transport (a UTF-8 M3U8 is written to the cache dir as `kyoku-play.m3u8`); Amberol and Quod Libet instead receive the files directly as argv (**FileList** transport). A single-item play always opens the audio file directly — no playlist is written.
 
@@ -149,13 +163,25 @@ All default players use the **Playlist** transport (a UTF-8 M3U8 is written to t
 
 > **macOS note:** mpv is the only macOS entry that checks a PATH binary (it ships as a CLI tool, often via Homebrew); the rest are `.app` bundles launched through `open -a`. **Music.app** is deliberately last — its "Copy files to Media folder when adding to library" setting can duplicate your files (Apple Support mus3081), so kyoku prefers an existing copy-aware player first.
 
+### Windows (first match wins)
+
+| # | Player | Detection | Argv | Transport |
+|---|--------|-----------|------|-----------|
+| 1 | mpv | PATH binary `mpv.exe` (scoop/chocolatey/manual PATH installs) | `mpv --playlist={playlist}` | Playlist |
+| 2 | VLC | PATH binary `vlc.exe` | `vlc {playlist}` | Playlist |
+| 3 | foobar2000 | `%ProgramFiles%\foobar2000\foobar2000.exe` | `<resolved path> {playlist}` | Playlist |
+| 4 | VLC | `%ProgramFiles%\VideoLAN\VLC\vlc.exe` | `<resolved path> {playlist}` | Playlist |
+| — | (fallback) | — | `explorer.exe {playlist}` | Playlist |
+
+> **Windows note:** most Windows players never add themselves to PATH, so detection probes the well-known install dirs in addition to PATH. If yours lives elsewhere, set `[player] command` — a full argv template (point at the exe directly; `.bat`/`.cmd` wrappers need `cmd /c`).
+
 ### Configuration
 
 ```toml
 [player]
-# Full argv template (both platforms):
+# Full argv template (all platforms):
 command = ["mpv", "--playlist={playlist}"]
-# macOS-only app name launched via `open -a` (ignored on Linux):
+# macOS-only app name launched via `open -a` (ignored on Linux/Windows):
 # app = "IINA"
 ```
 

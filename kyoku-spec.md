@@ -23,12 +23,19 @@ The library state is persisted in SQLite, and **all file operations (rename, mov
 - Not a streaming service client
 - Not a recommendation engine (planned for v2 via OpenAI-compatible API)
 - Not a web application
-- Not a native Windows GUI app (runs on Windows via WSL)
+- Not a native Windows GUI app (native Windows runs are terminal-based, like everywhere else)
 
 ### Platform Support
 - **macOS** — primary development target
 - **Linux** — full support (native)
-- **Windows** — supported via WSL (Windows Subsystem for Linux)
+- **Windows** — full support (native, Windows 10/11; Windows Terminal or WezTerm recommended; legacy conhost works minus cover previews). WSL continues to work but is no longer the recommended path.
+
+Windows specifics (implemented 2026-08; see `doc/design/2026-08-01-windows-support.md`):
+- Player auto-detect probes PATH (PATHEXT-aware) and `%ProgramFiles%` install dirs; default handler is `explorer.exe`.
+- Path sanitization additionally dodges reserved device names (`NUL`, `CON`, `AUX`, `COM1–9`, `LPT1–9`) on all platforms, so libraries stay NTFS-movable.
+- Collision detection in organize/delete is case-folded on Windows (NTFS is case-insensitive by default).
+- Windows denies move/rename/delete of files held open by players; per-file errors surface in organize/delete results.
+- The release exe embeds a `longPathAware` manifest; >260-char paths additionally require the user's `LongPathsEnabled` registry/GPO opt-in.
 
 The current Rust stack (`ratatui`/`crossterm`, `rusqlite` bundled, `lofty`, `reqwest` + rustls) has zero required system libraries and compiles on macOS and Linux. Crossterm handles terminal abstraction. Filesystem paths use `std::path::Path` throughout (never hardcoded separators).
 
@@ -253,11 +260,11 @@ CREATE INDEX IF NOT EXISTS idx_collection_tracks_track ON collection_tracks(trac
 
 Config deliberately uses an XDG-style path on every platform:
 
-| | Linux / WSL | macOS |
-|---|---|---|
-| Config | `~/.config/kyoku/config.toml` | `~/.config/kyoku/config.toml` |
-| Database default | `~/.local/share/kyoku/library.db` | `~/Library/Application Support/kyoku/library.db` |
-| Cache | `~/.cache/kyoku/` | `~/Library/Caches/kyoku/` |
+| | Linux / WSL | macOS | Windows |
+|---|---|---|---|
+| Config | `~/.config/kyoku/config.toml` | `~/.config/kyoku/config.toml` | `%USERPROFILE%\.config\kyoku\config.toml` |
+| Database default | `~/.local/share/kyoku/library.db` | `~/Library/Application Support/kyoku/library.db` | `%APPDATA%\kyoku\library.db` |
+| Cache | `~/.cache/kyoku/` | `~/Library/Caches/kyoku/` | `%LOCALAPPDATA%\kyoku\` |
 
 `$XDG_CONFIG_HOME` overrides the config root. The database location is controlled by `[library] data_dir`; its default comes from the platform data directory. Cache uses the platform cache directory.
 
@@ -909,7 +916,7 @@ This is a first-class concern, not an afterthought. Every layer of the applicati
 - Use `OsString`/`OsStr` for filesystem operations, convert to/from UTF-8 only at display boundaries.
 - macOS uses NFD normalization for filenames; Linux typically uses NFC. Preserve original path bytes/strings when operating; add explicit NFC/NFD normalization only if comparison bugs surface.
 - Japanese filenames may contain fullwidth characters (Ａ vs A); preserve them in tags and filenames unless a future normalization feature is explicitly added.
-- **WSL note**: When music files live on a Windows NTFS mount (`/mnt/c/...`), filenames are case-insensitive and certain characters (`:`, `*`, `?`, etc.) are forbidden. The sanitization rules in the path template engine (Section 7) already handle this. The agent should test path operations against both native Linux paths and `/mnt/c/` paths.
+- **WSL note**: When music files live on a Windows NTFS mount (`/mnt/c/...`), filenames are case-insensitive and certain characters (`:`, `*`, `?`, etc.) are forbidden. The sanitization rules in the path template engine (Section 7) already handle this (including Windows reserved device names, dodged on all platforms). The same rules apply when running natively on Windows; the path test battery should treat NTFS semantics (case-insensitivity, reserved names, no trailing dots/spaces) as a first-class case regardless of host OS.
 - Test filenames with characters from: Japanese (hiragana/katakana/kanji), Chinese (simplified/traditional), Korean (hangul), Polish (ą, ć, ę, ł, ń, ó, ś, ź, ż), Nordic (å, ä, ö, ø), and mixed scripts.
 
 ### Search
