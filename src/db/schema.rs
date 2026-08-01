@@ -358,36 +358,55 @@ mod tests {
         apply_v5(&conn).unwrap();
         apply_v6(&conn).unwrap();
 
+        // abs()/abs_str() map these Unix-shaped literals onto real
+        // absolute paths per platform — see core::paths::plat for why
+        // (a bare leading `/` is not absolute on Windows).
+        use crate::core::paths::plat::{abs, abs_str, db};
+        let p_track_a = abs_str("/home/user/Music/Artist/01.mp3");
+        let p_track_b = abs_str("/elsewhere/inbox/02.mp3");
+        let p_cover = abs_str("/home/user/Music/Artist/cover.jpg");
+        let p_coll = abs_str("/home/user/Music/Collections/Mix/01.mp3");
+        let p_orphan_a = abs_str("/home/user/Music/Old/x.mp3");
+        let p_orphan_b = abs_str("/outside/y.mp3");
+
         conn.execute(
-            "INSERT INTO tracks (title, file_path, file_format, disc_number, tag_status)
-             VALUES ('A', '/home/user/Music/Artist/01.mp3', 'mp3', 1, 'unmatched'),
-                    ('B', '/elsewhere/inbox/02.mp3', 'mp3', 1, 'unmatched')",
+            &format!(
+                "INSERT INTO tracks (title, file_path, file_format, disc_number, tag_status)
+                 VALUES ('A', '{p_track_a}', 'mp3', 1, 'unmatched'),
+                        ('B', '{p_track_b}', 'mp3', 1, 'unmatched')"
+            ),
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO albums (title, cover_art_path)
-             VALUES ('Album', '/home/user/Music/Artist/cover.jpg')",
+            &format!(
+                "INSERT INTO albums (title, cover_art_path)
+                 VALUES ('Album', '{p_cover}')"
+            ),
             [],
         )
         .unwrap();
         conn.execute("INSERT INTO collections (name) VALUES ('Mix')", [])
             .unwrap();
         conn.execute(
-            "INSERT INTO collection_tracks (collection_id, track_id, collection_file_path)
-             VALUES (1, 1, '/home/user/Music/Collections/Mix/01.mp3')",
+            &format!(
+                "INSERT INTO collection_tracks (collection_id, track_id, collection_file_path)
+                 VALUES (1, 1, '{p_coll}')"
+            ),
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO orphaned_files (file_path, reason)
-             VALUES ('/home/user/Music/Old/x.mp3', 'replaced'),
-                    ('/outside/y.mp3', 'replaced')",
+            &format!(
+                "INSERT INTO orphaned_files (file_path, reason)
+                 VALUES ('{p_orphan_a}', 'replaced'),
+                        ('{p_orphan_b}', 'replaced')"
+            ),
             [],
         )
         .unwrap();
 
-        apply_v7(&conn, Path::new("/home/user/Music")).unwrap();
+        apply_v7(&conn, &abs("/home/user/Music")).unwrap();
 
         let paths: Vec<String> = conn
             .prepare("SELECT file_path FROM tracks ORDER BY title")
@@ -396,12 +415,12 @@ mod tests {
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-        assert_eq!(paths, vec!["Artist/01.mp3", "/elsewhere/inbox/02.mp3"]);
+        assert_eq!(paths, vec![db("Artist/01.mp3"), p_track_b]);
 
         let cover: String = conn
             .query_row("SELECT cover_art_path FROM albums", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(cover, "Artist/cover.jpg");
+        assert_eq!(cover, db("Artist/cover.jpg"));
 
         let collection_copy: String = conn
             .query_row(
@@ -410,7 +429,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(collection_copy, "Collections/Mix/01.mp3");
+        assert_eq!(collection_copy, db("Collections/Mix/01.mp3"));
 
         let orphans: Vec<String> = conn
             .prepare("SELECT file_path FROM orphaned_files ORDER BY id")
@@ -419,28 +438,28 @@ mod tests {
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-        assert_eq!(orphans, vec!["Old/x.mp3", "/outside/y.mp3"]);
+        assert_eq!(orphans, vec![db("Old/x.mp3"), p_orphan_b]);
 
-        let renamed = Path::new("/mnt/renamed/Music");
+        let renamed = abs("/mnt/renamed/Music");
         assert_eq!(
-            crate::core::paths::from_db_path(&paths[0], renamed),
-            Path::new("/mnt/renamed/Music/Artist/01.mp3")
+            crate::core::paths::from_db_path(&paths[0], &renamed),
+            abs("/mnt/renamed/Music/Artist/01.mp3")
         );
         assert_eq!(
-            crate::core::paths::from_db_path(&cover, renamed),
-            Path::new("/mnt/renamed/Music/Artist/cover.jpg")
+            crate::core::paths::from_db_path(&cover, &renamed),
+            abs("/mnt/renamed/Music/Artist/cover.jpg")
         );
         assert_eq!(
-            crate::core::paths::from_db_path(&collection_copy, renamed),
-            Path::new("/mnt/renamed/Music/Collections/Mix/01.mp3")
+            crate::core::paths::from_db_path(&collection_copy, &renamed),
+            abs("/mnt/renamed/Music/Collections/Mix/01.mp3")
         );
         assert_eq!(
-            crate::core::paths::from_db_path(&orphans[0], renamed),
-            Path::new("/mnt/renamed/Music/Old/x.mp3")
+            crate::core::paths::from_db_path(&orphans[0], &renamed),
+            abs("/mnt/renamed/Music/Old/x.mp3")
         );
         assert_eq!(
-            crate::core::paths::from_db_path(&orphans[1], renamed),
-            Path::new("/outside/y.mp3")
+            crate::core::paths::from_db_path(&orphans[1], &renamed),
+            abs("/outside/y.mp3")
         );
     }
 }

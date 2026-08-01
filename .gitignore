@@ -16,3 +16,4 @@ Thumbs.db
 
 # Claude
 /.claude/settings.local.json
+.pi-subagents/

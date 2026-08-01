@@ -987,45 +987,59 @@ mod tests {
 
     // ── Argv rendering ──────────────────────────────────────────────
 
+    // Path display follows the host separator, so expectations use the
+    // shared plat helpers (see core::paths::plat) — a unix literal like
+    // "/a.flac" displays as "\a.flac" on Windows.
+    use crate::core::paths::plat::{abs, abs_str};
+
     #[test]
     fn argv_playlist_placeholder_substituted() {
         let tpl = vec!["mpv".to_string(), "--playlist={playlist}".to_string()];
-        let argv = render_argv(&tpl, &PlayTarget::Playlist(PathBuf::from("/tmp/x.m3u8")));
-        assert_eq!(argv, vec!["mpv", "--playlist=/tmp/x.m3u8"]);
+        let argv = render_argv(&tpl, &PlayTarget::Playlist(abs("/tmp/x.m3u8")));
+        assert_eq!(
+            argv,
+            vec![
+                "mpv".to_string(),
+                format!("--playlist={}", abs_str("/tmp/x.m3u8"))
+            ]
+        );
     }
 
     #[test]
     fn argv_no_placeholder_appends_target() {
         let tpl = vec!["vlc".to_string()];
-        let argv = render_argv(&tpl, &PlayTarget::SingleFile(PathBuf::from("/a.flac")));
-        assert_eq!(argv, vec!["vlc", "/a.flac"]);
+        let argv = render_argv(&tpl, &PlayTarget::SingleFile(abs("/a.flac")));
+        assert_eq!(argv, vec!["vlc".to_string(), abs_str("/a.flac")]);
 
         let tpl = vec!["amberol".to_string()];
-        let argv = render_argv(
-            &tpl,
-            &PlayTarget::FileList(vec![PathBuf::from("/a"), PathBuf::from("/b")]),
+        let argv = render_argv(&tpl, &PlayTarget::FileList(vec![abs("/a"), abs("/b")]));
+        assert_eq!(
+            argv,
+            vec!["amberol".to_string(), abs_str("/a"), abs_str("/b")]
         );
-        assert_eq!(argv, vec!["amberol", "/a", "/b"]);
     }
 
     #[test]
     fn argv_files_and_files_csv_expansion() {
         let tpl = vec!["amberol".to_string(), "{files}".to_string()];
-        let argv = render_argv(
-            &tpl,
-            &PlayTarget::FileList(vec![PathBuf::from("/a"), PathBuf::from("/b")]),
+        let argv = render_argv(&tpl, &PlayTarget::FileList(vec![abs("/a"), abs("/b")]));
+        assert_eq!(
+            argv,
+            vec!["amberol".to_string(), abs_str("/a"), abs_str("/b")]
         );
-        assert_eq!(argv, vec!["amberol", "/a", "/b"]);
 
         let tpl = vec![
             "quodlibet".to_string(),
             "--enqueue-files={files-csv}".to_string(),
         ];
-        let argv = render_argv(
-            &tpl,
-            &PlayTarget::FileList(vec![PathBuf::from("/a"), PathBuf::from("/b")]),
+        let argv = render_argv(&tpl, &PlayTarget::FileList(vec![abs("/a"), abs("/b")]));
+        assert_eq!(
+            argv,
+            vec![
+                "quodlibet".to_string(),
+                format!("--enqueue-files={},{}", abs_str("/a"), abs_str("/b"))
+            ]
         );
-        assert_eq!(argv, vec!["quodlibet", "--enqueue-files=/a,/b"]);
     }
 
     // ── Playlist writer ─────────────────────────────────────────────
@@ -1035,13 +1049,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let items = vec![
             PlayItem {
-                path: PathBuf::from("/music/ヨルシカ/靴の花火.flac"),
+                path: abs("/music/ヨルシカ/靴の花火.flac"),
                 title: "靴の花火".to_string(),
                 artist: Some("ヨルシカ".to_string()),
                 duration_ms: Some(183_400),
             },
             PlayItem {
-                path: PathBuf::from("/music/x.mp3"),
+                path: abs("/music/x.mp3"),
                 title: "NoDuration".to_string(),
                 artist: None,
                 duration_ms: None,
@@ -1051,10 +1065,10 @@ mod tests {
         assert!(path.ends_with("kyoku-play.m3u8"));
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.starts_with("#EXTM3U\n"));
-        assert!(
-            content.contains("#EXTINF:183,ヨルシカ - 靴の花火\n/music/ヨルシカ/靴の花火.flac\n")
-        );
-        assert!(content.contains("#EXTINF:-1,NoDuration\n/music/x.mp3\n"));
+        let expected_a = abs_str("/music/ヨルシカ/靴の花火.flac");
+        let expected_b = abs_str("/music/x.mp3");
+        assert!(content.contains(&format!("#EXTINF:183,ヨルシカ - 靴の花火\n{expected_a}\n")));
+        assert!(content.contains(&format!("#EXTINF:-1,NoDuration\n{expected_b}\n")));
     }
 
     // ── prepare / filter ────────────────────────────────────────────
