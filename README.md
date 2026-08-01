@@ -29,8 +29,7 @@ None of these are damning critiques of beets — it's a different design point a
 - Not a music player — no *built-in* playback; kyoku hands files to your external player (`p` in the TUI, `kyoku play` in the CLI).
 - Not a streaming client.
 - Not a recommendation engine.
-- Not a web app.
-- Not a native Windows GUI — but the TUI runs natively on Windows (Windows Terminal or WezTerm recommended; the legacy console host works too, minus cover previews).
+- Not a web app nor native GUI app - kyoku lives in terminal.
 - Not automatic — kyoku will never move or rename files without an explicit action from you.
 
 ---
