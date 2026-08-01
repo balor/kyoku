@@ -1446,3 +1446,26 @@ fn in_place_track_keeps_slot_regardless_of_row_order() {
 }
 
 // Deletion (DeletePlan/apply_delete_plan) tests live in `pruner_tests.rs`.
+
+// ── Case-insensitive occupied-set (Windows) ─────────────────────
+// Runs only on Windows hosts (CI's windows-latest job): `folded` is a
+// no-op elsewhere, where case-folding would be a bug.
+
+#[cfg(windows)]
+#[test]
+fn occupied_set_matches_case_folded_spellings() {
+    let mut set = std::collections::HashSet::new();
+    set_insert(&mut set, "/music/Artist/Track.flac".to_string());
+    assert!(set_has(&set, "/music/artist/track.FLAC"));
+    assert!(set_has(&set, "/MUSIC/ARTIST/TRACK.FLAC"));
+    assert!(!set_has(&set, "/music/artist/other.flac"));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn occupied_set_is_case_sensitive_off_windows() {
+    let mut set = std::collections::HashSet::new();
+    set_insert(&mut set, "/music/Artist/Track.flac".to_string());
+    assert!(set_has(&set, "/music/Artist/Track.flac"));
+    assert!(!set_has(&set, "/music/artist/track.flac"));
+}

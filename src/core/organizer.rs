@@ -611,9 +611,9 @@ pub fn apply_organize(
     // mirroring `mark_occupied`.
     let mut orphan_exempt: HashSet<String> = HashSet::new();
     for e in &plan.file_orphans {
-        orphan_exempt.insert(e.path.display().to_string());
+        set_insert(&mut orphan_exempt, e.path.display().to_string());
         if let Ok(canon) = std::fs::canonicalize(&e.path) {
-            orphan_exempt.insert(canon.display().to_string());
+            set_insert(&mut orphan_exempt, canon.display().to_string());
         }
     }
     let same_file = |a: &Path, b: &Path| -> bool {
@@ -623,9 +623,9 @@ pub fn apply_organize(
         )
     };
     let path_in = |p: &Path, set: &HashSet<String>| -> bool {
-        set.contains(&p.display().to_string())
+        set_has(set, &p.display().to_string())
             || std::fs::canonicalize(p)
-                .map(|c| set.contains(&c.display().to_string()))
+                .map(|c| set_has(set, &c.display().to_string()))
                 .unwrap_or(false)
     };
 
@@ -842,10 +842,10 @@ pub fn apply_organize(
         let orphan_canon = std::fs::canonicalize(&entry.path)
             .ok()
             .map(|p| p.display().to_string());
-        let replaced_by_move = occupied.contains(&orphan_literal)
+        let replaced_by_move = set_has(&occupied, &orphan_literal)
             || orphan_canon
                 .as_ref()
-                .map(|s| occupied.contains(s))
+                .map(|s| set_has(&occupied, s))
                 .unwrap_or(false);
 
         let unlink_ok = if replaced_by_move {
@@ -905,10 +905,43 @@ pub fn apply_organize(
 /// filenames to NFD while tags/DB may hold NFC, and `canonicalize` has
 /// bitten us before on macOS path matching.
 fn mark_occupied(p: &Path, occupied: &mut HashSet<String>) {
-    occupied.insert(p.display().to_string());
+    set_insert(occupied, p.display().to_string());
     if let Ok(canon) = std::fs::canonicalize(p) {
-        occupied.insert(canon.display().to_string());
+        set_insert(occupied, canon.display().to_string());
     }
+}
+
+/// Case-folded spelling of a path for occupied-set membership — only on
+/// Windows, where NTFS is case-insensitive by default and two planned
+/// destinations like `Track.mp3`/`track.mp3` that don't exist yet would
+/// otherwise both pass the "slot free" check and collide at write time.
+/// Deliberately NOT folded on case-sensitive filesystems (Linux ext4),
+/// where "A.mp3" and "a.mp3" legitimately coexist and folding would
+/// report phantom collisions.
+#[cfg(windows)]
+fn folded(s: &str) -> Option<String> {
+    Some(s.to_lowercase())
+}
+
+/// Case-folding is a Windows-only concept; see [`folded`].
+#[cfg(not(windows))]
+fn folded(_: &str) -> Option<String> {
+    None
+}
+
+/// Occupied-set insert that also records the case-folded spelling on
+/// Windows (see [`folded`]).
+fn set_insert(set: &mut HashSet<String>, s: String) {
+    if let Some(f) = folded(&s) {
+        set.insert(f);
+    }
+    set.insert(s);
+}
+
+/// Occupied-set membership that also matches the case-folded spelling
+/// on Windows (see [`folded`]).
+fn set_has(set: &HashSet<String>, s: &str) -> bool {
+    set.contains(s) || folded(s).is_some_and(|f| set.contains(&f))
 }
 
 fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
