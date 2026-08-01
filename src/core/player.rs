@@ -142,8 +142,8 @@ pub fn collection_items(
     // would also mean "unlimited" in SQLite, but an explicit large
     // constant is clearer than relying on that.)
     let rows = queries::get_collection_tracks(conn, music_dir, collection_id, 0, 1_000_000)?;
-    let copies = queries::get_collection_file_paths(conn, music_dir, collection_id)
-        .unwrap_or_default();
+    let copies =
+        queries::get_collection_file_paths(conn, music_dir, collection_id).unwrap_or_default();
     Ok(items_from_rows(&rows, Some(&copies)))
 }
 
@@ -175,7 +175,12 @@ pub fn write_playlist(items: &[PlayItem], cache_dir: &Path) -> Result<PathBuf> {
         };
         // EXTINF is a single-line field — strip stray newlines defensively.
         let display = display.replace(['\n', '\r'], " ");
-        out.push_str(&format!("#EXTINF:{},{}\n{}\n", secs, display, item.path.display()));
+        out.push_str(&format!(
+            "#EXTINF:{},{}\n{}\n",
+            secs,
+            display,
+            item.path.display()
+        ));
     }
     std::fs::write(&path, out)?;
     Ok(path)
@@ -187,6 +192,7 @@ pub fn write_playlist(items: &[PlayItem], cache_dir: &Path) -> Result<PathBuf> {
 pub enum Os {
     Linux,
     MacOS,
+    Windows,
 }
 
 /// Platform probes behind a trait so tests can fake a machine.
@@ -195,6 +201,13 @@ pub trait Probes {
     fn which(&self, bin: &str) -> bool;
     /// `<app>.app` present in /Applications or ~/Applications.
     fn app_exists(&self, app: &str) -> bool;
+    /// Windows only: `<ProgramFiles* >\<rel>` exists as a file; returns
+    /// the absolute path to use as argv[0]. Never called for bins/apps —
+    /// and never on Unix (the default keeps fakes tiny).
+    fn program_file(&self, rel: &str) -> Option<PathBuf> {
+        let _ = rel;
+        None
+    }
     fn os(&self) -> Os;
 }
 
@@ -205,10 +218,17 @@ impl Probes for RealProbes {
         let Some(path_var) = std::env::var_os("PATH") else {
             return false;
         };
+        let names = bin_candidates(bin);
         std::env::split_paths(&path_var).any(|dir| {
-            let p = dir.join(bin);
-            p.is_file() && is_executable(&p)
+            names.iter().any(|n| {
+                let p = dir.join(n);
+                p.is_file() && is_executable(&p)
+            })
         })
+    }
+
+    fn program_file(&self, rel: &str) -> Option<PathBuf> {
+        windows_program_file(rel)
     }
 
     fn app_exists(&self, app: &str) -> bool {
@@ -224,10 +244,65 @@ impl Probes for RealProbes {
     fn os(&self) -> Os {
         if cfg!(target_os = "macos") {
             Os::MacOS
+        } else if cfg!(target_os = "windows") {
+            Os::Windows
         } else {
             Os::Linux
         }
     }
+}
+
+/// Names to probe on PATH. Windows stores binaries with an extension
+/// from `%PATHEXT%` (`mpv.exe`, `rg.bat`, …), so a bare `"mpv"` probe
+/// would never match; Unix stores the bare name.
+fn bin_candidates(bin: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        pathext_candidates(bin, std::env::var("PATHEXT").ok().as_deref())
+    }
+    #[cfg(not(windows))]
+    {
+        vec![bin.to_string()]
+    }
+}
+
+/// Expand `bin` with every extension from a PATHEXT-style value. Pure
+/// and target-independent so the Windows lookup shape is tested on any
+/// host (NTFS is case-insensitive, so lowercased extensions still hit).
+#[cfg(any(windows, test))]
+fn pathext_candidates(bin: &str, pathext: Option<&str>) -> Vec<String> {
+    // Already carries an extension — probe it as-is.
+    if Path::new(bin).extension().is_some() {
+        return vec![bin.to_string()];
+    }
+    let mut out = vec![bin.to_string()];
+    let pathext = pathext.unwrap_or(".COM;.EXE;.BAT;.CMD");
+    for ext in pathext.split(';') {
+        let ext = ext.trim();
+        if !ext.is_empty() {
+            out.push(format!("{bin}{}", ext.to_lowercase()));
+        }
+    }
+    out
+}
+
+/// Probe the well-known Windows install roots (%ProgramFiles%,
+/// %ProgramFiles(x86)%, %ProgramW6432%) for a relative exe path.
+/// Most popular Windows players never touch PATH, so PATH-probing
+/// alone would miss them.
+#[cfg(windows)]
+fn windows_program_file(rel: &str) -> Option<PathBuf> {
+    ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(|root| Path::new(&root).join(rel))
+        .find(|p| p.is_file())
+}
+
+/// Unix never probes Windows install dirs.
+#[cfg(not(windows))]
+fn windows_program_file(_rel: &str) -> Option<PathBuf> {
+    None
 }
 
 #[cfg(unix)]
@@ -247,6 +322,10 @@ struct DetectEntry {
     label: &'static str,
     bin: Option<&'static str>,
     app: Option<&'static str>,
+    /// Windows install-dir probe: path relative to %ProgramFiles% /
+    /// %ProgramFiles(x86)%. On hit, `{exe}` in argv is substituted with
+    /// the resolved absolute path.
+    program_files: Option<&'static str>,
     argv: &'static [&'static str],
 }
 
@@ -257,48 +336,56 @@ const LINUX_PLAYERS: &[DetectEntry] = &[
         label: "mpv",
         bin: Some("mpv"),
         app: None,
+        program_files: None,
         argv: &["mpv", "--playlist={playlist}"],
     },
     DetectEntry {
         label: "VLC",
         bin: Some("vlc"),
         app: None,
+        program_files: None,
         argv: &["vlc", "{playlist}"],
     },
     DetectEntry {
         label: "Celluloid",
         bin: Some("celluloid"),
         app: None,
+        program_files: None,
         argv: &["celluloid", "{playlist}"],
     },
     DetectEntry {
         label: "Haruna",
         bin: Some("haruna"),
         app: None,
+        program_files: None,
         argv: &["haruna", "{playlist}"],
     },
     DetectEntry {
         label: "Strawberry",
         bin: Some("strawberry"),
         app: None,
+        program_files: None,
         argv: &["strawberry", "--load", "{playlist}"],
     },
     DetectEntry {
         label: "Clementine",
         bin: Some("clementine"),
         app: None,
+        program_files: None,
         argv: &["clementine", "--load", "{playlist}"],
     },
     DetectEntry {
         label: "Audacious",
         bin: Some("audacious"),
         app: None,
+        program_files: None,
         argv: &["audacious", "-E", "{playlist}"],
     },
     DetectEntry {
         label: "DeaDBeeF",
         bin: Some("deadbeef"),
         app: None,
+        program_files: None,
         argv: &["deadbeef", "{playlist}"],
     },
     // File-list transport entries (no playlist-file support).
@@ -306,12 +393,14 @@ const LINUX_PLAYERS: &[DetectEntry] = &[
         label: "Amberol",
         bin: Some("amberol"),
         app: None,
+        program_files: None,
         argv: &["amberol", "{files}"],
     },
     DetectEntry {
         label: "Quod Libet",
         bin: Some("quodlibet"),
         app: None,
+        program_files: None,
         argv: &["quodlibet", "--enqueue-files={files-csv}"],
     },
 ];
@@ -325,43 +414,86 @@ const MAC_PLAYERS: &[DetectEntry] = &[
         label: "mpv",
         bin: Some("mpv"),
         app: None,
+        program_files: None,
         argv: &["mpv", "--playlist={playlist}"],
     },
     DetectEntry {
         label: "IINA",
         bin: None,
         app: Some("IINA"),
+        program_files: None,
         argv: &["open", "-a", "IINA", "{playlist}"],
     },
     DetectEntry {
         label: "VLC",
         bin: None,
         app: Some("VLC"),
+        program_files: None,
         argv: &["open", "-a", "VLC", "{playlist}"],
     },
     DetectEntry {
         label: "foobar2000",
         bin: None,
         app: Some("foobar2000"),
+        program_files: None,
         argv: &["open", "-a", "foobar2000", "{playlist}"],
     },
     DetectEntry {
         label: "Swinsian",
         bin: None,
         app: Some("Swinsian"),
+        program_files: None,
         argv: &["open", "-a", "Swinsian", "{playlist}"],
     },
     DetectEntry {
         label: "Cog",
         bin: None,
         app: Some("Cog"),
+        program_files: None,
         argv: &["open", "-a", "Cog", "{playlist}"],
     },
     DetectEntry {
         label: "Music",
         bin: None,
         app: Some("Music"),
+        program_files: None,
         argv: &["open", "-a", "Music", "{playlist}"],
+    },
+];
+
+/// Windows auto-detect table, first hit wins. PATH binaries first
+/// (scoop/chocolatey installs put mpv on PATH; stock installers don't),
+/// then well-known install dirs under %ProgramFiles% — that's where the
+/// bulk of popular Windows players live. Verified against each player's
+/// CLI docs: fb2k loads .m3u8 via a plain path arg; VLC likewise.
+const WINDOWS_PLAYERS: &[DetectEntry] = &[
+    DetectEntry {
+        label: "mpv",
+        bin: Some("mpv"),
+        app: None,
+        program_files: None,
+        argv: &["mpv", "--playlist={playlist}"],
+    },
+    DetectEntry {
+        label: "VLC",
+        bin: Some("vlc"),
+        app: None,
+        program_files: None,
+        argv: &["vlc", "{playlist}"],
+    },
+    DetectEntry {
+        label: "foobar2000",
+        bin: None,
+        app: None,
+        program_files: Some("foobar2000\\foobar2000.exe"),
+        argv: &["{exe}", "{playlist}"],
+    },
+    DetectEntry {
+        label: "VLC",
+        bin: None,
+        app: None,
+        program_files: Some("VideoLAN\\VLC\\vlc.exe"),
+        argv: &["{exe}", "{playlist}"],
     },
 ];
 
@@ -406,7 +538,11 @@ pub fn resolve_player(settings: &Settings, probes: &dyn Probes) -> ResolvedPlaye
 
     // 2. macOS-only configured app.
     if probes.os() == Os::MacOS
-        && let Some(app) = settings.player.app.as_ref().filter(|a| !a.trim().is_empty())
+        && let Some(app) = settings
+            .player
+            .app
+            .as_ref()
+            .filter(|a| !a.trim().is_empty())
     {
         return mac_app_entry(app.trim());
     }
@@ -415,15 +551,26 @@ pub fn resolve_player(settings: &Settings, probes: &dyn Probes) -> ResolvedPlaye
     let table: &[DetectEntry] = match probes.os() {
         Os::Linux => LINUX_PLAYERS,
         Os::MacOS => MAC_PLAYERS,
+        Os::Windows => WINDOWS_PLAYERS,
     };
     for entry in table {
-        let hit = match (entry.bin, entry.app) {
-            (Some(bin), _) => probes.which(bin),
-            (None, Some(app)) => probes.app_exists(app),
-            _ => false,
+        // Outer Option = detected at all; inner = resolved exe path for
+        // install-dir probes (substituted for `{exe}` in argv).
+        let exe: Option<Option<PathBuf>> = match (entry.bin, entry.app, entry.program_files) {
+            (Some(bin), _, _) => probes.which(bin).then_some(None),
+            (None, Some(app), _) => probes.app_exists(app).then_some(None),
+            (None, None, Some(rel)) => probes.program_file(rel).map(Some),
+            _ => None,
         };
-        if hit {
-            let argv: Vec<String> = entry.argv.iter().map(|s| s.to_string()).collect();
+        if let Some(exe) = exe {
+            let argv: Vec<String> = entry
+                .argv
+                .iter()
+                .map(|s| match &exe {
+                    Some(e) => s.replace("{exe}", &e.display().to_string()),
+                    None => s.to_string(),
+                })
+                .collect();
             return ResolvedPlayer {
                 label: entry.label.to_string(),
                 transport: transport_for(&argv),
@@ -433,6 +580,10 @@ pub fn resolve_player(settings: &Settings, probes: &dyn Probes) -> ResolvedPlaye
     }
 
     // 4. OS default handler.
+    // Windows: `explorer.exe <target>` opens the Shell association (works
+    // for .m3u8 too). Chosen over `cmd /c start ""` deliberately: it's
+    // spawn-success-detectable, doesn't flash a console window, and dodges
+    // `start`'s first-quoted-arg-is-a-title quoting trap.
     match probes.os() {
         Os::Linux => ResolvedPlayer {
             label: "xdg-open (default handler)".to_string(),
@@ -442,6 +593,11 @@ pub fn resolve_player(settings: &Settings, probes: &dyn Probes) -> ResolvedPlaye
         Os::MacOS => ResolvedPlayer {
             label: "open (default handler)".to_string(),
             argv: vec!["open".to_string(), "{playlist}".to_string()],
+            transport: Transport::Playlist,
+        },
+        Os::Windows => ResolvedPlayer {
+            label: "explorer (default handler)".to_string(),
+            argv: vec!["explorer.exe".to_string(), "{playlist}".to_string()],
             transport: Transport::Playlist,
         },
     }
@@ -502,9 +658,7 @@ fn filter_playable(items: Vec<PlayItem>, csv: bool) -> (Vec<PlayItem>, usize) {
     let mut skipped = 0usize;
     for item in items {
         let s = item.path.display().to_string();
-        let bad = !item.path.exists()
-            || s.contains('\n')
-            || (csv && s.contains(','));
+        let bad = !item.path.exists() || s.contains('\n') || (csv && s.contains(','));
         if bad {
             skipped += 1;
         } else {
@@ -526,10 +680,7 @@ pub fn prepare_with_probes(
     probes: &dyn Probes,
 ) -> Result<PlayOutcome> {
     let player = resolve_player(settings, probes);
-    let csv = player
-        .argv
-        .iter()
-        .any(|a| a.contains("{files-csv}"));
+    let csv = player.argv.iter().any(|a| a.contains("{files-csv}"));
     let (playable, skipped_missing) = filter_playable(items, csv);
     if playable.is_empty() {
         return Err(KyokuError::External(format!(
@@ -622,6 +773,7 @@ mod tests {
     struct FakeProbes {
         bins: HashSet<&'static str>,
         apps: HashSet<&'static str>,
+        pf: HashSet<&'static str>,
         os: Os,
     }
 
@@ -630,6 +782,7 @@ mod tests {
             Self {
                 bins: bins.iter().cloned().collect(),
                 apps: HashSet::new(),
+                pf: HashSet::new(),
                 os: Os::Linux,
             }
         }
@@ -637,7 +790,16 @@ mod tests {
             Self {
                 bins: HashSet::new(),
                 apps: apps.iter().cloned().collect(),
+                pf: HashSet::new(),
                 os: Os::MacOS,
+            }
+        }
+        fn windows(bins: &[&'static str], program_files: &[&'static str]) -> Self {
+            Self {
+                bins: bins.iter().cloned().collect(),
+                apps: HashSet::new(),
+                pf: program_files.iter().cloned().collect(),
+                os: Os::Windows,
             }
         }
     }
@@ -648,6 +810,11 @@ mod tests {
         }
         fn app_exists(&self, app: &str) -> bool {
             self.apps.contains(app)
+        }
+        fn program_file(&self, rel: &str) -> Option<PathBuf> {
+            self.pf
+                .contains(rel)
+                .then(|| PathBuf::from(format!("C:\\Program Files\\{rel}")))
         }
         fn os(&self) -> Os {
             self.os
@@ -743,6 +910,79 @@ mod tests {
 
         let r = resolve_player(&settings_no_player(), &FakeProbes::mac(&[]));
         assert_eq!(r.argv, vec!["open", "{playlist}"]);
+
+        let r = resolve_player(&settings_no_player(), &FakeProbes::windows(&[], &[]));
+        assert_eq!(r.argv, vec!["explorer.exe", "{playlist}"]);
+    }
+
+    // ── Windows detection ───────────────────────────────────────────
+
+    #[test]
+    fn windows_path_binaries_detected_first() {
+        let probes = FakeProbes::windows(&["mpv"], &["foobar2000\\foobar2000.exe"]);
+        let r = resolve_player(&settings_no_player(), &probes);
+        assert_eq!(r.label, "mpv");
+        assert_eq!(r.argv, vec!["mpv", "--playlist={playlist}"]);
+
+        let probes = FakeProbes::windows(&["vlc"], &["foobar2000\\foobar2000.exe"]);
+        let r = resolve_player(&settings_no_player(), &probes);
+        assert_eq!(r.label, "VLC", "stock PATH install beats install-dir fb2k");
+        assert_eq!(r.argv, vec!["vlc", "{playlist}"]);
+    }
+
+    #[test]
+    fn windows_program_files_probe_resolves_absolute_exe() {
+        let probes = FakeProbes::windows(&[], &["foobar2000\\foobar2000.exe"]);
+        let r = resolve_player(&settings_no_player(), &probes);
+        assert_eq!(r.label, "foobar2000");
+        // argv[0] is the resolved absolute path — spawn can't rely on PATH
+        // for install-dir players.
+        assert_eq!(
+            r.argv,
+            vec![
+                "C:\\Program Files\\foobar2000\\foobar2000.exe",
+                "{playlist}"
+            ]
+        );
+        assert_eq!(r.transport, Transport::Playlist);
+
+        // VLC's Program Files variant works the same way when not on PATH.
+        let probes = FakeProbes::windows(&[], &["VideoLAN\\VLC\\vlc.exe"]);
+        let r = resolve_player(&settings_no_player(), &probes);
+        assert_eq!(r.argv[0], "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe");
+    }
+
+    #[test]
+    fn windows_mpv_outranks_fb2k_and_vlc_pf_is_last() {
+        let probes = FakeProbes::windows(
+            &["mpv"],
+            &["foobar2000\\foobar2000.exe", "VideoLAN\\VLC\\vlc.exe"],
+        );
+        assert_eq!(resolve_player(&settings_no_player(), &probes).label, "mpv");
+
+        let probes = FakeProbes::windows(&[], &["VideoLAN\\VLC\\vlc.exe"]);
+        assert_eq!(resolve_player(&settings_no_player(), &probes).label, "VLC");
+    }
+
+    // ── PATHEXT expansion (pure shape, tested on every host) ────────
+
+    #[test]
+    fn pathext_candidates_expands_bare_name() {
+        let got = pathext_candidates("mpv", Some(".COM;.EXE;.BAT;.CMD;.VBS"));
+        assert_eq!(
+            got,
+            vec!["mpv", "mpv.com", "mpv.exe", "mpv.bat", "mpv.cmd", "mpv.vbs"]
+        );
+    }
+
+    #[test]
+    fn pathext_candidates_keeps_extension_and_handles_defaults() {
+        assert_eq!(pathext_candidates("mpv.exe", Some(".EXE")), vec!["mpv.exe"]);
+        // Missing/empty PATHEXT falls back to sane defaults.
+        let got = pathext_candidates("mpv", None);
+        assert!(got.contains(&"mpv.exe".to_string()), "{got:?}");
+        let got = pathext_candidates("mpv", Some(";.EXE;;"));
+        assert_eq!(got, vec!["mpv", "mpv.exe"]);
     }
 
     // ── Argv rendering ──────────────────────────────────────────────
@@ -777,7 +1017,10 @@ mod tests {
         );
         assert_eq!(argv, vec!["amberol", "/a", "/b"]);
 
-        let tpl = vec!["quodlibet".to_string(), "--enqueue-files={files-csv}".to_string()];
+        let tpl = vec![
+            "quodlibet".to_string(),
+            "--enqueue-files={files-csv}".to_string(),
+        ];
         let argv = render_argv(
             &tpl,
             &PlayTarget::FileList(vec![PathBuf::from("/a"), PathBuf::from("/b")]),
@@ -808,7 +1051,9 @@ mod tests {
         assert!(path.ends_with("kyoku-play.m3u8"));
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.starts_with("#EXTM3U\n"));
-        assert!(content.contains("#EXTINF:183,ヨルシカ - 靴の花火\n/music/ヨルシカ/靴の花火.flac\n"));
+        assert!(
+            content.contains("#EXTINF:183,ヨルシカ - 靴の花火\n/music/ヨルシカ/靴の花火.flac\n")
+        );
         assert!(content.contains("#EXTINF:-1,NoDuration\n/music/x.mp3\n"));
     }
 
@@ -865,7 +1110,10 @@ mod tests {
         std::fs::write(&weird, b"x").unwrap();
         std::fs::write(&ok, b"x").unwrap();
         let mut s = settings_no_player();
-        s.player.command = Some(vec!["quodlibet".into(), "--enqueue-files={files-csv}".into()]);
+        s.player.command = Some(vec![
+            "quodlibet".into(),
+            "--enqueue-files={files-csv}".into(),
+        ]);
         let outcome = prepare(&s, vec![item(&weird, "W"), item(&ok, "OK")]).unwrap();
         assert_eq!(outcome.played, 1);
         assert_eq!(outcome.skipped_missing, 1);
@@ -876,7 +1124,14 @@ mod tests {
 
     // ── Items builders (DB-backed) ──────────────────────────────────
 
-    fn seed_track(conn: &Connection, music_dir: &Path, path: &Path, title: &str, n: u32, album_id: Option<i64>) -> i64 {
+    fn seed_track(
+        conn: &Connection,
+        music_dir: &Path,
+        path: &Path,
+        title: &str,
+        n: u32,
+        album_id: Option<i64>,
+    ) -> i64 {
         let track = crate::db::models::Track {
             id: None,
             album_id,
@@ -902,11 +1157,15 @@ mod tests {
         let music = tmp.path().join("music");
         std::fs::create_dir_all(&music).unwrap();
         let conn = crate::db::open_memory().unwrap();
-        let (aid, _) = queries::get_or_create_album(&conn, "Album", Some("Artist"), None, None, 3).unwrap();
+        let (aid, _) =
+            queries::get_or_create_album(&conn, "Album", Some("Artist"), None, None, 3).unwrap();
         // Insert out of order — builder must return disc/track order.
-        let p3 = music.join("03.flac"); std::fs::write(&p3, b"x").unwrap();
-        let p1 = music.join("01.flac"); std::fs::write(&p1, b"x").unwrap();
-        let p2 = music.join("02.flac"); std::fs::write(&p2, b"x").unwrap();
+        let p3 = music.join("03.flac");
+        std::fs::write(&p3, b"x").unwrap();
+        let p1 = music.join("01.flac");
+        std::fs::write(&p1, b"x").unwrap();
+        let p2 = music.join("02.flac");
+        std::fs::write(&p2, b"x").unwrap();
         seed_track(&conn, &music, &p3, "Three", 3, Some(aid));
         seed_track(&conn, &music, &p1, "One", 1, Some(aid));
         seed_track(&conn, &music, &p2, "Two", 2, Some(aid));
@@ -928,20 +1187,24 @@ mod tests {
         let (cid, _) = queries::get_or_create_collection(&conn, "Mix").unwrap();
 
         // Track A: collection copy exists on disk → plays the copy.
-        let a_primary = music.join("a.flac"); std::fs::write(&a_primary, b"x").unwrap();
+        let a_primary = music.join("a.flac");
+        std::fs::write(&a_primary, b"x").unwrap();
         let a_copy = music.join("Collections/Mix/a.flac");
         std::fs::create_dir_all(a_copy.parent().unwrap()).unwrap();
         std::fs::write(&a_copy, b"x").unwrap();
         let a = seed_track(&conn, &music, &a_primary, "A", 1, None);
 
         // Track B: copy recorded but gone from disk → falls back to primary.
-        let b_primary = music.join("b.flac"); std::fs::write(&b_primary, b"x").unwrap();
+        let b_primary = music.join("b.flac");
+        std::fs::write(&b_primary, b"x").unwrap();
         let b_copy = music.join("Collections/Mix/b.flac");
         let b = seed_track(&conn, &music, &b_primary, "B", 2, None);
 
         queries::add_tracks_to_collection_ordered(&conn, cid, &[a, b]).unwrap();
-        queries::update_collection_track_path(&conn, &music, cid, a, &a_copy.display().to_string()).unwrap();
-        queries::update_collection_track_path(&conn, &music, cid, b, &b_copy.display().to_string()).unwrap();
+        queries::update_collection_track_path(&conn, &music, cid, a, &a_copy.display().to_string())
+            .unwrap();
+        queries::update_collection_track_path(&conn, &music, cid, b, &b_copy.display().to_string())
+            .unwrap();
 
         let items = collection_items(&conn, &music, cid).unwrap();
         assert_eq!(items.len(), 2);
@@ -959,6 +1222,12 @@ mod tests {
             skipped_missing: 2,
         };
         let n = outcome_notice(&outcome, "幻燈");
-        assert!(n.contains("幻燈") && n.contains("12 tracks") && n.contains("mpv") && n.contains("2 skipped"), "{n}");
+        assert!(
+            n.contains("幻燈")
+                && n.contains("12 tracks")
+                && n.contains("mpv")
+                && n.contains("2 skipped"),
+            "{n}"
+        );
     }
 }

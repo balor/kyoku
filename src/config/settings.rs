@@ -149,8 +149,9 @@ pub enum NameScriptPreference {
 /// External music player used by the `p`/`P` keys and `kyoku play`.
 ///
 /// Resolution order: `command` (full argv template) wins, then `app`
-/// (macOS only), then built-in auto-detection (mpv, VLC, IINA, …), then
-/// the OS default handler. Both fields unset = auto-detect.
+/// (macOS only), then built-in auto-detection (mpv, VLC, IINA, fb2k, …),
+/// then the OS default handler (xdg-open / open / explorer.exe).
+/// Both fields unset = auto-detect.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlayerSettings {
     /// Full argv template, e.g. `["mpv", "--playlist={playlist}"]`.
@@ -158,6 +159,8 @@ pub struct PlayerSettings {
     /// single audio file), `{files}` (expands to one argv item per file),
     /// `{files-csv}` (comma-joined, for Quod Libet-style players). With
     /// no placeholder, the target path(s) are appended as trailing args.
+    /// On Windows, argv[0] must be a real executable path — `.bat`/`.cmd`
+    /// wrappers can't be spawned directly (use `["cmd", "/C", ...]`).
     #[serde(default)]
     pub command: Option<Vec<String>>,
 
