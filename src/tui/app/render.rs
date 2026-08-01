@@ -196,7 +196,6 @@ impl App {
             frame,
             chunks[2],
             self.theme,
-            #[cfg(not(target_os = "windows"))]
             &[
                 ("e", "edit"),
                 ("R", "rename"),
@@ -207,18 +206,6 @@ impl App {
                 ("a", "add to coll"),
                 ("d", "delete"),
                 ("o", "open dir"),
-                ("?", "keybinds"),
-            ],
-            #[cfg(target_os = "windows")]
-            &[
-                ("e", "edit"),
-                ("R", "rename"),
-                ("O", "organize"),
-                ("C", "fetch cover"),
-                ("p", "play"),
-                ("P", "play album"),
-                ("a", "add to coll"),
-                ("d", "delete"),
                 ("?", "keybinds"),
             ],
         );
@@ -241,7 +228,6 @@ impl App {
             frame,
             chunks[2],
             self.theme,
-            #[cfg(not(target_os = "windows"))]
             &[
                 ("e", "edit"),
                 ("R", "rename"),
@@ -249,17 +235,6 @@ impl App {
                 ("p", "play"),
                 ("P", "play coll"),
                 ("o", "open dir"),
-                ("x", "remove"),
-                ("d", "delete"),
-                ("?", "keybinds"),
-            ],
-            #[cfg(target_os = "windows")]
-            &[
-                ("e", "edit"),
-                ("R", "rename"),
-                ("O", "organize"),
-                ("p", "play"),
-                ("P", "play coll"),
                 ("x", "remove"),
                 ("d", "delete"),
                 ("?", "keybinds"),

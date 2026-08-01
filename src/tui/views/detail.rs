@@ -491,8 +491,7 @@ impl AlbumDetailView {
                     ));
                 }
                 Err(e) => {
-                    self.notice =
-                        Some((NoticeKind::Warning, format!("Play failed: {}", e)));
+                    self.notice = Some((NoticeKind::Warning, format!("Play failed: {}", e)));
                 }
             }
             return DetailAction::None;
@@ -501,13 +500,11 @@ impl AlbumDetailView {
             let music_dir = &settings.library.music_dir;
             let (items, context) = if let Some(album) = &self.album {
                 (
-                    crate::core::player::album_items(conn, music_dir, album.id)
-                        .unwrap_or_default(),
+                    crate::core::player::album_items(conn, music_dir, album.id).unwrap_or_default(),
                     album.title.clone(),
                 )
             } else {
-                let rows = queries::list_loose_tracks(conn, music_dir, 0, 5000)
-                    .unwrap_or_default();
+                let rows = queries::list_loose_tracks(conn, music_dir, 0, 5000).unwrap_or_default();
                 (
                     crate::core::player::items_from_rows(&rows, None),
                     "loose tracks".to_string(),
@@ -521,8 +518,7 @@ impl AlbumDetailView {
                     ));
                 }
                 Err(e) => {
-                    self.notice =
-                        Some((NoticeKind::Warning, format!("Play failed: {}", e)));
+                    self.notice = Some((NoticeKind::Warning, format!("Play failed: {}", e)));
                 }
             }
             return DetailAction::None;
@@ -1188,7 +1184,8 @@ fn build_track_confirm(plan: &pruner::DeletePlan) -> ConfirmDelete {
 /// (works even from terminal multiplexers like zellij/tmux where env vars
 /// like DISPLAY/WAYLAND_DISPLAY aren't propagated). Falls back to spawning
 /// common file managers directly.
-/// On macOS, uses `open`.
+/// On macOS, uses `open`. On Windows, uses `explorer.exe` (spawn-only:
+/// explorer's exit code is unreliable, so success means "launched").
 pub fn open_directory(path: &std::path::Path) -> bool {
     let null = std::process::Stdio::null;
 
@@ -1203,7 +1200,18 @@ pub fn open_directory(path: &std::path::Path) -> bool {
             .is_ok();
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        return std::process::Command::new("explorer.exe")
+            .arg(path)
+            .stdout(null())
+            .stderr(null())
+            .stdin(null())
+            .spawn()
+            .is_ok();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let has_dbus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some();
         let has_display =
