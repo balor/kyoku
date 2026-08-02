@@ -19,11 +19,12 @@ The library state is persisted in SQLite, and **all file operations (rename, mov
 **Target library scale**: 20,000–100,000 tracks. All queries, scans, and TUI interactions must remain responsive at this scale. Use pagination, lazy loading, and indexed queries accordingly.
 
 ### What kyoku Is Not (v1)
-- Not a music player (no playback)
-- Not a streaming service client
-- Not a recommendation engine (planned for v2 via OpenAI-compatible API)
-- Not a web application
-- Not a native Windows GUI app (native Windows runs are terminal-based, like everywhere else)
+- Not a music player — no *built-in* playback; kyoku hands files to your external player (`p` in the TUI, `kyoku play` in the CLI).
+- Not a streaming client.
+- Not a recommendation engine.
+- Not a web app.
+- Not a native GUI app — kyoku lives in the terminal.
+- Not automatic — kyoku will never move or rename files without an explicit action from you.
 
 ### Platform Support
 - **macOS** — primary development target
@@ -37,7 +38,7 @@ Windows specifics (implemented 2026-08; see `doc/design/2026-08-01-windows-suppo
 - Windows denies move/rename/delete of files held open by players; per-file errors surface in organize/delete results.
 - The release exe embeds a `longPathAware` manifest; >260-char paths additionally require the user's `LongPathsEnabled` registry/GPO opt-in.
 
-The current Rust stack (`ratatui`/`crossterm`, `rusqlite` bundled, `lofty`, `reqwest` + rustls) has zero required system libraries and compiles on macOS and Linux. Crossterm handles terminal abstraction. Filesystem paths use `std::path::Path` throughout (never hardcoded separators).
+The current Rust stack (`ratatui`/`crossterm`, `rusqlite` bundled, `lofty`, `reqwest` + rustls) has zero required system libraries and compiles on macOS, Linux, and Windows. Crossterm handles terminal abstraction (including Windows Terminal and the legacy console host). Filesystem paths use `std::path::Path` throughout (never hardcoded separators).
 
 ### Problems with Beets (Why This Exists)
 
@@ -81,6 +82,8 @@ These are the specific frustrations this project aims to solve:
 │              ┌───────────────┐                            │
 │              │  Application  │  Commands, state machine   │
 │              │     Core      │  Business logic             │
+│              │               │  Player hand-off (p /      │
+│              │               │    kyoku play, external)   │
 │              └───────┬───────┘                            │
 │                      │                                    │
 │         ┌────────────┼────────────┐                       │
@@ -117,6 +120,7 @@ These are the specific frustrations this project aims to solve:
 | `inquire` | Interactive CLI prompts | Setup wizard |
 | `unicode-width` | TUI display widths | Correct table/layout widths for CJK and mixed-width text |
 | `tracing` / `tracing-subscriber` | Logging | CLI/TUI-safe progress and diagnostics |
+| `embed-resource` | Windows manifest embedding | Build-dependency; embeds the `longPathAware` manifest into `kyoku.exe` (see §1 Platform Support). No-op on non-Windows targets |
 
 ### Why These Choices
 
@@ -140,12 +144,13 @@ CREATE TABLE IF NOT EXISTS albums (
     album_artist    TEXT,
     year            INTEGER,
     mbid            TEXT UNIQUE,        -- MusicBrainz release MBID (the specific edition we matched)
-    disc_total      INTEGER DEFAULT 1,
+    disc_total      INTEGER DEFAULT 1,  -- reserved: nothing populates >1 yet, so organize
+                                        -- always selects path_template_single_disc in v1
     track_total     INTEGER,
     genre           TEXT,               -- Primary genre
     label           TEXT,
-    media_type      TEXT,               -- CD, Vinyl, Digital, etc.
-    album_type      TEXT DEFAULT 'album', -- album, compilation, single, ep, soundtrack, live, other
+    media_type      TEXT,               -- (reserved, not populated in v1) CD, Vinyl, Digital, …
+    album_type      TEXT DEFAULT 'album', -- (reserved) album, compilation, single, ep, soundtrack, live, other
     -- Cover art: path to folder art (cover.jpg, folder.png, etc.) or NULL if only embedded.
     -- Does not store the image itself — just a reference. Embedded art is read from files on demand.
     cover_art_path  TEXT,
@@ -169,12 +174,12 @@ CREATE TABLE IF NOT EXISTS tracks (
     file_format     TEXT,               -- mp3, flac, ogg, m4a, etc.
     bitrate         INTEGER,            -- kbps
     sample_rate     INTEGER,            -- Hz
-    channels        INTEGER,
+    channels        INTEGER,            -- (reserved, not populated in v1)
     
     -- Original filesystem context (preserved on import for loose collections)
     source_dir      TEXT,               -- Original parent directory path
     
-    -- Fingerprint
+    -- Fingerprint (reserved for milestone 9 — not populated in v1)
     acoustid        TEXT,               -- AcoustID fingerprint
     chromaprint     TEXT,               -- Raw chromaprint (for local dedup)
     
@@ -191,6 +196,8 @@ CREATE TABLE IF NOT EXISTS tracks (
 -- they can affect collection-copy filenames via path templates and position.
 CREATE TABLE IF NOT EXISTS collections (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- Unique case-insensitively (COLLATE NOCASE unique index) — "Mix" and "mix"
+    -- are the same collection. Get-or-create dedupes on the nocase spelling.
     name        TEXT NOT NULL,
     description TEXT,
     -- Path template override (optional). If unset, tracks in this collection
@@ -229,28 +236,52 @@ CREATE TABLE IF NOT EXISTS orphaned_files (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Full-text search with CJK-aware tokenization.
--- unicode61 with remove_diacritics handles accented Latin characters (ą→a, ö→o).
--- For CJK, we additionally store a normalized form for substring matching.
--- Note: FTS5 unicode61 tokenizer handles CJK characters as individual tokens
--- (each character = one token), which works well for Chinese/Japanese search.
+-- Full-text search over track title/artist/album-title.
+-- unicode61 tokenizes each CJK character as its own token; remove_diacritics 2
+-- folds accented Latin (ą→a, ö→o). There is NO separate normalized column —
+-- the tokenizer's folding is the whole mechanism.
+--
+-- tracks_fts is SELF-CONTAINED (no content='/content_rowid= mapping — that
+-- design was migrated away because the external-content mapping desynced;
+-- see migrations/005_fix_fts_schema.sql). rowid mirrors tracks.id; triggers
+-- keep rows in sync.
 CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
     title, artist, album_title,
-    content='tracks',
-    content_rowid='id',
     tokenize='unicode61 remove_diacritics 2'
 );
 
--- Indexes
+-- Indexes (tracks.file_path additionally carries a UNIQUE auto-index)
 CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id);
-CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(file_path);
 CREATE INDEX IF NOT EXISTS idx_tracks_loose ON tracks(album_id) WHERE album_id IS NULL;
 CREATE INDEX IF NOT EXISTS idx_albums_year ON albums(year);
 CREATE INDEX IF NOT EXISTS idx_albums_type ON albums(album_type);
 CREATE INDEX IF NOT EXISTS idx_tracks_status ON tracks(tag_status);
 CREATE INDEX IF NOT EXISTS idx_collection_tracks_coll ON collection_tracks(collection_id);
 CREATE INDEX IF NOT EXISTS idx_collection_tracks_track ON collection_tracks(track_id);
+CREATE INDEX IF NOT EXISTS idx_tracks_mbid ON tracks(mbid) WHERE mbid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_albums_title_artist ON albums(title, album_artist);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_collections_name_nocase ON collections(name COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_orphaned_files_created ON orphaned_files(created_at);
+
+-- FTS maintenance triggers (defined by migrations 002/005/006/007):
+--   tracks_fts_insert/delete/update — keep tracks_fts rows in sync with tracks
+--     (delete/update were rebuilt in-place when the external-content design was fixed)
+--   albums_fts_title_update — refreshes tracks_fts.album_title on album rename
 ```
+
+### Schema versioning
+
+The schema is versioned (`PRAGMA user_version`, currently **8**) and applied as
+an ordered migration chain (`migrations/NNN_*.sql`, tracked inline in
+`src/db/schema.rs`; starting with v7 they also run data rewrites). A DB created
+by a *newer* kyoku is rejected rather than silently misread. The DDL above
+shows the current end-state, not the v1 initial schema.
+
+Notable migrations: v5 rebuilt `tracks_fts` self-contained (the original
+`content=` mapping desynced), v7 rewrote all four path columns from absolute
+to relative-under-`music_dir` form (see §6.7), v8 deduped collection names.
+Runtime pragmas at open: `journal_mode=WAL`, `foreign_keys=ON`, 5 s busy
+timeout.
 
 ---
 
@@ -266,7 +297,7 @@ Config deliberately uses an XDG-style path on every platform:
 | Database default | `~/.local/share/kyoku/library.db` | `~/Library/Application Support/kyoku/library.db` | `%APPDATA%\kyoku\library.db` |
 | Cache | `~/.cache/kyoku/` | `~/Library/Caches/kyoku/` | `%LOCALAPPDATA%\kyoku\` |
 
-`$XDG_CONFIG_HOME` overrides the config root. The database location is controlled by `[library] data_dir`; its default comes from the platform data directory. Cache uses the platform cache directory.
+`$XDG_CONFIG_HOME` overrides the config root (and `$XDG_DATA_HOME` / `$XDG_CACHE_HOME` the data/cache roots on Linux). The database location is controlled by `[library] data_dir`; its default comes from the platform data directory. Cache uses the platform cache directory. A leading `~` in any path value (`music_dir`, `data_dir`, `inbox_dirs` entries) expands to the home directory.
 
 ### config.toml
 
@@ -280,6 +311,8 @@ music_dir = "~/Music"
 data_dir = "~/.local/share/kyoku"
 
 # Inbox directories — kyoku scans these for new/unimported files.
+# Default: []. `kyoku setup` builds the list interactively (it also offers
+# detected Nicotine+ download folders). Example:
 inbox_dirs = [
     "~/Downloads",
     "~/Music/Incoming",
@@ -307,7 +340,8 @@ loose_path_template = "_loose/{artist} - {title}.{ext}"
 # Options: "move" (move to music_dir), "copy" (copy, keep originals)
 organize_operation = "move"
 
-# Automatically accept MusicBrainz matches at or above this threshold (0.0 - 1.0)
+# Automatically pre-select MusicBrainz matches at or above this threshold
+# (0.0 - 1.0; out-of-range values are clamped, with a warning)
 auto_match_threshold = 0.85
 
 # Number of MusicBrainz match candidates fetched per group
@@ -318,7 +352,8 @@ match_candidates = 5
 write_tags = true
 
 [musicbrainz]
-# Rate limiting (MB requires max 1 req/sec)
+# Rate limiting (MB requires max 1 req/sec; values below 1000 are clamped
+# to 1000, with a warning)
 rate_limit_ms = 1100
 
 # Preferred script for artist & album names written from MusicBrainz matches.
@@ -340,6 +375,19 @@ theme = "tokyo-night"
 # Render album cover previews in album detail.
 show_cover_preview = true
 
+[player]
+# Optional. Full argv template for the external player, e.g.
+#   command = ["mpv", "--playlist={playlist}"]
+# Placeholders: {playlist} (generated .m3u8, or the audio file for a
+# single-track play), {files} (one argv item per file), {files-csv}
+# (comma-joined). With no placeholder, targets are appended as trailing args.
+# command = []
+#
+# Optional, macOS only: app bundle launched via `open -a <app> <target>`.
+# Ignored on Linux/Windows. app = "IINA"
+#
+# Both unset ⇒ auto-detect (see §6.12 External Playback).
+
 # [ai]  # Future v2
 # enabled = false
 # endpoint = "http://localhost:11434/v1"  # OpenAI-compatible API
@@ -349,7 +397,8 @@ show_cover_preview = true
 
 ### Theme System
 
-kyoku ships with 4 built-in themes — 2 dark, 2 light. Each theme defines a consistent palette used across all TUI elements (borders, tables, highlights, status badges, diffs, search).
+kyoku ships with 4 built-in themes — 2 dark, 2 light.
+An unknown `ui.theme` string silently falls back to tokyo-night. Each theme defines a consistent palette used across all TUI elements (borders, tables, highlights, status badges, diffs, search).
 
 #### Built-in Themes
 
@@ -375,7 +424,7 @@ The CLI import path is intentionally simpler today: scan/read tags and import as
 
 #### 6.1.1 Scan Phase
 - Recursively walk `<path>` using `walkdir`
-- Filter by supported audio extensions: `.mp3`, `.flac`, `.ogg`, `.m4a`, `.wav`, `.wma`, `.ape`, `.opus`
+- Filter by supported audio extensions: `.mp3`, `.flac`, `.ogg`, `.oga`, `.m4a`, `.aac`, `.mp4`, `.wav`, `.wma`, `.ape`, `.opus`, `.aiff`, `.aif`
 - **Always audit `music_dir` alongside the inbox.** Every import scan also walks the configured `music_dir` looking for audio files that are not referenced by any DB row (`tracks.file_path`, `collection_tracks.collection_file_path`, `orphaned_files.file_path`). Untracked files are fed into the same import flow as inbox files — if a file lives under `music_dir` but the DB doesn't know about it, it needs to be imported or deleted, and the import wizard is the right place to decide.
 - Group files into **album candidates** using heuristics:
   1. Files in the same directory = likely same album
@@ -411,7 +460,7 @@ The CLI import path is intentionally simpler today: scan/read tags and import as
   - Total duration match (within tolerance)
   - Track title similarity (ordered comparison)
 - Present top N candidates to user with similarity scores
-- **Multiple releases of the same album** (e.g. US vs UK vs Japan editions): show all of them as separate candidates. Do not auto-select or filter by region. Let the user choose which edition they want.
+- **Multiple releases of the same album** (e.g. US vs UK vs Japan editions): editions are shown as separate candidates and never filtered by region. Two fairness nuances soften the naive "show everything, pick nothing": the top candidate is *pre-selected* when its score ≥ `[import].auto_match_threshold` (the user still confirms or overrides), and hopeless candidates far behind a strong leader are pruned from the list unless they share the leader's release group (regional editions of the same album survive the prune — they share the group).
 
 #### 6.1.5 Duplicate Resolution
 
@@ -435,11 +484,13 @@ Intra-batch conflicts (two incoming tracks collide with each other rather than w
   - Proposed new values from MB (right column)
   - Changed fields highlighted
 - User actions:
-  - **Accept** — write proposed tags to file + add to DB
-  - **Accept with edits** — modify individual fields before applying
-  - **As-is** — add to DB with current tags, no tag modifications
+  - **Accept** — write proposed tags to file + add to DB (pick a candidate with `1-9`/`↑`/`↓`; `0` deselects back to as-is)
+  - **As-is** — add to DB with current tags, no tag modifications (default when nothing is selected)
+  - **To a collection** (`c`) — import the group straight into a chosen collection
   - **Skip** — don't import this album at all
-  - **Manual search** — enter custom search query for MB
+  - **Manual MBID/URL lookup** (`m`) — paste a release MBID or musicbrainz.org URL to pin the match
+  - **Retry search** (`r`) — re-query MB after a failed lookup
+  - (Future: in-wizard field editing before applying — today edits happen post-import in the tag editor)
 
 #### 6.1.7 Apply Phase
 - Write tags to files using `lofty` (if `write_tags = true` and user accepted a match)
@@ -518,7 +569,7 @@ Search is TUI-only and comes in two flavours — a **local filter** scoped to th
 Press `/` to focus the search bar at the top of the current view. Typing immediately filters the view in place — no mode switching. `Esc` clears.
 
 Scope depends on the current view:
-- **Library browser**: filters albums by title/artist (FTS5-backed)
+- **Library browser**: filters albums by title/artist (SQL `LIKE` per-term OR; multi-term = AND)
 - **Album detail**: filters tracks inside the album by title/artist (in-memory)
 - **Collection detail**: filters tracks inside the collection by title/artist (in-memory)
 - **Collections**: filters the collection list by name (LIKE)
@@ -526,9 +577,9 @@ Scope depends on the current view:
 Queries are case-insensitive and multi-term (all terms must match somewhere). Unicode is handled natively — `東方` and `björk` work identically to ASCII.
 
 #### Global Search (`g`)
-Press `g` from any view to open a full-screen overlay that searches **everything** at once — albums, tracks and collections mixed together. Results are grouped by type and labelled `[album]`, `[track]`, `[coll]`. Selecting a result with Enter navigates to it directly (tracks jump to their containing album with the cursor positioned on the track).
+Press `g` from any browser view (suppressed while the import wizard, tag editor, or a popup owns input) to open a full-screen overlay that searches **everything** at once — albums, tracks and collections mixed together. Results are grouped by type and labelled `[album]`, `[track]`, `[coll]`. Selecting a result with Enter navigates to it directly (tracks jump to their containing album with the cursor positioned on the track).
 
-Matching is simple fuzzy-ish: each whitespace-separated term must appear as a case-insensitive substring somewhere in the record's searchable fields. Unicode-aware. Backed by FTS5 on the DB side with a client-side fuzzy pass for ranking.
+Matching differs per category: albums use `LIKE` (multi-term AND, case-insensitive), tracks use the FTS5 index (freeform terms), collections match name/description by case-insensitive substring. There is no cross-table fuzzy ranking in v1.
 
 Use local filter when you know where you're looking and want to narrow; use global search when you just want to jump to something by name.
 
@@ -537,7 +588,7 @@ Planned for a later milestone: structured filters combinable with the freeform q
 
 ### 6.4 Collections (TUI only)
 
-Collections are user-defined groupings that exist alongside (not instead of) the album hierarchy. They solve the "folder of random MP3s" problem. All collection management (create, browse, add/remove tracks, delete) is done through the TUI Collections view.
+Collections are user-defined groupings that exist alongside (not instead of) the album hierarchy. They solve the "folder of random MP3s" problem. All collection management (create, browse, rename, add/remove tracks, delete) is done through the TUI Collections view.
 
 A collection can optionally have a custom path template. When `kyoku organize` runs, tracks in this collection stay grouped together in their own folder instead of being scattered across the artist hierarchy. This is the key feature for managing compilations, loose folders, doujin collections, DJ sets, and anything that doesn't fit the standard `Artist/Album/Track` structure.
 
@@ -603,7 +654,7 @@ When calculating target paths, kyoku applies templates by file role:
 
 #### Collection + Album: Dual-File Behavior
 
-**A track can exist in both an album and a collection with a template.** When this happens, `kyoku organize` creates **two physical copies** of the file:
+**A track can exist in both an album and a collection. (Every collection produces copies on organize — a per-collection template only overrides their naming; see rule 6 in §12.)** When this happens, `kyoku organize` creates **two physical copies** of the file:
 
 1. The **album copy** goes to the album hierarchy via the global template: `~/Music/DJ Shadow/Endtroducing..... (1996)/01 Best Foot Forward.mp3`
 2. The **collection copy** goes to the collection folder via its template: `~/Music/Collections/Touhou/01 IOSYS - Marisa Stole the Precious Thing.mp3`
@@ -624,22 +675,22 @@ The organize preview shows all copies that will be created:
 ```
 
 #### Empty Directory Cleanup
-After organize moves files out of their source directories, empty directories are **automatically deleted**. This applies to any directory that becomes empty as a result of the organize operation.
+After organize moves files out of their source directories, empty directories are **automatically deleted** — but only directories strictly inside `music_dir` or a configured inbox dir (a safety floor against touching arbitrary trees kyoku merely walked).
 
 #### music_dir Creation
 If `music_dir` does not exist when `kyoku organize --apply` is run, kyoku **asks for confirmation** before creating it. It does not create it silently or error out.
 
 #### Workflow
 1. Calculate target paths from current tags + resolved template (see priority above)
-2. For tracks in collections with templates that also belong to albums, calculate both paths
+2. For tracks that belong to collections (with or without a per-collection template) and also to albums, calculate both paths
 3. Collect pending rows from `orphaned_files` — these are files whose track row has already been removed (typically by dup-replace during import) and are awaiting physical cleanup. They are included regardless of any `--artist` / `--album` filter because orphans don't belong to any current album.
-4. Show full diff: `current path → target path(s)` for every file, labeling album vs collection copies, plus a dedicated "orphan files (will be deleted)" block
-5. User reviews, can exclude individual files
+4. Show full diff: `current path → target path(s)` for every file, labeling album vs collection copies, plus a dedicated "orphan files (will be deleted)" block. *(Implementation note: the TUI organize popup implements this fully; the CLI preview currently does not print the orphan block and skips runs whose only pending work is orphan deletion — known gap, fix on the CLI side.)*
+5. User reviews and confirms or aborts (the TUI additionally expands per-file details). *(Per-file exclusion of individual entries: future. `--apply --yes` on the CLI skips the interactive confirmation for scripting.)*
 6. On confirmation: move/copy files, update DB paths, unlink orphaned files and clear their tracking rows (file-not-found is treated as success so re-runs are idempotent), delete empty source directories
 7. Files already in the correct location are skipped
 
 #### TUI organize (`O` key)
-Press `O` in the library browser to organize the entire library, or in album detail to organize just that album. The TUI shows a popup with two views:
+Press `O` in the library browser to organize the entire library, in album detail to organize just that album, in Collections for all collections, or in collection detail for just that one. Organizing an album also moves its sibling cover image to the new directory as `cover.<ext>`. The TUI shows a popup with two views:
 
 - **Summary view** (default): groups of source → target directories with file counts, collection copy counts, orphan-track count (rows whose file is gone), orphan-file count (files whose row is gone — will be deleted), and "already in place" count. Press `d` to expand.
 - **Detail view**: scrollable per-file listing showing each file's source path, target path, renamed filenames (highlighted), collection associations, orphaned tracks, and orphan files (labeled `Artist — Title · Album` from the tag snapshot, with the reason they were orphaned). Navigate with `j`/`k`, `PgUp`/`PgDn`, `Ctrl+U`/`Ctrl+D`. Press `d` to toggle back to summary.
@@ -668,7 +719,7 @@ Output includes: file path, format, title, artist, album, album artist, year, ge
 
 ### 6.9 Setup (`kyoku setup`)
 
-Interactive setup wizard. Walks you through configuring kyoku — music directory, database location, inbox directories, and theme.
+Interactive setup wizard. Walks you through configuring kyoku — music directory, database location, inbox directories, matching defaults, and theme.
 
 ```
 kyoku setup
@@ -677,11 +728,15 @@ kyoku setup
 The wizard:
 1. Explains what the config file is and where it lives
 2. Asks for confirmation if a config already exists (won't silently overwrite)
-3. Prompts for music directory (with current/default pre-filled)
-4. Prompts for database directory (with default pre-filled)
-5. Lets you add inbox directories one by one (Enter to skip/finish)
-6. Lets you pick a theme
-7. Writes a commented config file and confirms
+3. Prompts for music directory (with current/default pre-filled); offers to create it when missing and validates writability with a probe file (retry loop on failure)
+4. Prompts for database directory (same validation)
+5. Keeps existing, valid inbox directories automatically (a keep-anyway confirm is offered for ones that have become unusable)
+6. Detects a Nicotine+ install and offers its configured download folder(s) as inbox suggestions (`$VAR`/`${VAR}` paths in the Nicotine+ config are expanded; unresolvable vars are skipped)
+7. Lets you add more inbox directories one by one (Enter to finish)
+8. Lets you pick the MusicBrainz name-script preference (native / latin)
+9. Lets you pick the cover-art download size (250/500/1200/original)
+10. Lets you pick a theme
+11. Writes a commented config file and confirms
 
 The generated config includes all settings with comments. You can always edit it directly later.
 
@@ -704,9 +759,11 @@ inboxes:  ~/Downloads, ~/Music/Incoming
 
 If the config file doesn't exist, a note is printed saying defaults are in use. If no inbox dirs are configured, the inboxes line shows `(none)`.
 
-### 6.11 TUI Mode (`kyoku` or `kyoku tui`)
+### 6.11 TUI Mode (`kyoku` with no subcommand)
 
-Interactive terminal UI for library management.
+Interactive terminal UI for library management; launched by bare `kyoku`
+when a config exists (there is no `tui` subcommand). If no config exists yet,
+kyoku points at `kyoku setup`.
 
 #### Views
 
@@ -727,8 +784,13 @@ Interactive terminal UI for library management.
 ├────────────────────────────────────────────────────────────────────┤
 │ Portishead - Dummy (1994) · FLAC · 11 tracks · 49:27              │
 │ /Music/Portishead/Dummy (1994)/                                    │
-└────────── j/k nav · Enter detail · i import · / search · c colls ┘
+└── i import · O organize · p play · a+d collections · s sort · ? keys ┘
 ```
+
+Every browser view renders a **status bar along the bottom row with the
+keys valid right there** — the mockups above are approximations; the bar
+tracks the real bindings. The full binding map also lives in the `?`
+help overlay, grouped by category.
 
 Note: `[loose]` is a virtual entry that groups all tracks without an album. It appears at the bottom of the list and can be expanded to browse individual loose tracks.
 
@@ -737,12 +799,12 @@ Note: `[loose]` is a virtual entry that groups all tracks without an album. It a
 ┌─ kyoku ──────────────────────────────────── Collections ──────────┐
 │ Search: █                                    [Albums ▸ Collections] │
 ├────────────────────────────────────────────────────────────────────┤
-│ Collection               │ Tracks │ Description                   │
+│ Collection               │ Tracks │ Duration                      │
 │──────────────────────────│────────│───────────────────────────────│
-│ > Driving Music          │   34   │ Highway playlist              │
-│   Unsorted 2024          │  127   │ From old hard drive           │
-│   Doujin Music           │   89   │ Comiket acquisitions          │
-│   Field Recordings       │   12   │ Japan trip 2023               │
+│ > Driving Music          │   34   │ 2h 13m                        │
+│   Unsorted 2024          │  127   │ 9h 41m                        │
+│   Doujin Music           │   89   │ 6h 02m                        │
+│   Field Recordings       │   12   │ 41m                           │
 │                          │        │                               │
 ├────────────────────────────────────────────────────────────────────┤
 │ Driving Music · 34 tracks · 2h 13m                                │
@@ -762,16 +824,19 @@ Note: `[loose]` is a virtual entry that groups all tracks without an album. It a
 │ MusicBrainz: release/76df3287-6cda-33eb-8e9a-044b5e15c37c         │
 │ Label: Go! Beat                                                    │
 ├────────────────────────────────────────────────────────────────────┤
-│ e edit tags · r re-match MB · m move/rename · a add to coll · Esc ┘
+│ e edit · R rename · O organize · C fetch cover · p play · ? keys ┘
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-**Import Wizard View** (triggered by `i` or `kyoku tui --import <path>`)
-- Step-by-step guided import with the pipeline from 6.1
-- Progress bar for scanning/fingerprinting
-- Side-by-side diff for tag review
-- Batch accept/skip controls
-- **"Import as-is"** and **"Import loose"** always visible as options alongside match candidates
+**Import Wizard View** (triggered by `i` in the library view)
+- Step-by-step guided import with the pipeline from 6.1: source selection (`Tab` toggles between "scan inbox dirs" and a custom path), scanning with a progress bar, MB review, duplicate resolution, apply
+- Per-group side-by-side diff of current vs proposed tags, with MB candidate list and scores
+- **"Import as-is"** and **"Import loose"** are always visible as options alongside match candidates
+
+#### Key UI elements
+
+- Status bar along the bottom of every view lists the keys valid there
+- `?` / F1 opens a searchable help overlay with the full binding map
 
 **Tag Editor View** (triggered by `e` on a track/album)
 - Inline field editing
@@ -780,14 +845,19 @@ Note: `[loose]` is a virtual entry that groups all tracks without an album. It a
 - Save/cancel/reset
 
 #### Key Bindings
+(Authoritative with `keybindings.rs` + each view's handler; every view's
+status bar and the `?` overlay show the same map.)
 ```
 Global:
   q / Ctrl+C         Quit
-  ? / F1             Help overlay
+  ? / F1             Help overlay (close with ? / Esc / F1)
   /                  Focus local filter bar (filters current list in place)
-  g                  Open global search (albums, tracks, collections)
-  Esc                Back / cancel / close overlay / clear search
-  Tab                Switch between Albums ↔ Collections views
+  g                  Open global search (browser views only)
+  F5 / Ctrl+R        Refresh view + rescan inbox
+  Esc                Back / cancel / close overlay / clear search —
+                     and clears marked tracks first
+  Tab                Albums ↔ Collections; from Album Detail jumps to
+                     Collections, from Collection Detail to Library
 
 Navigation (any list view):
   j / ↓              Move down
@@ -796,58 +866,146 @@ Navigation (any list view):
   Ctrl+U             Half page up
   Ctrl+F / PgDn      Page down
   Ctrl+B / PgUp      Page up
-  G                  Jump to bottom
+  Home               Jump to top (in browse views g is the global search)
+  End / G            Jump to bottom
+
+Multi-select (all list views with rows):
+  Space              Mark/unmark row, cursor advances
+  Esc                Clear all marks (before acting as "back")
+  Most row actions (play, add-to-collection, organize …) act on marked
+  rows when any exist; otherwise on the cursor row.
 
 Library Browser:
   Enter              Open album detail
   i                  Start import wizard
-  O                  Organize entire library (preview → d for details → Enter apply)
-  s                  Sort (cycle: artist, album, year, tracks)
-  c                  Switch to collections view
+  O                  Organize (preview → d for details → Enter apply)
+  s / S              Cycle sort key (artist, album, year, tracks) / toggle direction
+  p                  Play marked albums (else cursor album); on the
+                     [loose] row: play all loose tracks
+  a                  Add to collection
+  d                  Delete (marked albums or cursor) — confirm popup
+                     with opt-in file deletion
 
 Album Detail:
   /                  Filter tracks in this album
   e                  Edit tags (tag editor)
   R                  Rename album
   O                  Organize this album (preview → Enter apply)
+  C                  Fetch cover art from the Cover Art Archive (asks
+                     before overwriting an existing cover; needs an MB match)
+  p / P              Play track(s) / whole album
   a                  Add track(s) to a collection
-  o                  Open file location in system file manager
+  o                  Open file location in the system file manager
+  d                  Delete track(s) — confirm popup
   Esc                Back to library
 
 Collections:
   Enter              Browse collection
   n                  Create new collection
+  R                  Rename collection
+  O                  Organize all collections (summary/details popup)
+  p / P              Play marked collections (else cursor)
+  e                  Edit tags
   d                  Delete collection (confirms)
-  Tab                Switch to albums
 
 Collection Detail:
   /                  Filter tracks in this collection
   e                  Edit tags
+  R                  Rename collection
+  O                  Organize this collection
+  p / P              Play marked/cursor tracks / whole collection
+                     (organised collection copies are preferred)
+  o                  Open collection file location
   x                  Remove track from collection (confirms)
-  Esc                Back to collections
+  d                  Delete track(s) from the library (confirms)
 
 Global Search (g):
   Type               Query across albums, tracks and collections
-  j / k              Navigate results
+  ↑ / ↓              Navigate results (j/k are typed into the query)
+  PgUp/PgDn, Ctrl+U/D  Page/half-page scroll
   Enter              Open selected result (albums/collections directly,
                      tracks jump to their album with cursor positioned)
   Esc                Close
 
-Import Wizard:
+Import Wizard — sources step:
+  Tab                Toggle "scan inbox dirs" ↔ "enter custom path"
+  ↑ / ↓              Pick inbox dirs (Space toggles)
+
+Import Wizard — review step (per group):
+  1-9 / ↑ / ↓        Select MB candidate (fetches full release in bg)
+  0                  Deselect → import as-is
   A                  Import as-is (no MB match, keep current tags)
   S                  Skip group
   L                  Import loose (no album grouping)
-  a                  Accept match (milestone 4)
+  c                  Send group to a collection (picker)
+  m                  Manual MBID/URL paste
+  r                  Retry failed MB search
   n / p              Next / previous group
-  Enter              Confirm and import
-  e                  Edit before applying (milestone 4)
+  F                  Skip this and all remaining groups
+  Enter              Next group; on the summary screen: proceed to dedup
+                     → apply
+  Esc                Cancel wizard (with confirmation)
+
+Import Wizard — duplicate-resolution step:
+  1 / 2              Keep New / Keep Existing
+  n / p              Next / previous conflict
+  Enter              Confirm resolutions and import
 
 Tag Editor:
   Enter              Edit selected field
   Tab                Next field
-  Ctrl+S             Save changes to DB
+  Ctrl+S             Save changes — file tags AND DB (DB only when
+                     [tagging] write_tags = false)
   Esc                Cancel edit / back to previous view
 ```
+
+### 6.12 External Player Playback
+
+kyoku is the librarian, not a player (design doc:
+`doc/design/2026-07-19-external-player.md`). Playback hands off to an
+external player, from the TUI (`p`/`P` in browse views) or the CLI.
+
+```
+kyoku play --album "幻燈"        # exact NOCASE match; ambiguity exits 2 with a list
+kyoku play --collection "Mix"
+kyoku play ./some/file.flac     # positional path passthrough
+kyoku play --album "幻燈" --dry-run   # prints the player argv + playlist, spawns nothing
+```
+
+**TUI semantics** — `p` plays the natural unit of the current view;
+`P` plays the larger scope:
+
+| View | `p` | `P` |
+|---|---|---|
+| Library | marked albums → all their tracks (else cursor album); `[loose]` row → all loose tracks | same (reserved for future enqueue) |
+| Album detail | marked tracks (else cursor track) | whole album in disc/track order |
+| Loose tracks | marked tracks (else cursor track) | all loose tracks |
+| Collections | marked collections (else cursor) | same |
+| Collection detail | marked tracks (else cursor track) | whole collection in collection order |
+
+**Transport** — multi-track plays write a single UTF-8 M3U8 to the cache dir
+(`kyoku-play.m3u8`, overwritten per play) and hand the player that one path;
+a one-track play opens the audio file directly (no playlist). Players that
+can't load playlists (Amberol, Quod Libet) receive the files as argv instead
+(**FileList** transport, inferred from `{files}`/`{files-csv}` placeholders in
+the argv template). Files missing from disk are skipped and counted in the
+notice.
+
+**Player resolution** — `[player].command` argv template → `[player].app`
+(macOS `open -a`) → per-platform auto-detect table → OS default handler:
+
+- Linux table (first hit wins): mpv → vlc → celluloid → haruna → strawberry →
+  clementine → audacious → deadbeef → amberol → quodlibet; fallback `xdg-open`.
+- macOS: PATH `mpv` first, then `.app` bundles IINA → VLC → foobar2000 →
+  Swinsian → Cog → Music (Music last: its "copy files to Media folder"
+  setting can duplicate your library); fallback `open`.
+- Windows: PATH probes (`mpv.exe`, `vlc.exe`; PATHEXT-aware), then
+  %ProgramFiles% install-dir probes for foobar2000 and VLC; fallback
+  `explorer.exe` (Shell file association).
+
+Launching is fire-and-forget — the player child outlives / never blocks the
+UI thread. **Non-goals (v1):** enqueue/append to a running player, now-playing
+state, player IPC (MPRIS etc.).
 
 ---
 
@@ -885,20 +1043,40 @@ A collection can also have its own per-collection `path_template` (in the `colle
 | `{label}` | Record label | `Parlophone` |
 | `{collection}` | Collection name (for collection templates) | `Touhou` |
 
+Empty values fall back to: artist → `Unknown`, album → `Unknown Album`,
+year → `0000`, title/genre/label → `Unknown`; any value that sanitizes to
+the empty string renders `Unknown`.
+
 ### Format Specifiers
 
-- `{track:02}` → `02` (zero-padded track-number tag)
+Only the numeric variables take a format specifier `{track}`, `{position}`,
+`{disc}`:
+
+- `{track:02}` → `02` (zero-padded to width 2; `{track:2}` space-pads)
 - `{position:02}` → `07` (zero-padded collection position)
-- `{disc:0}` → `1` (no padding, just the number, omitted for single-disc)
-- `{year:4}` → `1997`
+- `{disc:0}` → `1` (no padding, just the number)
+
+Note multi-disc naming: nothing suppresses `{disc}` — single-disc albums
+avoid a disc prefix because organize selects `path_template_single_disc`
+when `disc_total <= 1`, and that default template simply doesn't reference
+`{disc}`.
 
 ### Sanitization Rules
+
+Applied per interpolated value, in order:
 
 1. Replace `/`, `\`, `:`, `*`, `?`, `"`, `<`, `>`, `|` with `_`
 2. Trim leading/trailing whitespace and dots
 3. Collapse multiple consecutive underscores
-4. Truncate to OS filename limit (255 bytes) with hash suffix if needed
-5. Handle Unicode correctly (no ASCII folding)
+4. Dodge Windows reserved device names — if the stem (before the first dot,
+   case-insensitive) is one of `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
+   `LPT1`–`LPT9`, append `_` to the stem (`NUL.flac` → `NUL_.flac`).
+   Applied on all platforms so a library organized on Unix stays movable to NTFS.
+5. Truncate to the filename-component limit: ~245-byte prefix + `_` + 8-hex
+   hash of the untruncated value. Enforced per interpolated value; the
+   assembled path component can exceed it in extreme cases (long paths are a
+   separate OS limit — see §1 Platform Support for the Windows notes).
+6. Handle Unicode correctly (no ASCII folding); empty-after-sanitize → `Unknown`
 
 ---
 
@@ -913,15 +1091,15 @@ This is a first-class concern, not an afterthought. Every layer of the applicati
 - Handle mixed-script content: an album might have `artist = "初音ミク"` and `album = "VOCALOID BEST 2012"`.
 
 ### Filesystem
-- Use `OsString`/`OsStr` for filesystem operations, convert to/from UTF-8 only at display boundaries.
-- macOS uses NFD normalization for filenames; Linux typically uses NFC. Preserve original path bytes/strings when operating; add explicit NFC/NFD normalization only if comparison bugs surface.
+- **Paths must be valid UTF-8.** Files with non-UTF-8 names (possible on Unix filesystems) are skipped at scan/import time, counted, and logged (`skipped (non-UTF-8 filename — rename to import)`). All four DB path columns hold UTF-8 via `display().to_string()`; under `music_dir` they are stored relative (§6.7). (Historical note: the original "store OsString bytes" policy was dropped — a bytes-preserving DB would complicate every query for a corner case better solved by renaming the file.)
+- macOS uses NFD normalization for filenames; Linux typically uses NFC. Preserve original path bytes/strings when operating; comparisons normalize via double-canonicalization where needed (organize's occupied-path guard); explicit NFC/NFD rewriting stays out unless comparison bugs surface.
 - Japanese filenames may contain fullwidth characters (Ａ vs A); preserve them in tags and filenames unless a future normalization feature is explicitly added.
 - **WSL note**: When music files live on a Windows NTFS mount (`/mnt/c/...`), filenames are case-insensitive and certain characters (`:`, `*`, `?`, etc.) are forbidden. The sanitization rules in the path template engine (Section 7) already handle this (including Windows reserved device names, dodged on all platforms). The same rules apply when running natively on Windows; the path test battery should treat NTFS semantics (case-insensitivity, reserved names, no trailing dots/spaces) as a first-class case regardless of host OS.
 - Test filenames with characters from: Japanese (hiragana/katakana/kanji), Chinese (simplified/traditional), Korean (hangul), Polish (ą, ć, ę, ł, ń, ó, ś, ź, ż), Nordic (å, ä, ö, ø), and mixed scripts.
 
 ### Search
-- FTS5 `unicode61` tokenizer handles CJK by tokenizing each character individually, which works for substring-style search. `remove_diacritics 2` maps accented characters (ą→a) while keeping the original indexed too.
-- Search for `初音` should match `初音ミク`. Search for `bjork` should match `Björk`.
+- FTS5 `unicode61` with `remove_diacritics 2` folds case and diacritics for both index and query; queries are issued as quoted trailing prefixes (`"term"*`). Search for `初音` matches `初音ミク`; `bjork` matches `Björk`. Mid-string substring matching is *not* supported (falls back to LIKE only while the FTS table is empty, e.g. right after upgrading from a pre-FTS build).
+- Album-name filtering (library browser, global search albums) and collection filtering are SQL `LIKE` (multi-term AND), not FTS.
 - TUI/global search helpers must remain Unicode-aware. Do not assume ASCII or byte-level matching.
 
 ### TUI Display
@@ -934,9 +1112,9 @@ This is a first-class concern, not an afterthought. Every layer of the applicati
 A single MB entity can have both a native-script primary name and one or more Latin-script aliases. Users differ on which they want on disk — JP fans typically want `ヨルシカ` / `花冷え。`; Latin-library users want `Yorushika` / `HANABIE.`. The `[musicbrainz] name_script` setting (`native` | `latin`) drives a post-fetch alias resolver that rewrites `MbRelease.artist` and `MbRelease.title` before they enter the DB/tag pipeline. Scope is deliberately limited to artist + album title — track titles ride through unchanged because MB's alias coverage at the recording level is sparse. When no alias matches the preference, the canonical credit name is kept (no synthesised romanisation). Per-artist alias responses are cached on the `MbClient` for the lifetime of an import session so a multi-release import of the same artist pays the `/artist/{mbid}?inc=aliases` cost only once.
 
 ### Sorting
-- Use ICU-aware collation for sorting when possible. At minimum, case-insensitive sorting that handles Unicode correctly.
-- Consider the `icu_collator` crate or simpler approaches like lowercasing with `str::to_lowercase()` (which handles Unicode case folding correctly in Rust).
-- Sort names: respect sort-order tag fields from files (e.g. `ARTISTSORT = "ハツネミク"` for kana-based sorting of Japanese content).
+- Current: SQL-side SQLite `COLLATE NOCASE` (ASCII-only folding — won't fold `Ö`-style accents) for ORDER BY, plus Rust `str::to_lowercase()` (full Unicode case folding) where sorting happens in memory.
+- Future: ICU-aware collation via `icu_collator` for genuinely Unicode-correct ordering.
+- Sort names (future): respect sort-order tag fields from files (e.g. `ARTISTSORT = "ハツネミク"` for kana-based sorting of Japanese content). Not implemented in v1 — MB sort-names are only consulted by the name-script alias fallback, never for ordering.
 
 ### Unicode dependencies / candidates
 
@@ -1017,7 +1195,7 @@ A single MB entity can have both a native-script primary name and one or more La
 - [x] `kyoku organize` — preview + apply file reorganization (`src/core/organizer.rs`)
 - [x] `kyoku organize --apply` with filters: `--artist`, `--album`, `--path`, `--collection`
 - [x] Collection dual-copy support (album copy + collection copy with custom template)
-- [x] Relative-path storage — `tracks.file_path` / cover / collection-copy / orphan paths are stored relative to `music_dir` (schema v7), so renaming the library directory only needs a config edit (`src/core/paths.rs`, `migrations/007_*` in `src/db/schema.rs`). Inspired by beets v2.10.
+- [x] Relative-path storage — `tracks.file_path` / cover / collection-copy / orphan paths are stored relative to `music_dir` (schema v7), so renaming the library directory only needs a config edit (`src/core/paths.rs`; v7 migration in `src/db/schema.rs`). The FTS/case-insensitive-name polish is `migrations/007_indexes_fts_collections.sql`. Inspired by beets v2.10.
 - [x] Clean up empty directories after moves (recursive parent cleanup)
 - [x] `kyoku organize` TUI integration (`O` key — library: organize all, album detail: organize album; summary/detail views with scrollable per-file listing)
 - [x] Filesystem output honours `[musicbrainz] name_script` — artist dirs and album-title segments follow the Latin/native preference resolved at MB-fetch time (see Milestone 4)
@@ -1047,6 +1225,22 @@ A single MB entity can have both a native-script primary name and one or more La
 - [x] Organize preview surfaces orphan files in both summary (count + "will be deleted" block) and detail view (label + path + reason)
 - [x] Notices in library, collection, and CLI organize paths report `N orphan files deleted` alongside moves/copies
 - [x] Import scan audits `music_dir` for audio files not referenced by any DB row (`tracks.file_path`, `collection_tracks.collection_file_path`, `orphaned_files.file_path`) and feeds them into the same wizard as inbox files — the user either imports them or marks them for deletion
+
+### Shipped outside the original plan: External Player Hand-off (0.2.0)
+
+- [x] `src/core/player.rs` — resolution (`[player].command` → `[player].app` → per-platform auto-detect tables → OS default handler), M3U8 playlist writer, fire-and-forget spawn
+- [x] `kyoku play` CLI (`--album`, `--collection`, positional file, `--dry-run`)
+- [x] TUI `p`/`P` in Library / Album Detail / Loose / Collections / Collection Detail
+- [x] `tests/play_e2e.rs` — fake-player end-to-end (Unix)
+- [x] Design doc: `doc/design/2026-07-19-external-player.md`
+
+### Native Windows support (in flight — `experimental-windows-support` branch)
+
+- [x] Player detection on Windows (PATHEXT, %ProgramFiles% probes, `explorer.exe` fallback); `open -a`-free hand-off
+- [x] `explorer.exe` open-directory key on Windows; NTFS reserved-name dodging and case-folded collision detection
+- [x] `longPathAware` manifest embedded via `embed-resource`; statically-linked CRT release zip; `windows-latest` CI leg
+- [ ] Interactive QA pass on real Windows (UTM Win11 VM): setup wizard, import, organize, play, WT/WezTerm cover previews
+- [ ] Design doc: `doc/design/2026-08-01-windows-support.md`
 
 ### Milestone 8: Device Sync
 **Goal**: One-shot sync your library to external devices — MP3 players, SD cards, USB drives — entirely from the TUI. No saved configuration; each sync is an interactive wizard. Device-first workflow: pick the device, not a directory.
@@ -1095,22 +1289,32 @@ A single MB entity can have both a native-script primary name and one or more La
 ## 11. Testing Strategy
 
 ### Unit Tests
-- Path template engine (edge cases: Unicode, empty fields, long filenames)
-- Match scoring algorithm (known similarity inputs → expected scores)
-- Database queries (using in-memory SQLite)
-- Config parsing (valid, invalid, missing fields, defaults)
-- Tag reading abstraction (mock lofty responses)
+- Path template engine (edge cases: Unicode, empty fields, long filenames, Windows reserved device names) — `src/core/template.rs`
+- Match scoring algorithm (known similarity inputs → expected scores) — `src/external/matching.rs`
+- Database queries (in-memory SQLite) — `src/db/`
+- Config parsing (valid, invalid, missing fields, defaults, clamping) — `src/config/settings.rs`
+- Player detection/argv rendering with a fake machine (`Probes` trait) incl. Windows tables — `src/core/player.rs`
+- Tag reading via real lofty against committed fixtures — `tests/tag_reader_test.rs`
 
 ### Integration Tests
-- Full import pipeline with fixture audio files
-- MusicBrainz matching with recorded/mocked API responses
-- File rename/move operations (temp directory, verify structure)
-- Database migrations (fresh + upgrade scenarios)
+- Full import pipeline with fixture audio files — `tests/import_organize_e2e.rs`
+- File rename/move operations (temp directory, verify structure) — same suite
+- Database migrations (fresh + upgrade scenarios, incl. the v7 absolute→relative path rewrite under platform-corrected test paths) — `src/db/schema.rs`
+- External-player hand-off e2e with a record-replaying fake player shell script — `tests/play_e2e.rs` (Unix; Windows spawn e2e is a follow-up)
+- MusicBrainz HTTP layer: **not currently tested** with recorded/mocked responses (scoring is unit-tested as pure functions instead; a recorded-response harness is worth adding)
 
 ### Test Fixtures
-- Create short (1-second) silence audio files in each supported format with known tag values
-- Store in `tests/fixtures/sample_library/`
-- Include edge cases: missing tags, Unicode tags (Japanese, Polish characters), multi-disc albums
+- `tests/fixtures/sample_library/` holds tiny (~0.1 s) silent files: `tagged.{mp3,flac,ogg}`, `cjk_tagged.mp3` (Japanese titles only — a Polish/other-script fixture would be a good addition), `no_title.mp3`, plus `not_audio.txt`
+- Regenerate with `tests/fixtures/create_fixtures.rs` (`cargo run --bin create_fixtures`)
+- Coverage gaps vs the ideal list: remaining formats (m4a/wav/wma/ape/opus/aiff…), Polish/Nordic tags, and a multi-disc album
+
+### Continuous Integration
+
+`.github/workflows/ci.yml` runs `cargo test --all-targets` on ubuntu-latest,
+macos-latest and windows-latest, plus clippy. The Windows job is the primary
+Windows behavior testbed (no maintainer hardware required). Releases
+(`.github/workflows/release.yml`) build mac (arm64 + cross x86_64), Linux, and
+Windows (x86_64 MSVC, static CRT, zip).
 
 ---
 
@@ -1118,22 +1322,23 @@ A single MB entity can have both a native-script primary name and one or more La
 
 These are unambiguous rules for edge cases. Do not deviate from them.
 
-1. **Duplicate import (same file path already in DB)**: Print a warning with the filename, then skip. Do not silently ignore. Do not re-import or update.
+1. **Duplicate import (same file path already in DB)**: Print a warning with the filename, then skip (logged at info level and included in the import summary). Do not silently ignore. Do not re-import or update. Exception: with `--collection <name>`, an already-imported file is not skipped — the existing track is added to that collection.
 2. **Missing title tag**: Derive title from filename by stripping the file extension only. Use the result as-is. Do NOT attempt to parse `Artist - Title` patterns, strip track numbers, or clean up the filename in any way. Example: `01 Best Foot Forward.mp3` → title is `01 Best Foot Forward`.
-3. **MB returns multiple releases** (US vs UK vs Japan edition of same album): Show ALL of them as separate match candidates with their country/label/year. Do not auto-select or filter by region. Let the user choose.
-4. **Track in album AND collection with template**: During `kyoku organize`, create TWO physical copies — one in the album hierarchy (global template), one in the collection folder (collection template). The collection copy is a filesystem copy, not a move. Both paths are tracked in the DB (`tracks.file_path` for the album copy, `collection_tracks.collection_file_path` for the collection copy).
+3. **MB returns multiple releases** (US vs UK vs Japan edition of same album): show them as separate match candidates with their country/year/track-count. Never filter by region. The top candidate may be **pre-selected** when its score ≥ `[import].auto_match_threshold` (the user still confirms or overrides), and hopeless candidates outside the leader's release group may be pruned when far behind a strong leader — editions of the same album share the release group, so they survive pruning.
+4. **Track in album AND collection**: During `kyoku organize`, create TWO physical copies — one in the album hierarchy (global template), one in the collection folder (the collection's own template if set, otherwise `[library].collection_path_template`). The collection copy is a filesystem copy, not a move. Both paths are tracked in the DB (`tracks.file_path` for the album copy, `collection_tracks.collection_file_path` for the collection copy).
 5. **Track in collection only (no album)**: Only one copy, in the collection folder.
-6. **Collection without template**: Purely virtual grouping. No extra copies during organize. Track uses global template.
-7. **Track in multiple collections with templates**: Gets a copy in EACH collection folder, plus the album copy if applicable.
-8. **Empty directories after organize**: Delete automatically. No confirmation needed.
+6. **Collection without a per-collection template**: NOT a purely virtual grouping — organizing still creates physical copies, named with `[library].collection_path_template` (default `Collections/{collection}/{position:02} …`). A custom template only overrides the naming pattern of the copies. To keep a collection virtual, don't organize it (or delete its copies first).
+7. **Track in multiple collections**: Gets a copy in EACH collection folder, plus the album copy if applicable.
+8. **Empty directories after organize**: Delete automatically — but only inside the managed roots (`music_dir`, configured inbox dirs). No confirmation needed.
 9. **`music_dir` doesn't exist**: When `kyoku organize --apply` is run, ask for confirmation before creating it. Do not create silently. Do not error out.
-10. **Cover art detection**: On import, check for common folder art filenames (`cover.jpg`, `cover.png`, `folder.jpg`, `folder.png`, `front.jpg`, `front.png`, `artwork.jpg`) in the same directory as the audio files. Store the path in `albums.cover_art_path`. Do not extract embedded art to disk — read it from files on demand when needed.
-11. **Supported audio formats**: Support every format that `lofty` can read/write. At minimum: MP3, FLAC, M4A/AAC, OGG, Opus, WAV, WMA, APE, AIFF. Do not artificially restrict to a subset.
+10. **Cover art detection**: On import, check for sibling folder art whose basename is one of `cover`, `folder`, `front`, `artwork`, `album`, `albumart` with extension `jpg`/`jpeg`/`png`/`webp` (case-insensitive; first basename in that order wins) in the same directory as the audio files. Store the path in `albums.cover_art_path`. Do not extract embedded art to disk — read it from files on demand when needed. (`C` in album detail can additionally download from the Cover Art Archive into a `cover.<ext>` file; organize moves an album's sibling cover image along with the album folder.)
+11. **Supported audio formats**: kyoku recognizes a curated extension list — `mp3`, `flac`, `ogg`, `oga`, `m4a`, `aac`, `mp4`, `wav`, `wma`, `ape`, `opus`, `aiff`, `aif`. That list deliberately covers the entire original "at minimum" set (MP3, FLAC, M4A/AAC, OGG, Opus, WAV, WMA, APE, AIFF); extending it to other lofty-readable formats (e.g. Musepack, Speex) is a deliberate, one-line change in `db/models.rs`, not an accident to mask.
 12. **Library scale**: The target is 20,000–100,000 tracks. All DB queries must use indexes. TUI must use virtual scrolling / lazy loading for large result sets. Search must return results within 100ms at 100k tracks.
-13. **Sync — no removable devices detected**: Show a clear message ("No removable devices found — plug in your device and try again"). Do not fall back to a manual path input.
-14. **Sync — device not mounted**: If the selected device/partition is not mounted, offer to mount it. If mounting fails (permissions, no filesystem), show the error. Do not proceed with sync to an unmounted device.
-15. **Sync — fatsort not installed**: If the user enables fatsort but `fatsort` is not found in PATH, show a warning *before* sync starts (at the options step). Let them proceed without fatsort or cancel.
-16. **Sync — fatsort requires unmount**: After file copy, the wizard unmounts the device, runs `fatsort <device>`, and remounts. Show each step's status in the TUI. If unmount fails (device busy), warn and skip fatsort — do not force unmount.
-17. **Sync with delete**: Always show a confirmation with the count and list of files that will be deleted before proceeding. Never auto-delete.
+*Rules 13–17 describe Milestone 8 (Device Sync), which is **not yet implemented** — they are normative for that milestone, not for current builds:*
+13. **(M8, future) Sync — no removable devices detected**: Show a clear message ("No removable devices found — plug in your device and try again"). Do not fall back to a manual path input.
+14. **(M8, future) Sync — device not mounted**: If the selected device/partition is not mounted, offer to mount it. If mounting fails (permissions, no filesystem), show the error. Do not proceed with sync to an unmounted device.
+15. **(M8, future) Sync — fatsort not installed**: If the user enables fatsort but `fatsort` is not found in PATH, show a warning *before* sync starts (at the options step). Let them proceed without fatsort or cancel.
+16. **(M8, future) Sync — fatsort requires unmount**: After file copy, the wizard unmounts the device, runs `fatsort <device>`, and remounts. Show each step's status in the TUI. If unmount fails (device busy), warn and skip fatsort — do not force unmount.
+17. **(M8, future) Sync with delete**: Always show a confirmation with the count and list of files that will be deleted before proceeding. Never auto-delete.
 18. **Config file required**: All commands except `setup`, `paths`, and `info` require a config file. If missing, print an error directing the user to run `kyoku setup`. Running bare `kyoku` without a config shows a welcome message suggesting `kyoku setup`.
 
