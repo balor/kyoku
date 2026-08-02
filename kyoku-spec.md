@@ -22,8 +22,7 @@ The library state is persisted in SQLite, and **all file operations (rename, mov
 - Not a music player — no *built-in* playback; kyoku hands files to your external player (`p` in the TUI, `kyoku play` in the CLI).
 - Not a streaming client.
 - Not a recommendation engine.
-- Not a web app.
-- Not a native GUI app — kyoku lives in the terminal.
+- Not a web app nor native GUI app - kyoku lives in terminal.
 - Not automatic — kyoku will never move or rename files without an explicit action from you.
 
 ### Platform Support
