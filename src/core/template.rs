@@ -109,8 +109,9 @@ fn format_number(value: u32, spec: &str) -> String {
 /// 1. Replace / \ : * ? " < > | with _
 /// 2. Trim leading/trailing whitespace and dots
 /// 3. Collapse multiple consecutive underscores
-/// 4. Truncate to 255 bytes (with hash suffix if needed)
-/// 5. Handle Unicode correctly (no ASCII folding)
+/// 4. Dodge Windows reserved device names (NUL, CON, AUX, COM1–9, LPT1–9)
+/// 5. Truncate to 255 bytes (with hash suffix if needed)
+/// 6. Handle Unicode correctly (no ASCII folding)
 pub fn sanitize_path_component(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
 
@@ -139,6 +140,8 @@ pub fn sanitize_path_component(s: &str) -> String {
         }
     }
 
+    let mut collapsed = dodge_reserved_name(collapsed);
+
     // Truncate to 255 bytes
     if collapsed.len() > 255 {
         // Find a safe truncation point (don't split UTF-8)
@@ -162,6 +165,34 @@ pub fn sanitize_path_component(s: &str) -> String {
     }
 
     collapsed
+}
+
+/// Windows reserves CON, PRN, AUX, NUL, COM1–COM9, LPT1–LPT9 as whole
+/// stems (case-insensitive, before the first dot): `NUL.flac` is as
+/// un-creatable as `NUL`. Insert an underscore after the stem
+/// (`NUL_.flac`) so the name works everywhere.
+///
+/// Applied unconditionally (not cfg-gated): a library organized on Linux
+/// or macOS stays movable to NTFS later — renaming is exactly the class
+/// of surprise kyoku's relative-path DB is built to avoid.
+///
+/// Not covered: COM⁰/COM²/COM³-style superscript aliases (Windows 11
+/// quirk) — vanishingly rare in music metadata, and the resulting error
+/// is a surfaced, retryable per-file failure rather than data loss.
+fn dodge_reserved_name(name: String) -> String {
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let (stem, rest) = match name.find('.') {
+        Some(i) => (&name[..i], &name[i..]),
+        None => (name.as_str(), ""),
+    };
+    if RESERVED.contains(&stem.to_ascii_uppercase().as_str()) {
+        format!("{stem}_{rest}")
+    } else {
+        name
+    }
 }
 
 fn simple_hash(s: &str) -> u32 {
@@ -234,6 +265,21 @@ mod tests {
         };
         let path = render_path("{artist}/{title}.{ext}", &vars);
         assert_eq!(path, PathBuf::from("AC_DC/What's Next_.mp3"));
+    }
+
+    #[test]
+    fn dodges_windows_reserved_device_names() {
+        assert_eq!(sanitize_path_component("NUL"), "NUL_");
+        assert_eq!(sanitize_path_component("aux"), "aux_");
+        assert_eq!(sanitize_path_component("Com3.flac"), "Com3_.flac");
+        assert_eq!(sanitize_path_component("lpt9"), "lpt9_");
+        // Lookalikes must pass through untouched.
+        assert_eq!(sanitize_path_component("console"), "console");
+        assert_eq!(sanitize_path_component("COM10"), "COM10");
+        assert_eq!(sanitize_path_component("Nullo"), "Nullo");
+        // Trimmed trailing dot first turns "NUL ."-style tricks into the
+        // reserved stem.
+        assert_eq!(sanitize_path_component("NUL ."), "NUL_");
     }
 
     #[test]

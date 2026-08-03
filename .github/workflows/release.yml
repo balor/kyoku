@@ -38,6 +38,12 @@ jobs:
             runner: ubuntu-latest
             os: linux
             can_run: true
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            os: windows
+            can_run: true
+            # Static CRT so the zip runs without the VC++ redistributable.
+            rustflags: "-C target-feature=+crt-static"
 
     steps:
       - name: Checkout
@@ -56,20 +62,28 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release binary
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       # Smoke-test: make sure the binary at least launches its --help.
       # Skipped on cross-target builds (e.g. x86_64-apple-darwin on arm64)
       # because we can't assume the runner can execute a foreign arch.
+      # Git Bash on Windows runners needs the .exe suffix to exec the file.
       - name: Smoke test
         if: matrix.can_run
-        run: ./target/${{ matrix.target }}/release/kyoku --help
+        shell: bash
+        run: |
+          BIN="./target/${{ matrix.target }}/release/kyoku"
+          [ -f "${BIN}.exe" ] && BIN="${BIN}.exe"
+          "$BIN" --help
 
       # Produce `kyoku-<version>-<target>.tar.gz` with just the binary.
       # The version comes from Cargo.toml so tag-less (dispatch) runs still
       # name their artifacts meaningfully.
       - name: Package tarball
         id: package
+        if: matrix.os != 'windows'
         shell: bash
         run: |
           VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
@@ -82,24 +96,40 @@ jobs:
           echo "path=dist/${STAGING}.tar.gz" >> "$GITHUB_OUTPUT"
           echo "name=${STAGING}.tar.gz"      >> "$GITHUB_OUTPUT"
 
+      # Windows users expect .zip (Explorer opens it natively; tar.gz
+      # needs bsdtar). Compress-Archive beats relying on bash tar -a on
+      # the runner image.
+      - name: Package zip (windows)
+        id: package-windows
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $VERSION = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $STAGING = "kyoku-$VERSION-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$STAGING" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/kyoku.exe" "dist/$STAGING/"
+          Compress-Archive -Path "dist/$STAGING" -DestinationPath "dist/$STAGING.zip"
+          "path=dist/$STAGING.zip" >> $env:GITHUB_OUTPUT
+          "name=$STAGING.zip"      >> $env:GITHUB_OUTPUT
+
       # Always upload as workflow artifacts — lets you grab binaries from
       # manual `workflow_dispatch` runs without cutting a release.
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ steps.package.outputs.name }}
-          path: ${{ steps.package.outputs.path }}
+          name: ${{ steps.package.outputs.name || steps.package-windows.outputs.name }}
+          path: ${{ steps.package.outputs.path || steps.package-windows.outputs.path }}
           if-no-files-found: error
 
       # Tag builds additionally publish to a GitHub Release. softprops/action-
       # gh-release auto-creates the release on first asset upload for the tag,
-      # and appends to it on subsequent matrix jobs — so all three tarballs
-      # land on the same release page.
+      # and appends to it on subsequent matrix jobs — so all tarballs and the
+      # zip land on the same release page.
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.package.outputs.path }}
+          files: ${{ steps.package.outputs.path || steps.package-windows.outputs.path }}
           draft: false
           prerelease: false
           generate_release_notes: true

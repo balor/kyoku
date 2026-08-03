@@ -15,7 +15,13 @@ use crate::config::Settings;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let config_path = config::paths::config_file();
+    // --config <PATH> (global flag) overrides the XDG default for this run;
+    // `~` at the front of the flag value is expanded like anywhere else.
+    let config_path = cli
+        .config
+        .clone()
+        .map(config::paths::expand_tilde)
+        .unwrap_or_else(config::paths::config_file);
     let config_exists = config_path.exists();
 
     // Default to info-level for our own crate so CLI commands print their
@@ -72,7 +78,7 @@ fn main() -> anyhow::Result<()> {
                     Settings::default()
                 }
             };
-            cli::setup::run(settings)?;
+            cli::setup::run(settings, &config_path)?;
             return Ok(());
         }
         Some(Command::Paths) => {
@@ -80,7 +86,9 @@ fn main() -> anyhow::Result<()> {
                 Ok(settings) => (settings, None),
                 Err(e) => (Settings::default(), Some(e.to_string())),
             };
-            let config = config::paths::config_file();
+            // `paths` prints the *effective* config file — honor --config
+            // so users can verify which file the override actually reads.
+            let config = &config_path;
             let db = settings.database_file();
             let cache = config::paths::cache_dir();
             let music = &settings.library.music_dir;

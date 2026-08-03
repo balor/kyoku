@@ -7,9 +7,7 @@ use crate::config::{
     settings::{CoverArtSize, NameScriptPreference},
 };
 
-pub fn run(current: Settings) -> anyhow::Result<()> {
-    let config_path = config::paths::config_file();
-
+pub fn run(current: Settings, config_path: &std::path::Path) -> anyhow::Result<()> {
     println!("kyoku setup");
     println!("===========");
     println!();

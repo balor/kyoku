@@ -74,84 +74,135 @@ pub fn from_db_path(stored: &str, music_dir: &Path) -> PathBuf {
     music_dir.join(p)
 }
 
+/// Test-path helpers shared by path-storage tests across modules
+/// (`core/paths.rs`, `db/schema.rs`).
+///
+/// Rationale: these tests exercise *absolute-path* semantics
+/// (`is_absolute`, `strip_prefix`), but a Unix literal like
+/// `/home/user/Music` is NOT absolute on Windows (a leading separator
+/// without a drive prefix is merely root-relative), which broke these
+/// tests on the windows-latest CI job. `abs()` maps Unix-shaped test
+/// literals onto a real absolute path per platform; `db()` adjusts
+/// expected DB strings for the platform separator (`display()` joins
+/// components with `\` on Windows).
+#[cfg(test)]
+pub(crate) mod plat {
+    use std::path::PathBuf;
+
+    /// Absolute path for the current platform from a unix-style literal.
+    /// `abs("/home/user/Music")` → `/home/user/Music` on Unix,
+    /// `C:\home\user\Music` on Windows.
+    pub(crate) fn abs(s: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!(
+                "C:\\{}",
+                s.trim_start_matches('/').replace('/', "\\")
+            ))
+        } else {
+            PathBuf::from(s)
+        }
+    }
+
+    /// Same as [`abs`], as a displayed string (for SQL literals / DB
+    /// string expectations).
+    pub(crate) fn abs_str(s: &str) -> String {
+        abs(s).display().to_string()
+    }
+
+    /// Expected DB-stored form of a path literal written with `/`
+    /// separators — backslash-separated on Windows.
+    pub(crate) fn db(s: &str) -> String {
+        if cfg!(windows) {
+            s.replace('/', "\\")
+        } else {
+            s.to_string()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::plat::{abs, abs_str, db};
     use super::*;
 
     #[test]
     fn inside_music_dir_strips_to_relative() {
-        let music = Path::new("/home/user/Music");
-        let p = Path::new("/home/user/Music/Artist/Album/01.mp3");
-        assert_eq!(to_db_path(p, music), "Artist/Album/01.mp3");
+        let music = abs("/home/user/Music");
+        let p = abs("/home/user/Music/Artist/Album/01.mp3");
+        assert_eq!(to_db_path(&p, &music), db("Artist/Album/01.mp3"));
     }
 
     #[test]
     fn outside_music_dir_kept_absolute() {
-        let music = Path::new("/home/user/Music");
-        let p = Path::new("/home/user/Downloads/x.mp3");
-        assert_eq!(to_db_path(p, music), "/home/user/Downloads/x.mp3");
+        let music = abs("/home/user/Music");
+        let p = abs("/home/user/Downloads/x.mp3");
+        assert_eq!(
+            to_db_path(&p, &music),
+            abs_str("/home/user/Downloads/x.mp3")
+        );
     }
 
     #[test]
     fn equal_to_music_dir_kept_absolute() {
         // The library root itself is not a track; defensively don't produce
         // an empty string if someone passes it in.
-        let music = Path::new("/home/user/Music");
-        assert_eq!(to_db_path(music, music), "/home/user/Music");
+        let music = abs("/home/user/Music");
+        assert_eq!(to_db_path(&music, &music), abs_str("/home/user/Music"));
     }
 
     #[test]
     fn boundary_prefix_not_confused_with_sibling_dir() {
-        let music = Path::new("/home/user/Music");
-        let p = Path::new("/home/user/Music Backup/Artist/01.mp3");
+        let music = abs("/home/user/Music");
+        let p = abs("/home/user/Music Backup/Artist/01.mp3");
         // /home/user/Music is NOT a parent of /home/user/Music Backup/...
         assert_eq!(
-            to_db_path(p, music),
-            "/home/user/Music Backup/Artist/01.mp3"
+            to_db_path(&p, &music),
+            abs_str("/home/user/Music Backup/Artist/01.mp3")
         );
     }
 
     #[test]
     fn relative_input_passes_through() {
-        let music = Path::new("/home/user/Music");
+        let music = abs("/home/user/Music");
+        // Verbatim pass-through: display() never normalizes separators
+        // (that's also why callers feeding strip_prefix-derived paths get
+        // the input's own separator style).
         assert_eq!(
-            to_db_path(Path::new("Artist/01.mp3"), music),
+            to_db_path(Path::new("Artist/01.mp3"), &music),
             "Artist/01.mp3"
         );
     }
 
     #[test]
     fn from_db_relative_is_joined() {
-        let music = Path::new("/home/user/Music");
+        let music = abs("/home/user/Music");
         assert_eq!(
-            from_db_path("Artist/Album/01.mp3", music),
-            PathBuf::from("/home/user/Music/Artist/Album/01.mp3")
+            from_db_path("Artist/Album/01.mp3", &music),
+            abs("/home/user/Music/Artist/Album/01.mp3")
         );
     }
 
     #[test]
     fn from_db_absolute_passes_through() {
-        let music = Path::new("/home/user/Music");
-        assert_eq!(
-            from_db_path("/elsewhere/x.mp3", music),
-            PathBuf::from("/elsewhere/x.mp3")
-        );
+        let music = abs("/home/user/Music");
+        let stored = abs_str("/elsewhere/x.mp3");
+        assert_eq!(from_db_path(&stored, &music), abs("/elsewhere/x.mp3"));
     }
 
     #[test]
     fn round_trip_under_music_dir() {
-        let music = Path::new("/home/user/Music");
-        let abs = PathBuf::from("/home/user/Music/A/B.mp3");
-        let stored = to_db_path(&abs, music);
-        assert_eq!(from_db_path(&stored, music), abs);
+        let music = abs("/home/user/Music");
+        let abs_path = abs("/home/user/Music/A/B.mp3");
+        let stored = to_db_path(&abs_path, &music);
+        assert_eq!(from_db_path(&stored, &music), abs_path);
     }
 
     #[test]
     fn round_trip_outside_music_dir() {
-        let music = Path::new("/home/user/Music");
-        let abs = PathBuf::from("/tmp/inbox/x.mp3");
-        let stored = to_db_path(&abs, music);
-        assert_eq!(from_db_path(&stored, music), abs);
+        let music = abs("/home/user/Music");
+        let abs_path = abs("/tmp/inbox/x.mp3");
+        let stored = to_db_path(&abs_path, &music);
+        assert_eq!(from_db_path(&stored, &music), abs_path);
     }
 
     #[test]
@@ -159,13 +210,13 @@ mod tests {
         // The whole point of the refactor: the same DB row resolves under
         // a renamed music_dir without any DB rewrite.
         let stored = to_db_path(
-            Path::new("/home/user/Music/Artist/01.mp3"),
-            Path::new("/home/user/Music"),
+            &abs("/home/user/Music/Artist/01.mp3"),
+            &abs("/home/user/Music"),
         );
-        let renamed = Path::new("/mnt/external/Music");
+        let renamed = abs("/mnt/external/Music");
         assert_eq!(
-            from_db_path(&stored, renamed),
-            PathBuf::from("/mnt/external/Music/Artist/01.mp3")
+            from_db_path(&stored, &renamed),
+            abs("/mnt/external/Music/Artist/01.mp3")
         );
     }
 

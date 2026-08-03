@@ -1083,8 +1083,7 @@ impl CollectionDetailView {
             } else {
                 format!("{} tracks", rows.len())
             };
-            let items =
-                crate::core::player::items_from_rows(&rows, Some(&self.collection_paths));
+            let items = crate::core::player::items_from_rows(&rows, Some(&self.collection_paths));
             self.notice = Some(match crate::core::player::play(settings, items) {
                 Ok(outcome) => crate::core::player::outcome_notice(&outcome, &context),
                 Err(e) => format!("Play failed: {}", e),
@@ -1111,7 +1110,6 @@ impl CollectionDetailView {
         if key.code == KeyCode::Char('O') {
             return CollectionDetailAction::Organize;
         }
-        #[cfg(not(target_os = "windows"))]
         if key.code == KeyCode::Char('o') {
             return CollectionDetailAction::OpenDir;
         }

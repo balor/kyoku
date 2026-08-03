@@ -1,0 +1,62 @@
+name: CI
+
+# Added with native Windows support (doc/design/2026-08-01-windows-support.md).
+# The test matrix is the primary Windows testbed: it compiles all
+# cfg(windows) code and runs the test suite — including the Windows
+# player-detection and NTFS case-folding tests — on real Windows without
+# requiring the maintainer to own Windows hardware.
+on:
+  push:
+    branches: [main, "experimental-*", "feature/*"]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Run tests
+        run: cargo test --all-targets
+
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Mirrors `just lint`. (No `cargo fmt --check` yet: the tree isn't
+      # rustfmt-clean on main — that gate comes with a dedicated
+      # repo-wide format commit, not this one.)
+      - name: clippy
+        run: cargo clippy --all-targets -- -W clippy::all

@@ -3,9 +3,15 @@
 //! Verifies the whole pipeline — resolution via `[player].command`,
 //! playlist writing, template substitution, spawn, outcome counting —
 //! without touching a real player.
+//!
+//! Unix-only: the fake player is a POSIX shell script executed directly.
+//! Windows coverage of the resolution half lives in the `Probes`-faked
+//! unit tests in `src/core/player.rs`; a `.cmd`-based spawn e2e is a
+//! tracked follow-up (see doc/design/2026-08-01-windows-support.md).
+#![cfg(unix)]
 
-use kyoku::core::player::{self, PlayItem};
 use kyoku::config::Settings;
+use kyoku::core::player::{self, PlayItem};
 use std::path::PathBuf;
 
 /// `play()` spawns fire-and-forget, so the fake player's output files
@@ -82,7 +88,9 @@ fn play_launches_configured_command_with_playlist() {
     let outcome = player::play(&settings, items).expect("play should succeed");
     assert_eq!(outcome.played, 2);
     assert_eq!(outcome.skipped_missing, 0);
-    let playlist = outcome.playlist_path.expect("multi-item play writes a playlist");
+    let playlist = outcome
+        .playlist_path
+        .expect("multi-item play writes a playlist");
 
     // The fake player saw: script-arg substituted with the playlist path.
     let argv = wait_for_file(&tmp.path().join("argv.txt"));
@@ -112,7 +120,10 @@ fn play_single_track_opens_file_directly() {
 
     let outcome = player::play(&settings, vec![PlayItem::from_path(a.clone())]).unwrap();
     assert_eq!(outcome.played, 1);
-    assert!(outcome.playlist_path.is_none(), "single track → no playlist file");
+    assert!(
+        outcome.playlist_path.is_none(),
+        "single track → no playlist file"
+    );
 
     let argv = wait_for_file(&tmp.path().join("argv.txt"));
     assert_eq!(argv.trim(), a.display().to_string());

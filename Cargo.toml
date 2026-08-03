@@ -61,5 +61,11 @@ path = "src/main.rs"
 name = "create_fixtures"
 path = "tests/fixtures/create_fixtures.rs"
 
+# Embeds packaging/windows/kyoku.manifest (longPathAware) into the exe.
+# Compiled on all platforms so cross-builds (xwin, cargo-zigbuild) keep
+# working; build.rs only invokes it when targeting Windows.
+[build-dependencies]
+embed-resource = "3"
+
 [dev-dependencies]
 tempfile = "3"
