@@ -272,6 +272,9 @@ impl ImportView {
     }
 
     fn handle_review_key(&mut self, key: KeyEvent, conn: &Connection) {
+        // Transient notices live until the user reacts to them.
+        self.notice = None;
+
         // Per-group collection picker captures all keys
         if let Some(picker) = &mut self.collection_picker {
             match picker.handle_key(key) {
@@ -464,6 +467,9 @@ impl ImportView {
                 input.focused = true;
                 self.mbid_input = Some(input);
             }
+            // 'o' reveals the current group's source directory in the
+            // system file manager (same key as Album/Collection detail).
+            KeyCode::Char('o') => self.open_current_group_location(),
             KeyCode::Char('n') => self.next_group(),
             KeyCode::Char('p') => self.prev_group(),
             KeyCode::Char('r') => self.retry_mb_for_current_group(),
@@ -536,6 +542,35 @@ impl ImportView {
             group.mb_candidates.clear();
         }
         self.search_mb_for_group(idx);
+    }
+
+    /// Reveal the current group's source directory in the system file
+    /// manager ('o' — same binding as the album/collection detail views).
+    /// Uses the detail view's cross-platform opener; failures surface as a
+    /// one-line notice in the review header (e.g. headless SSH session).
+    fn open_current_group_location(&mut self) {
+        let Some(group) = self.groups.get(self.current_group) else {
+            return;
+        };
+        let dir = group
+            .tracks
+            .first()
+            .and_then(|(t, _)| t.source_dir.as_deref().or_else(|| t.file_path.parent()));
+        let msg = match dir {
+            Some(d) if d.exists() => {
+                if crate::tui::views::detail::open_directory(d) {
+                    None
+                } else {
+                    Some(format!(
+                        "Could not open file manager — path: {}",
+                        d.display()
+                    ))
+                }
+            }
+            Some(d) => Some(format!("Directory not found: {}", d.display())),
+            None => Some("No folder for this group".to_string()),
+        };
+        self.notice = msg;
     }
 
     /// Fetch a release by MBID on a background thread.

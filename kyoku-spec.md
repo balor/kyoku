@@ -505,6 +505,7 @@ Intra-batch conflicts (two incoming tracks collide with each other rather than w
   - **To a collection** (`c`) — import the group straight into a chosen collection
   - **Skip** — don't import this album at all
   - **Manual MBID/URL lookup** (`m`) — paste a release MBID or musicbrainz.org URL to pin the match
+  - **Open file location** (`o`) — reveal the group's source folder in the system file manager
   - **Retry search** (`r`) — re-query MB after a failed lookup
   - (Future: in-wizard field editing before applying — today edits happen post-import in the tag editor)
 

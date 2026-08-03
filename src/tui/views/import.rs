@@ -200,6 +200,9 @@ pub struct ImportView {
     /// here so the worker, which spawns its own connection on its own
     /// thread, doesn't have to re-derive it from settings.
     pub db_path: PathBuf,
+    /// Transient one-line notice rendered in the review header (e.g. "could
+    /// not open file manager"). Cleared on the next review keypress.
+    pub notice: Option<String>,
     /// Resolved library root, threaded into the background worker so it
     /// can normalise paths (relative-when-under-music_dir) when writing
     /// rows. Same rationale as `db_path` — the worker has its own conn.
@@ -304,6 +307,7 @@ impl Default for ImportView {
             write_tags: true,
             auto_match_threshold: 0.85,
             match_candidates: 5,
+            notice: None,
             db_path: PathBuf::new(),
             music_dir: PathBuf::new(),
             scan_rx: None,
