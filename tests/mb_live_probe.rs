@@ -37,11 +37,14 @@ struct Scenario {
 
 const SCENARIOS: &[Scenario] = &[
     Scenario {
+        // Real tags: album_artist is the localised-VA label "@Artisti
+        // Vari" (which used to fuzzy-hit the artist "Shari Vari"),
+        // year 2006, 10 tracks.
         folder: "(2006) Return To The Dark Side Of The Moon (A Tribute To Pink Floyd) [FLAC]",
-        tag_artist: None,
-        local_track_count: 13,
+        tag_artist: Some("@Artisti Vari"),
+        local_track_count: 10,
         expect_substring: "Return to the Dark Side of the Moon",
-        leader_artist: None,
+        leader_artist: Some("Various Artists"),
     },
     Scenario {
         folder: "1968 Procol Harum - Shine On Brightly",

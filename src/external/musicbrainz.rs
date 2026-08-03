@@ -6,6 +6,7 @@ use serde::Deserialize;
 use crate::config::settings::NameScriptPreference;
 use crate::error::Result;
 use crate::external::http::{self, AttemptError};
+use crate::external::matching::is_various_artists_label;
 use crate::external::name_preference::{AliasKind, MbAlias, pick_preferred_name};
 const MB_BASE: &str = "https://musicbrainz.org/ws/2";
 
@@ -19,6 +20,13 @@ const MIN_SEARCH_FETCH: u32 = 25;
 /// during year enrichment of one search batch. Worst case adds this many
 /// throttled requests (~1.1s each) on top of the search itself.
 const MAX_RG_YEAR_LOOKUPS: usize = 5;
+
+/// MB relevance floor below which a search pass' best result is treated as
+/// fuzzy token noise rather than a real match. Exact release hits land at
+/// ~80-100; junk from a wrong artist constraint (e.g. "Artisti Vari"
+/// matching the artist "Shari Vari") sits well under 60. Such passes feed
+/// the weak pool instead of ending the search.
+const WEAK_SCORE_FLOOR: u8 = 60;
 
 #[derive(Debug, Clone)]
 pub struct MbRelease {
@@ -108,6 +116,28 @@ impl MbClient {
         let clean_artist = strip_trailing_punct(artist);
         let clean_album = strip_parenthesized_suffix(album);
 
+        // Various-Artists labels ("@Artisti Vari", "VA", ...) can't be
+        // matched against MB artist text — the credit lives on MB's special
+        // "Various Artists" entity. Worse, token fuzz turns them into junk
+        // artist constraints ("Artisti Vari" fuzzy-hits the artist "Shari
+        // Vari" — a real miss observed on a Pink Floyd tribute rip). Treat
+        // the album as artist-less: the title is the only solid signal.
+        let clean_artist = if is_various_artists_label(&clean_artist) {
+            String::new()
+        } else {
+            clean_artist
+        };
+
+        // Title variants for the FIRST passes: `clean_album` already lost
+        // any trailing "(…)" qualifier under the assumption that MB stores
+        // those in `disambiguation`. That's wrong for subtitles that are
+        // part of the real title — "Return to the Dark Side of the Moon:
+        // A Tribute to Pink Floyd" only reaches #1 relevance when the
+        // distinctive "tribute" token is in the query; without it the pool
+        // fills with generic "Dark Side of the Moon" covers. Try the raw
+        // tag value first, then the stripped form.
+        let title_variants = album_title_variants(album, &clean_album);
+
         // MB's relevance ordering is nearly useless for well-known albums:
         // dozens of pressings all score 100 and come back in an arbitrary
         // (effectively submission) order — the top-5 can easily be all JP/
@@ -135,20 +165,32 @@ impl MbClient {
         // First attempt: artist + album (string match on credit name).
         // All-punctuation artists clean down to empty; don't build the
         // malformed Lucene clause `artist:()` in that case.
+        //
+        // Weak-result guard: a pass whose best MB relevance is below
+        // WEAK_SCORE_FLOOR is fuzzy token noise, not a real match (exact
+        // releases score 80-100). Don't end the search on it — remember it
+        // and keep walking the fallbacks; it's only returned if nothing
+        // looser produces anything at all.
+        let mut weak_pool: Vec<MbRelease> = Vec::new();
+
         if !clean_artist.trim().is_empty() {
-            let releases = self.run_search_artist(
-                &clean_artist,
-                Some(&clean_album),
-                fetch_limit,
-                type_filter,
-            )?;
-            if !releases.is_empty() {
-                return Ok(releases);
+            for title in &title_variants {
+                let releases = self.run_search_artist(
+                    &clean_artist,
+                    Some(title),
+                    fetch_limit,
+                    type_filter,
+                )?;
+                if let Some(hit) = gate_pass(releases, &mut weak_pool) {
+                    return Ok(hit);
+                }
             }
         } else {
-            let releases = self.run_search_album(&clean_album, fetch_limit, type_filter)?;
-            if !releases.is_empty() {
-                return Ok(releases);
+            for title in &title_variants {
+                let releases = self.run_search_album(title, fetch_limit, type_filter)?;
+                if let Some(hit) = gate_pass(releases, &mut weak_pool) {
+                    return Ok(hit);
+                }
             }
         }
 
@@ -170,8 +212,8 @@ impl MbClient {
         if !arids.is_empty() {
             let releases =
                 self.run_search_arids(&arids, Some(&clean_album), fetch_limit, type_filter)?;
-            if !releases.is_empty() {
-                return Ok(releases);
+            if let Some(hit) = gate_pass(releases, &mut weak_pool) {
+                return Ok(hit);
             }
         }
 
@@ -185,20 +227,20 @@ impl MbClient {
             if !clean_artist.trim().is_empty() {
                 let releases =
                     self.run_search_artist(&clean_artist, Some(&clean_album), fetch_limit, None)?;
-                if !releases.is_empty() {
-                    return Ok(releases);
+                if let Some(hit) = gate_pass(releases, &mut weak_pool) {
+                    return Ok(hit);
                 }
             } else {
                 let releases = self.run_search_album(&clean_album, fetch_limit, None)?;
-                if !releases.is_empty() {
-                    return Ok(releases);
+                if let Some(hit) = gate_pass(releases, &mut weak_pool) {
+                    return Ok(hit);
                 }
             }
             if !arids.is_empty() {
                 let releases =
                     self.run_search_arids(&arids, Some(&clean_album), fetch_limit, None)?;
-                if !releases.is_empty() {
-                    return Ok(releases);
+                if let Some(hit) = gate_pass(releases, &mut weak_pool) {
+                    return Ok(hit);
                 }
             }
         }
@@ -211,16 +253,16 @@ impl MbClient {
         // noise from popular titles ranks low naturally.
         if !clean_artist.trim().is_empty() && clean_album.chars().count() >= 3 {
             let releases = self.run_search_album(&clean_album, fetch_limit, None)?;
-            if !releases.is_empty() {
-                return Ok(releases);
+            if let Some(hit) = gate_pass(releases, &mut weak_pool) {
+                return Ok(hit);
             }
         }
 
         // Fallback 3: artist only (string match), in case album spelling differs
         if !clean_artist.trim().is_empty() {
             let releases = self.run_search_artist(&clean_artist, None, fetch_limit, None)?;
-            if !releases.is_empty() {
-                return Ok(releases);
+            if let Some(hit) = gate_pass(releases, &mut weak_pool) {
+                return Ok(hit);
             }
         }
 
@@ -229,8 +271,8 @@ impl MbClient {
         // candidate for a short alias like "Minami" produces unrelated noise.
         if arids.len() == 1 {
             let releases = self.run_search_arids(&arids, None, fetch_limit, None)?;
-            if !releases.is_empty() {
-                return Ok(releases);
+            if let Some(hit) = gate_pass(releases, &mut weak_pool) {
+                return Ok(hit);
             }
         }
 
@@ -238,11 +280,14 @@ impl MbClient {
         if clean_artist != artist {
             let releases =
                 self.run_search_artist(artist, Some(&clean_album), fetch_limit, None)?;
-            if !releases.is_empty() {
-                return Ok(releases);
+            if let Some(hit) = gate_pass(releases, &mut weak_pool) {
+                return Ok(hit);
             }
         }
 
+        if !weak_pool.is_empty() {
+            return Ok(weak_pool);
+        }
         Ok(Vec::new())
     }
 
@@ -1100,6 +1145,37 @@ fn parse_aliases(v: &serde_json::Value) -> Vec<MbAlias> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Album-title query variants, most specific first: the raw tag value
+/// (whose parenthetical may be part of the real MB title) followed by the
+/// qualifier-stripped form (for when MB keeps the qualifier in
+/// `disambiguation` instead). Dedupes when stripping changed nothing.
+fn album_title_variants<'a>(raw: &'a str, clean: &'a str) -> Vec<&'a str> {
+    let raw = raw.trim();
+    if !raw.is_empty() && raw != clean {
+        vec![raw, clean]
+    } else {
+        vec![clean]
+    }
+}
+
+/// Gate one search pass' outcome: `Some(releases)` accepts the pass and
+/// ends the search; `None` walks on to looser fallbacks. Passes whose best
+/// hit sits under WEAK_SCORE_FLOOR are fuzzy noise — remembered in `pool`
+/// (first/most-specific wins) and surfaced only if every pass comes up
+/// short, so the user sees *something* rather than an empty list.
+fn gate_pass(releases: Vec<MbRelease>, pool: &mut Vec<MbRelease>) -> Option<Vec<MbRelease>> {
+    if releases.is_empty() {
+        return None;
+    }
+    if releases.iter().any(|r| r.api_score >= WEAK_SCORE_FLOOR) {
+        return Some(releases);
+    }
+    if pool.is_empty() {
+        *pool = releases;
+    }
+    None
 }
 
 /// Compute `group_min_year` for a batch of search results: the earliest

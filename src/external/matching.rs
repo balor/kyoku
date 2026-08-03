@@ -57,7 +57,14 @@ pub fn score_release(
     // the artist via MBID alias lookup, so a script mismatch here reflects
     // the MB credit being in a different script, not a wrong artist.
     let local_artist = local_artist.trim();
-    let artist = if local_artist.is_empty() || scripts_differ(local_artist, &candidate.artist) {
+    let artist = if local_artist.is_empty()
+        || is_various_artists_label(local_artist)
+        || scripts_differ(local_artist, &candidate.artist)
+    {
+        // Various-Artists labels can't be string-compared against MB's
+        // "Various Artists" credit in whatever language — exclude the
+        // factor like an empty artist instead of penalising the correct
+        // tribute album for the tagger's localisation choice.
         None
     } else {
         Some(sim(local_artist, &candidate.artist))
@@ -301,6 +308,30 @@ fn originality_score(years_after_original: i32) -> f64 {
         6..=8 => 0.15,
         _ => 0.08,
     }
+}
+
+/// True for Various-Artists-style album_artist labels produced by real
+/// taggers/rippers: "Various Artists", "VA"/"V.A.", "Artisti Vari"
+/// (Italian), stray @-prefixed variants seen on Soulseek rips,
+/// オムニバス... These never resolve usefully through MB artist
+/// search — MB credits such releases to the special-purpose "Various
+/// Artists" entity, which plain text search won't reach from a translated
+/// label. Callers should treat such artists as "no artist constraint".
+pub fn is_various_artists_label(s: &str) -> bool {
+    if s.contains("オムニバス") || s.contains("ヴァリアス") {
+        return true;
+    }
+    // Lowercase and drop anything that isn't a Latin letter — this folds
+    // "@Artisti Vari", "V.A.", "V/A" etc. into comparable forms.
+    let compact: String = s
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    matches!(
+        compact.as_str(),
+        "variousartists" | "variousartist" | "various" | "va" | "artistivari" | "variartisti"
+    )
 }
 
 /// True when two strings share no common script — treating them as
@@ -779,6 +810,60 @@ mod tests {
         assert!(!is_pure_latin("花冷え。"));
         assert!(!is_pure_latin("幻燈"));
         assert!(!is_pure_latin("BUMP OF CHICKEN 結成"));
+    }
+
+    #[test]
+    fn various_artists_labels_detected() {
+        for s in [
+            "Various Artists",
+            "various artists",
+            "Various",
+            "VA",
+            "V.A.",
+            "V/A",
+            "Artisti Vari",
+            "@Artisti Vari", // real tag from an Italian Soulseek rip
+            "オムニバス",
+            "ヴァリアス・アーティスト",
+        ] {
+            assert!(is_various_artists_label(s), "{s:?} should be VA");
+        }
+        for s in ["Genesis", "Variety Show", "Vangelis", ""] {
+            assert!(!is_various_artists_label(s), "{s:?} is not VA");
+        }
+    }
+
+    #[test]
+    fn various_artists_label_excluded_from_scoring() {
+        // The tribute-album case: local album_artist is a localised VA
+        // label, MB credit is "Various Artists". The artist factor must be
+        // excluded, not scored near-zero — otherwise the *correct* tribute
+        // release sinks below random pressings.
+        let tribute = make_release(
+            "Various Artists",
+            "Return to the Dark Side of the Moon",
+            &[],
+        );
+        let tribute = MbRelease {
+            track_count: 10,
+            year: Some(2006),
+            group_min_year: Some(2006),
+            ..tribute
+        };
+        let score = score_release(
+            "@Artisti Vari",
+            "Return To The Dark Side Of The Moon (A Tribute To Pink Floyd)",
+            Some(2006),
+            10,
+            &[],
+            0,
+            &tribute,
+        );
+        assert!(
+            score.total > 0.85,
+            "VA-labeled correct album must score as a clean match: {}",
+            score.total
+        );
     }
 
     #[test]
