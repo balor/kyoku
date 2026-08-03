@@ -6,6 +6,12 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "kyoku", version, about = "TUI-first music library manager")]
 pub struct Cli {
+    /// Use a specific config file instead of the default XDG location
+    /// (`~/.config/kyoku/config.toml`). Works with every subcommand;
+    /// `kyoku setup --config <path>` writes the config there.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -118,6 +124,18 @@ mod tests {
         assert!(
             Cli::try_parse_from(["kyoku", "organize", "--artist", "A", "--album", "B",]).is_err()
         );
+    }
+
+    #[test]
+    fn global_config_flag_parses_around_subcommands() {
+        // Global args are accepted both before and after the subcommand.
+        let c = Cli::try_parse_from(["kyoku", "--config", "custom.toml", "paths"]).unwrap();
+        assert_eq!(c.config.as_deref(), Some(std::path::Path::new("custom.toml")));
+        let c = Cli::try_parse_from(["kyoku", "paths", "--config", "custom.toml"]).unwrap();
+        assert_eq!(c.config.as_deref(), Some(std::path::Path::new("custom.toml")));
+        // Unset → None → the platform default wins downstream.
+        let c = Cli::try_parse_from(["kyoku", "paths"]).unwrap();
+        assert!(c.config.is_none());
     }
 
     #[test]

@@ -298,6 +298,8 @@ Config deliberately uses an XDG-style path on every platform:
 
 `$XDG_CONFIG_HOME` overrides the config root (and `$XDG_DATA_HOME` / `$XDG_CACHE_HOME` the data/cache roots on Linux). The database location is controlled by `[library] data_dir`; its default comes from the platform data directory. Cache uses the platform cache directory. A leading `~` in any path value (`music_dir`, `data_dir`, `inbox_dirs` entries) expands to the home directory.
 
+A global `--config <path>` flag (accepted by every command, before or after the subcommand) overrides the config location for one invocation; `kyoku setup --config <path>` writes the config there. This is the supported way to run two independent libraries side by side. `kyoku paths` prints the effective file being read, so the flag's effect is easy to verify.
+
 ### config.toml
 
 ```toml

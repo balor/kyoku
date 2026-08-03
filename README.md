@@ -108,7 +108,7 @@ kyoku             # launch the TUI — everything else lives in there
 
 The CLI subcommands (`import`, `scan`, `organize`, …) are there for scripting, but day-to-day use happens mostly in the TUI. MusicBrainz review/matching currently lives in the TUI import wizard; CLI import is a simpler as-is cataloging path. Run `kyoku --help` if you want to see the commands.
 
-Config lives at `$XDG_CONFIG_HOME/kyoku/config.toml`, or `~/.config/kyoku/config.toml` if that variable isn't set. The database location is configurable during setup. Run `kyoku paths` to see the exact locations on your machine.
+Config lives at `$XDG_CONFIG_HOME/kyoku/config.toml`, or `~/.config/kyoku/config.toml` if that variable isn't set. The global `--config <path>` flag reads (or, for `kyoku setup`, writes) a different config file for one invocation — handy for keeping multiple libraries separate or testing config changes: `kyoku --config ~/alt/config.toml`. The database location is configurable during setup. Run `kyoku paths` to see the exact locations on your machine.
 
 To pin a specific music player for `p`/`kyoku play` (otherwise auto-detected), set `[player] command` or, on macOS only, `[player] app` — see [External player hand-off](#external-player-hand-off) for the full auto-detect tables per platform.
 
