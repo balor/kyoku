@@ -932,6 +932,36 @@ impl ImportView {
             prune_weak_candidates_after_obvious_leader(&mut candidates);
             candidates.truncate(limit as usize);
 
+            // Enrich years for finalists only. Search-response date coverage
+            // is spotty, and at 100-wide pools paying a throttled release
+            // group lookup for every date-less entry would clog the shared
+            // client (and starve the prefetch of the next groups) for rows
+            // the user never sees. Rescore after filling — an enriched year
+            // can reorder what the coarse pass got wrong.
+            if candidates
+                .iter()
+                .any(|c| c.release.year.is_none() && c.release.release_group_id.is_some())
+            {
+                let mut refs: Vec<&mut crate::external::musicbrainz::MbRelease> = candidates
+                    .iter_mut()
+                    .map(|c| &mut c.release)
+                    .collect();
+                client.enrich_missing_years(&mut refs);
+                for candidate in candidates.iter_mut() {
+                    candidate.score = matching::score_release(
+                        &artist,
+                        &album,
+                        year,
+                        track_count,
+                        &titles,
+                        total_ms,
+                        &candidate.release,
+                    );
+                }
+                candidates.sort_by(compare_mb_candidates);
+                prune_weak_candidates_after_obvious_leader(&mut candidates);
+            }
+
             // Tiebreaker: when top candidates are within 10% of the leader,
             // fetch the full release for each tied candidate so we can compare
             // track titles and durations. The search API doesn't return tracks,

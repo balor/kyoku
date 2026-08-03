@@ -90,6 +90,10 @@ pub struct MbClient {
     /// session so a multi-release import of the same artist pays the
     /// `/artist/{mbid}?inc=aliases` cost only once.
     artist_alias_cache: HashMap<String, Vec<MbAlias>>,
+    /// Per-name artist→MBID resolution cache. A multi-album import of one
+    /// artist would otherwise repeat the throttled artist-search call for
+    /// every group whose first pass missed (e.g. script-variant credits).
+    artist_mbid_cache: HashMap<String, Vec<String>>,
 }
 
 impl MbClient {
@@ -101,6 +105,7 @@ impl MbClient {
             throttle: http::Throttle::new(rate_limit_ms),
             name_script,
             artist_alias_cache: HashMap::new(),
+            artist_mbid_cache: HashMap::new(),
         }
     }
 
@@ -307,6 +312,16 @@ impl MbClient {
     /// Short Latin aliases are ambiguous, so callers should constrain these
     /// candidates with album/release data before accepting one.
     fn resolve_artist_mbids(&mut self, name: &str, limit: u32) -> Result<Vec<String>> {
+        if let Some(cached) = self.artist_mbid_cache.get(name) {
+            return Ok(cached.clone());
+        }
+        let ids = self.fetch_artist_mbids_uncached(name, limit)?;
+        self.artist_mbid_cache
+            .insert(name.to_string(), ids.clone());
+        Ok(ids)
+    }
+
+    fn fetch_artist_mbids_uncached(&mut self, name: &str, limit: u32) -> Result<Vec<String>> {
         let query = escape_lucene(name);
         let url = format!(
             "{}/artist/?query={}&fmt=json&limit={}",
@@ -450,18 +465,11 @@ impl MbClient {
 
         self.expand_pseudo_release_groups(&mut releases, limit);
 
-        // Year-fallback #4: when the search response carries no date info
-        // for a release (e.g. MB's Maenarawanai — neither `date`,
-        // `release-events`, nor `release-group.first-release-date` appear
-        // in search output, though the release page on MB shows them), fill
-        // the gap by fetching `first-release-date` from the release group.
-        // Bounded per unique release group so a wide search result can't
-        // burst dozens of extra requests.
-        self.enrich_missing_years(&mut releases);
-
-        // Compute the per-release-group signals used by the scorer to
-        // prefer original pressings over reissues and famous editions of
-        // the *same* album over same-titled noise.
+        // NOTE: year enrichment deliberately does NOT happen here — it
+        // costs one throttled request per distinct date-less release
+        // group, and ~95% of a 100-entry search pool is truncated away by
+        // local scoring immediately after. Callers enrich the *finalists*
+        // via `enrich_missing_years` right before display.
         assign_release_group_stats(&mut releases);
 
         Ok(releases)
@@ -602,7 +610,13 @@ impl MbClient {
         Ok(releases)
     }
 
-    fn enrich_missing_years(&mut self, releases: &mut [MbRelease]) {
+    /// Fill missing release years via each candidate's release-group
+    /// `first-release-date` (year fallback #4 — search coverage of dates
+    /// is inconsistent). Public so callers can run it only on the few
+    /// finalists they'll actually display instead of paying a throttled
+    /// request for every date-less entry of a wide search pool. Per-group
+    /// memoised, capped at MAX_RG_YEAR_LOOKUPS distinct groups per call.
+    pub fn enrich_missing_years(&mut self, releases: &mut [&mut MbRelease]) {
         // Per-release-group memo so siblings share one lookup; capped so a
         // wide search (up to 100 candidates across many groups) can't queue
         // a request storm behind the rate-limiter.
@@ -637,6 +651,28 @@ impl MbClient {
             };
             if let Some(y) = year {
                 r.year = Some(y);
+            }
+        }
+
+        // Years changed: the group signals derived from them are stale.
+        let years_n_rgs: Vec<(Option<i32>, Option<String>)> = releases
+            .iter()
+            .map(|r| (r.year, r.release_group_id.clone()))
+            .collect();
+        let mut min_by_group: HashMap<String, i32> = HashMap::new();
+        for (year, rg) in &years_n_rgs {
+            if let (Some(y), Some(rg)) = (year, rg) {
+                min_by_group
+                    .entry(rg.clone())
+                    .and_modify(|m| *m = (*m).min(*y))
+                    .or_insert(*y);
+            }
+        }
+        for r in releases.iter_mut() {
+            if let Some(rg) = &r.release_group_id
+                && let Some(y) = min_by_group.get(rg)
+            {
+                r.group_min_year = Some(*y);
             }
         }
     }

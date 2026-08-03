@@ -135,8 +135,8 @@ fn live_mb_probe_for_known_problem_folders() {
             s.folder
         );
 
-        let mut scored: Vec<_> = releases
-            .iter()
+        let mut scored: Vec<(MbRelease, matching::MatchScore)> = releases
+            .into_iter()
             .map(|r| {
                 let score = matching::score_release(
                     &artist,
@@ -145,12 +145,38 @@ fn live_mb_probe_for_known_problem_folders() {
                     s.local_track_count,
                     &[],
                     0,
-                    r,
+                    &r,
                 );
                 (r, score)
             })
             .collect();
         scored.sort_by(|a, b| b.1.total.partial_cmp(&a.1.total).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(5);
+
+        // Same as the wizard: pay the throttled year-lookup only for the
+        // finalists that will actually be displayed, then re-score so an
+        // enriched year can reorder the coarse ranking.
+        if scored
+            .iter()
+            .any(|(r, _)| r.year.is_none() && r.release_group_id.is_some())
+        {
+            let mut refs: Vec<&mut MbRelease> = scored.iter_mut().map(|(r, _)| r).collect();
+            client.enrich_missing_years(&mut refs);
+            for (r, score) in scored.iter_mut() {
+                *score = matching::score_release(
+                    &artist,
+                    &album,
+                    hints.year,
+                    s.local_track_count,
+                    &[],
+                    0,
+                    r,
+                );
+            }
+            scored.sort_by(|a, b| {
+                b.1.total.partial_cmp(&a.1.total).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
 
         for (r, score) in scored.iter().take(5) {
             println!(
