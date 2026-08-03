@@ -986,6 +986,7 @@ mod tests {
             api_score: 100,
             release_group_id: None,
             group_min_year: None,
+            group_release_count: None,
         };
         let single = MbRelease {
             medium_count: 1,

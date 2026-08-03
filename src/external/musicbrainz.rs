@@ -10,11 +10,15 @@ use crate::external::matching::is_various_artists_label;
 use crate::external::name_preference::{AliasKind, MbAlias, pick_preferred_name};
 const MB_BASE: &str = "https://musicbrainz.org/ws/2";
 
-/// Floor for how many search hits we pull from MB per pass, regardless of
-/// how few the UI will display. Well-known albums have dozens of same-score
-/// pressings; a narrow fetch truncates away the good candidates before our
-/// local scorer ever sees them. Capped by the caller at MB's 100-result max.
-const MIN_SEARCH_FETCH: u32 = 25;
+/// How many search hits we pull from MB per pass, regardless of how few
+/// the UI will display. Well-known albums have *hundreds* of pressings on
+/// MB, most of them scoring a flat 100 with arbitrary tie order — a narrow
+/// fetch can truncate away the original pressing entirely (observed: the
+/// 1975 GB/US pressings of "Wish You Were Here" sat beyond #25 while FR/
+/// DE/ES reissues filled the pool). MB caps `limit` at 100 and a big page
+/// costs the same one request against the rate limit, so take the maximum
+/// and let local scoring pick the real top-N.
+const SEARCH_POOL_SIZE: u32 = 100;
 
 /// Maximum number of distinct release groups we hit for `first-release-date`
 /// during year enrichment of one search batch. Worst case adds this many
@@ -50,6 +54,12 @@ pub struct MbRelease {
     /// (or the group's `first-release-date` for direct lookups). The
     /// scorer uses it to prefer original pressings over reissues.
     pub group_min_year: Option<i32>,
+    /// How many sibling releases of the same release group appeared in the
+    /// same search batch (or the group's full release count for group
+    /// listings). A fame proxy: canonical albums have dozens of pressings,
+    /// a random same-titled album by another artist usually one — this is
+    /// what breaks exact-title ties when no artist signal is available.
+    pub group_release_count: Option<u32>,
 }
 
 impl MbRelease {
@@ -95,7 +105,8 @@ impl MbClient {
     }
 
     /// Search for releases matching artist + album name.
-    /// Returns up to `limit` results ordered by MB relevance score.
+    /// Returns up to SEARCH_POOL_SIZE results in MB relevance order; the
+    /// caller scores them locally and keeps the best `limit` for display.
     ///
     /// Falls back through progressively looser searches if the first attempt
     /// yields nothing, including resolving the artist to an MBID (via the
@@ -108,7 +119,9 @@ impl MbClient {
         artist: &str,
         album: &str,
         local_track_count: u32,
-        limit: u32,
+        // Kept for API clarity: the returned pool is always SEARCH_POOL_SIZE
+        // wide; the caller scores it and truncates to the display limit.
+        _limit: u32,
     ) -> Result<Vec<MbRelease>> {
         // Clean inputs for matching:
         // - Artist: strip trailing punctuation (HANABIE. → HANABIE, t.A.T.u → kept)
@@ -138,14 +151,7 @@ impl MbClient {
         // tag value first, then the stripped form.
         let title_variants = album_title_variants(album, &clean_album);
 
-        // MB's relevance ordering is nearly useless for well-known albums:
-        // dozens of pressings all score 100 and come back in an arbitrary
-        // (effectively submission) order — the top-5 can easily be all JP/
-        // CA/CN reissues while the original pressing sits at #9. Fetch a
-        // much wider pool than the UI will display and let local scoring
-        // (which knows the local year, track count, and press preferences)
-        // pick the real top-N.
-        let fetch_limit = (limit.max(1) * 5).clamp(MIN_SEARCH_FETCH, 100);
+        let fetch_limit = SEARCH_POOL_SIZE;
 
         // Groups with several tracks can't plausibly match a single. MB's
         // own relevance ranking doesn't know that — a same-named single
@@ -453,9 +459,10 @@ impl MbClient {
         // burst dozens of extra requests.
         self.enrich_missing_years(&mut releases);
 
-        // Compute the per-release-group originality signal used by the
-        // scorer to prefer original pressings over reissues.
-        assign_group_min_years(&mut releases);
+        // Compute the per-release-group signals used by the scorer to
+        // prefer original pressings over reissues and famous editions of
+        // the *same* album over same-titled noise.
+        assign_release_group_stats(&mut releases);
 
         Ok(releases)
     }
@@ -575,16 +582,22 @@ impl MbClient {
                     tracks: Vec::new(),
                     api_score: source.api_score,
                     release_group_id: Some(rg_id.to_string()),
-                    // Filled in after the sort below (min over sibling years).
+                    // Filled in after the sort below (min over sibling
+                    // years / group size).
                     group_min_year: None,
+                    group_release_count: None,
                 })
             })
             .collect();
 
         releases.sort_by_key(|r| (r.year.unwrap_or(i32::MAX), r.id.clone()));
         let group_min_year = releases.iter().filter_map(|r| r.year).min();
+        // The group listing is complete (not search-truncated), so its
+        // length is the true edition count.
+        let group_release_count = u32::try_from(releases.len()).ok();
         for r in releases.iter_mut() {
             r.group_min_year = group_min_year;
+            r.group_release_count = group_release_count;
         }
         Ok(releases)
     }
@@ -995,8 +1008,9 @@ fn parse_search_release(r: MbSearchRelease) -> MbRelease {
         tracks: Vec::new(), // Search results don't include tracks
         api_score: r.score.unwrap_or(0),
         release_group_id,
-        // Assigned by `assign_group_min_years` once the full batch is known.
+        // Assigned by the batch post-pass once the full pool is known.
         group_min_year: None,
+        group_release_count: None,
     }
 }
 
@@ -1123,6 +1137,7 @@ fn parse_full_release(v: &serde_json::Value) -> ParsedFullRelease {
             api_score: 100,
             release_group_id,
             group_min_year,
+            group_release_count: None,
         },
         title_aliases,
         release_artist_mbid,
@@ -1178,14 +1193,22 @@ fn gate_pass(releases: Vec<MbRelease>, pool: &mut Vec<MbRelease>) -> Option<Vec<
     None
 }
 
-/// Compute `group_min_year` for a batch of search results: the earliest
-/// year among all releases sharing a release-group MBID. Run after year
-/// enrichment so filled years are included. Releases without a release
-/// group keep `None` (no originality signal — better than inventing one).
-fn assign_group_min_years(releases: &mut [MbRelease]) {
+/// Fill `group_min_year` and `group_release_count` for a batch of search
+/// results: the earliest year and the sibling count among all releases
+/// sharing a release-group MBID. Run after year enrichment so filled years
+/// are included. Releases without a release group keep `None` (no invented
+/// signal). The count is batch-local — for famous albums the same title
+/// query usually returns dozens of the group's pressings, which is all the
+/// scorer needs to break exact-title ties.
+fn assign_release_group_stats(releases: &mut [MbRelease]) {
     let mut min_by_group: HashMap<String, i32> = HashMap::new();
+    let mut count_by_group: HashMap<String, u32> = HashMap::new();
     for r in releases.iter() {
-        if let (Some(rg), Some(y)) = (r.release_group_id.as_deref(), r.year) {
+        let Some(rg) = r.release_group_id.as_deref() else {
+            continue;
+        };
+        *count_by_group.entry(rg.to_string()).or_insert(0) += 1;
+        if let Some(y) = r.year {
             min_by_group
                 .entry(rg.to_string())
                 .and_modify(|m| *m = (*m).min(y))
@@ -1193,10 +1216,11 @@ fn assign_group_min_years(releases: &mut [MbRelease]) {
         }
     }
     for r in releases.iter_mut() {
-        r.group_min_year = r
-            .release_group_id
-            .as_deref()
-            .and_then(|rg| min_by_group.get(rg).copied());
+        let Some(rg) = r.release_group_id.as_deref() else {
+            continue;
+        };
+        r.group_min_year = min_by_group.get(rg).copied();
+        r.group_release_count = count_by_group.get(rg).copied();
     }
 }
 
@@ -1353,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_group_min_years_shares_min_within_group_only() {
+    fn assign_release_group_stats_shares_min_and_count_within_group_only() {
         let rel = |id: &str, rg: Option<&str>, year: Option<i32>| MbRelease {
             id: id.to_string(),
             title: "T".to_string(),
@@ -1368,6 +1392,7 @@ mod tests {
             api_score: 100,
             release_group_id: rg.map(str::to_string),
             group_min_year: None,
+            group_release_count: None,
         };
 
         let mut releases = vec![
@@ -1378,15 +1403,18 @@ mod tests {
             rel("r5", None, Some(1980)),
         ];
 
-        assign_group_min_years(&mut releases);
+        assign_release_group_stats(&mut releases);
 
         assert_eq!(releases[0].group_min_year, Some(1976));
+        assert_eq!(releases[0].group_release_count, Some(3));
         assert_eq!(releases[1].group_min_year, Some(1976));
         assert_eq!(releases[2].group_min_year, Some(1976), "undated sibling inherits");
         assert_eq!(releases[3].group_min_year, Some(1999));
+        assert_eq!(releases[3].group_release_count, Some(1));
         assert_eq!(
-            releases[4].group_min_year, None,
-            "no release group → no invented originality signal"
+            (releases[4].group_min_year, releases[4].group_release_count),
+            (None, None),
+            "no release group → no invented signals"
         );
     }
 

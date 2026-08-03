@@ -526,6 +526,15 @@ pub fn parse_folder_hints(folder_name: &str) -> FolderHints {
         s = rest;
     }
 
+    // List-number prefix from book/blog rips: "0344. Pink Floyd - Wish You
+    // Were Here" (e.g. "1001 Albums You Must Hear Before You Die")
+    // numbering). A 1-4 digit token closed by '.' or ')' that isn't a
+    // plausible year is list index, never part of the artist name. Digits
+    // that *are* plausible years were already taken by the year path.
+    if let Some(rest) = strip_list_number_prefix(s) {
+        s = rest;
+    }
+
     // Trailing "(1976)" paren year.
     if hints.year.is_none()
         && let Some(open) = s.rfind('(')
@@ -560,6 +569,32 @@ pub fn parse_folder_hints(folder_name: &str) -> FolderHints {
 fn non_empty(s: &str) -> Option<String> {
     let t = s.trim();
     (!t.is_empty()).then(|| t.to_string())
+}
+
+/// Strip a leading count-down/list index: "0344. Foo - Bar" → "Foo - Bar",
+/// "12) Foo" → "Foo". Returns None when the digits look like a year (the
+/// year parser owns those), aren't followed by `./)` + whitespace, or —
+/// for 4-digit runs — when the remainder has no " - " artist separator
+/// (protects titles that genuinely start with an out-of-range year number,
+/// e.g. Rush's "2112").
+fn strip_list_number_prefix(s: &str) -> Option<&str> {
+    let t = s.trim_start();
+    let digit_len = t.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digit_len == 0 || digit_len > 4 {
+        return None;
+    }
+    let rest = &t[digit_len..];
+    let after = rest
+        .strip_prefix('.')
+        .or_else(|| rest.strip_prefix(')'))?
+        .trim_start();
+    if after.is_empty() {
+        return None;
+    }
+    if digit_len == 4 && !after.contains(" - ") {
+        return None;
+    }
+    Some(after)
 }
 
 /// Strict-ish plausible release year: 4 digits, 1900–2099.
@@ -968,5 +1003,32 @@ mod tests {
         let h = parse_folder_hints("OK Computer OKNOTOK 1997 2017");
         assert_eq!(h.title.as_deref(), Some("OK Computer OKNOTOK 1997 2017"));
         assert_eq!(h.artist, None);
+    }
+
+    #[test]
+    fn folder_hints_book_list_number_prefix_stripped() {
+        // "1001 Albums You Must Hear Before You Die" style numbering.
+        let h = parse_folder_hints("0344. Pink Floyd - Wish You Were Here (1975)");
+        assert_eq!(h.year, Some(1975));
+        assert_eq!(h.artist.as_deref(), Some("Pink Floyd"));
+        assert_eq!(h.title.as_deref(), Some("Wish You Were Here"));
+    }
+
+    #[test]
+    fn folder_hints_out_of_range_year_title_without_dash_preserved() {
+        // Four digits that aren't a plausible year and no " - " separator:
+        // must not be eaten as a list index (Rush's "2112" style).
+        let h = parse_folder_hints("2112");
+        assert_eq!(h.title.as_deref(), Some("2112"));
+        let h = parse_folder_hints("2112. Overture Something");
+        assert_eq!(h.title.as_deref(), Some("2112. Overture Something"));
+    }
+
+    #[test]
+    fn folder_hints_plausible_year_with_dot_still_parsed_as_year() {
+        let h = parse_folder_hints("1975. Pink Floyd - Wish You Were Here");
+        assert_eq!(h.year, Some(1975));
+        assert_eq!(h.artist.as_deref(), Some("Pink Floyd"));
+        assert_eq!(h.title.as_deref(), Some("Wish You Were Here"));
     }
 }

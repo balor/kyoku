@@ -33,6 +33,9 @@ struct Scenario {
     /// against regressions where a random pressing/tribute outranks the
     /// canonical album.
     leader_artist: Option<&'static str>,
+    /// When set, the #1 candidate must carry this year — pins the
+    /// original-pressing ranking for famous albums with many reissues.
+    leader_year: Option<i32>,
 }
 
 const SCENARIOS: &[Scenario] = &[
@@ -45,6 +48,7 @@ const SCENARIOS: &[Scenario] = &[
         local_track_count: 10,
         expect_substring: "Return to the Dark Side of the Moon",
         leader_artist: Some("Various Artists"),
+        leader_year: Some(2006),
     },
     Scenario {
         folder: "1968 Procol Harum - Shine On Brightly",
@@ -52,6 +56,7 @@ const SCENARIOS: &[Scenario] = &[
         local_track_count: 14,
         expect_substring: "Shine On Brightly",
         leader_artist: Some("Procol Harum"),
+        leader_year: Some(1968),
     },
     Scenario {
         folder: "A Day at the Races (1976)",
@@ -59,6 +64,7 @@ const SCENARIOS: &[Scenario] = &[
         local_track_count: 10,
         expect_substring: "A Day at the Races",
         leader_artist: Some("Queen"),
+        leader_year: Some(1976),
     },
     Scenario {
         // Tags carry the artist; the folder basename is the only title hint.
@@ -67,6 +73,18 @@ const SCENARIOS: &[Scenario] = &[
         local_track_count: 17,
         expect_substring: "Abbey Road",
         leader_artist: Some("The Beatles"),
+        leader_year: Some(1969),
+    },
+    Scenario {
+        // Tagged rip (artist/year present) of a mega-pressed album: MB has
+        // hundreds of WYWH releases; a 25-result pool truncated before the
+        // 1975 originals and the visible top-5 was all FR/DE/ES reissues.
+        folder: "0344. Pink Floyd - Wish You Were Here (1975)",
+        tag_artist: Some("Pink Floyd"),
+        local_track_count: 5,
+        expect_substring: "Wish You Were Here",
+        leader_artist: Some("Pink Floyd"),
+        leader_year: Some(1975),
     },
     Scenario {
         folder: "News of the World (remastered)",
@@ -74,6 +92,7 @@ const SCENARIOS: &[Scenario] = &[
         local_track_count: 11,
         expect_substring: "News of the World",
         leader_artist: Some("Queen"),
+        leader_year: Some(1977),
     },
 ];
 
@@ -171,6 +190,18 @@ fn live_mb_probe_for_known_problem_folders() {
                     s.folder,
                     scored.first().map(|(r, _)| r.artist.as_str()),
                     want
+                ));
+            }
+        }
+
+        if let Some(want_year) = s.leader_year {
+            let year_ok = scored.first().is_some_and(|(r, _)| r.year == Some(want_year));
+            if !year_ok {
+                failures.push(format!(
+                    "{}: leader year {:?}, expected {:?}",
+                    s.folder,
+                    scored.first().map(|(r, _)| r.year),
+                    want_year
                 ));
             }
         }

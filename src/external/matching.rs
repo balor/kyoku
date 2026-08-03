@@ -14,6 +14,7 @@ pub struct MatchScore {
     pub tracks: f64,
     pub country: f64,
     pub original: f64,
+    pub editions: f64,
 }
 
 /// Score how well a local album group matches a MusicBrainz release candidate.
@@ -36,6 +37,11 @@ pub struct MatchScore {
 ///   release group. Well-known albums have dozens of equal-score pressings
 ///   on MB; this is what puts the original pressing ahead of the 2011
 ///   remaster when the local files carry no year of their own.
+/// - Editions (0.05): how many releases of the same release group showed
+///   up in the search batch — a fame proxy that breaks exact-title ties in
+///   favour of the canonical album when no artist signal is available
+///   (Queen's "News of the World" has ~100 pressings; a random 2012 EP
+///   with the same title has one).
 /// - Duration (0.05): total duration within tolerance
 /// - Per-track titles (0.20): ordered Jaro-Winkler (0.5 if unavailable)
 pub fn score_release(
@@ -175,6 +181,10 @@ pub fn score_release(
         _ => None,
     };
 
+    // Edition-count (fame) nudge. Saturating step scale; excluded when the
+    // batch carried no release-group info for this candidate.
+    let editions = candidate.group_release_count.map(edition_count_score);
+
     // Duration comparison. Excluded if data unavailable — and skipped
     // entirely for partial albums: local tracks 3-8 of an 8-track release
     // can never approach the full release's total duration, so the factor
@@ -240,6 +250,10 @@ pub fn score_release(
         weighted_sum += o * 0.08;
         total_weight += 0.08;
     }
+    if let Some(e) = editions {
+        weighted_sum += e * 0.05;
+        total_weight += 0.05;
+    }
 
     let mut total = if total_weight > 0.0 {
         weighted_sum / total_weight
@@ -275,6 +289,19 @@ pub fn score_release(
         tracks: tracks.unwrap_or(0.0),
         country: country.unwrap_or(0.0),
         original: original.unwrap_or(0.0),
+        editions: editions.unwrap_or(0.0),
+    }
+}
+
+/// Saturating scale for the release-group edition count. A single-entry
+/// group gets little; ten-plus pressings saturate the bonus. Steps rather
+/// than a log curve so the intent stays obvious and testable.
+fn edition_count_score(n: u32) -> f64 {
+    match n {
+        0 | 1 => 0.3,
+        2..=3 => 0.5,
+        4..=9 => 0.75,
+        _ => 1.0,
     }
 }
 
@@ -474,6 +501,7 @@ mod tests {
                 .collect(),
             api_score: 100,
             group_min_year: None,
+            group_release_count: None,
         }
     }
 
@@ -1019,6 +1047,34 @@ mod tests {
             score.total > 0.85,
             "undated XW pressing should stay competitive: {}",
             score.total
+        );
+    }
+
+    #[test]
+    fn edition_count_breaks_exact_title_ties_toward_famous_album() {
+        // The artist-less corner: a folder named just "News of the World
+        // (remastered)". Both the canonical 1977 album and a random
+        // same-titled 2012 release match title exactly; with no artist
+        // signal the release-group edition count (dozens of pressings vs.
+        // one) must flip the order to the canonical album.
+        let famous = MbRelease {
+            group_release_count: Some(60),
+            country: None,
+            ..beatles_pressing(Some(1977), None, Some(1977))
+        };
+        let noise = MbRelease {
+            group_release_count: Some(1),
+            ..beatles_pressing(Some(2012), Some("XW"), Some(2012))
+        };
+
+        let s_famous = score_release("", "Abbey Road (remastered)", None, 17, &[], 0, &famous);
+        let s_noise = score_release("", "Abbey Road (remastered)", None, 17, &[], 0, &noise);
+
+        assert!(
+            s_famous.total > s_noise.total,
+            "famous group must edge out same-title noise: famous={} noise={}",
+            s_famous.total,
+            s_noise.total
         );
     }
 
