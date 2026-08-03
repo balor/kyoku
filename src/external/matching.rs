@@ -12,6 +12,9 @@ pub struct MatchScore {
     pub year: f64,
     pub duration: f64,
     pub tracks: f64,
+    pub country: f64,
+    pub original: f64,
+    pub editions: f64,
 }
 
 /// Score how well a local album group matches a MusicBrainz release candidate.
@@ -27,6 +30,18 @@ pub struct MatchScore {
 /// - Track count (0.25): exact match is very strong signal — steepest penalty
 ///   for mismatch since it's the most objective metric we have from search.
 /// - Year (0.15): exact/near release year match
+/// - Country (0.06): press preference — worldwide/Europe and major
+///   anglophone markets over random regional reissues. Deliberately small:
+///   it only reorders candidates that are otherwise equivalent.
+/// - Originality (0.08): candidate year vs. the earliest known year in its
+///   release group. Well-known albums have dozens of equal-score pressings
+///   on MB; this is what puts the original pressing ahead of the 2011
+///   remaster when the local files carry no year of their own.
+/// - Editions (0.05): how many releases of the same release group showed
+///   up in the search batch — a fame proxy that breaks exact-title ties in
+///   favour of the canonical album when no artist signal is available
+///   (Queen's "News of the World" has ~100 pressings; a random 2012 EP
+///   with the same title has one).
 /// - Duration (0.05): total duration within tolerance
 /// - Per-track titles (0.20): ordered Jaro-Winkler (0.5 if unavailable)
 pub fn score_release(
@@ -48,7 +63,14 @@ pub fn score_release(
     // the artist via MBID alias lookup, so a script mismatch here reflects
     // the MB credit being in a different script, not a wrong artist.
     let local_artist = local_artist.trim();
-    let artist = if local_artist.is_empty() || scripts_differ(local_artist, &candidate.artist) {
+    let artist = if local_artist.is_empty()
+        || is_various_artists_label(local_artist)
+        || scripts_differ(local_artist, &candidate.artist)
+    {
+        // Various-Artists labels can't be string-compared against MB's
+        // "Various Artists" credit in whatever language — exclude the
+        // factor like an empty artist instead of penalising the correct
+        // tribute album for the tagger's localisation choice.
         None
     } else {
         Some(sim(local_artist, &candidate.artist))
@@ -109,22 +131,70 @@ pub fn score_release(
         _ => None,
     };
 
-    // Per-track title similarity (ordered comparison).
-    // Excluded if data is unavailable (search results don't include tracks).
+    // Per-track title similarity. Excluded if data is unavailable (search
+    // results don't include tracks).
+    //
+    // Matching is best-similarity, NOT positional: a partial album (local
+    // tracks 3-8 of an 8-track release — a real Soulseek-rip case) would be
+    // misaligned by an ordered zip, tanking an otherwise exact match. Each
+    // local title greedily claims its best remaining MB track, so a subset
+    // still scores ~1.0; completeness is penalised by the track_count
+    // factor instead of paid for twice. Normalise over LOCAL track count,
+    // so an all-garbage title set (nothing matches) scores near 0 and still
+    // sinks wrong-album candidates.
     let tracks = if local_track_titles.is_empty() || candidate.tracks.is_empty() {
         None
     } else {
-        let pairs = local_track_titles.len().min(candidate.tracks.len());
-        let sum: f64 = local_track_titles
-            .iter()
-            .zip(candidate.tracks.iter())
-            .map(|(local, mb)| sim(local, &mb.title))
-            .sum();
-        Some(sum / pairs as f64)
+        let mut pairs: Vec<(usize, usize, f64)> = Vec::new();
+        for (li, local) in local_track_titles.iter().enumerate() {
+            for (mi, mb) in candidate.tracks.iter().enumerate() {
+                let s = sim(local, &mb.title);
+                if s >= 0.70 {
+                    pairs.push((li, mi, s));
+                }
+            }
+        }
+        pairs.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let mut claimed_local = vec![false; local_track_titles.len()];
+        let mut claimed_mb = vec![false; candidate.tracks.len()];
+        let mut sum = 0.0;
+        for (li, mi, s) in pairs {
+            if claimed_local[li] || claimed_mb[mi] {
+                continue;
+            }
+            claimed_local[li] = true;
+            claimed_mb[mi] = true;
+            sum += s;
+        }
+        Some(sum / local_track_titles.len() as f64)
     };
 
-    // Duration comparison. Excluded if data unavailable.
-    let duration = if local_total_duration_ms == 0 {
+    // Press-country preference. Excluded entirely when MB exposes no
+    // country (digital releases sometimes don't) rather than penalised.
+    let country = candidate.country.as_deref().map(country_preference_score);
+
+    // Original-pressing preference: how close the candidate's year is to
+    // the earliest known year in its release group. A 1976 original scores
+    // 1.0; a 2011 remaster of the same album lands near 0.1.
+    let original = match (candidate.year, candidate.group_min_year) {
+        (Some(y), Some(min)) => Some(originality_score((y - min).max(0))),
+        _ => None,
+    };
+
+    // Edition-count (fame) nudge. Saturating step scale; excluded when the
+    // batch carried no release-group info for this candidate.
+    let editions = candidate.group_release_count.map(edition_count_score);
+
+    // Duration comparison. Excluded if data unavailable — and skipped
+    // entirely for partial albums: local tracks 3-8 of an 8-track release
+    // can never approach the full release's total duration, so the factor
+    // would be a guaranteed ~0 punishing the (otherwise best) candidate.
+    // Track-count mismatch is already priced in by the track_count factor.
+    let duration = if local_total_duration_ms == 0
+        || local_track_count == 0
+        || candidate.track_count == 0
+        || local_track_count != candidate.track_count
+    {
         None
     } else {
         let mb_duration: u64 = candidate.tracks.iter().filter_map(|t| t.duration_ms).sum();
@@ -172,6 +242,18 @@ pub fn score_release(
         weighted_sum += t * 0.20;
         total_weight += 0.20;
     }
+    if let Some(c) = country {
+        weighted_sum += c * 0.06;
+        total_weight += 0.06;
+    }
+    if let Some(o) = original {
+        weighted_sum += o * 0.08;
+        total_weight += 0.08;
+    }
+    if let Some(e) = editions {
+        weighted_sum += e * 0.05;
+        total_weight += 0.05;
+    }
 
     let mut total = if total_weight > 0.0 {
         weighted_sum / total_weight
@@ -186,6 +268,17 @@ pub fn score_release(
         total *= 0.85;
     }
 
+    // Bootlegs are rarely what the user ripped. Same keep-visible-but-
+    // demote treatment as pseudo-releases, weaker since an unofficial
+    // live/bootleg recording can occasionally be the correct target.
+    if candidate
+        .status
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("Bootleg"))
+    {
+        total *= 0.92;
+    }
+
     MatchScore {
         total,
         artist: artist.unwrap_or(0.0),
@@ -194,7 +287,78 @@ pub fn score_release(
         year: year.unwrap_or(0.0),
         duration: duration.unwrap_or(0.0),
         tracks: tracks.unwrap_or(0.0),
+        country: country.unwrap_or(0.0),
+        original: original.unwrap_or(0.0),
+        editions: editions.unwrap_or(0.0),
     }
+}
+
+/// Saturating scale for the release-group edition count. A single-entry
+/// group gets little; ten-plus pressings saturate the bonus. Steps rather
+/// than a log curve so the intent stays obvious and testable.
+fn edition_count_score(n: u32) -> f64 {
+    match n {
+        0 | 1 => 0.3,
+        2..=3 => 0.5,
+        4..=9 => 0.75,
+        _ => 1.0,
+    }
+}
+
+/// Pressing preference by MB release country code. Worldwide (`XW`) and
+/// pan-European (`XE`) digital/CD releases are what most libraries centre
+/// on; major original markets follow. Not a quality judgement — pure
+/// tie-breaking among otherwise indistinguishable pressings.
+fn country_preference_score(code: &str) -> f64 {
+    match code {
+        "XW" => 1.0,
+        "XE" => 0.95,
+        "GB" | "US" => 0.90,
+        "JP" => 0.85,
+        "DE" | "FR" | "NL" | "SE" | "IT" | "ES" | "AU" | "CA" => 0.80,
+        "XU" => 0.60,
+        _ => 0.70,
+    }
+}
+
+/// Originality decay by years after the release group's earliest known
+/// year. The original pressing scores 1.0; reissues fade fast but never to
+/// zero — a remaster can still be the right match when the local files
+/// came from it (the `year` factor handles that case when tags know it).
+fn originality_score(years_after_original: i32) -> f64 {
+    match years_after_original {
+        0 => 1.0,
+        1 => 0.75,
+        2 => 0.55,
+        3 => 0.40,
+        4..=5 => 0.25,
+        6..=8 => 0.15,
+        _ => 0.08,
+    }
+}
+
+/// True for Various-Artists-style album_artist labels produced by real
+/// taggers/rippers: "Various Artists", "VA"/"V.A.", "Artisti Vari"
+/// (Italian), stray @-prefixed variants seen on Soulseek rips,
+/// オムニバス... These never resolve usefully through MB artist
+/// search — MB credits such releases to the special-purpose "Various
+/// Artists" entity, which plain text search won't reach from a translated
+/// label. Callers should treat such artists as "no artist constraint".
+pub fn is_various_artists_label(s: &str) -> bool {
+    if s.contains("オムニバス") || s.contains("ヴァリアス") {
+        return true;
+    }
+    // Lowercase and drop anything that isn't a Latin letter — this folds
+    // "@Artisti Vari", "V.A.", "V/A" etc. into comparable forms.
+    let compact: String = s
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    matches!(
+        compact.as_str(),
+        "variousartists" | "variousartist" | "various" | "va" | "artistivari" | "variartisti"
+    )
 }
 
 /// True when two strings share no common script — treating them as
@@ -336,6 +500,8 @@ mod tests {
                 })
                 .collect(),
             api_score: 100,
+            group_min_year: None,
+            group_release_count: None,
         }
     }
 
@@ -520,6 +686,117 @@ mod tests {
     }
 
     #[test]
+    fn partial_album_subset_scores_high_via_aligned_titles() {
+        // Real case: Soulseek rip of Selling England by the Pound missing
+        // tracks 1-2 (local files are tracks 03-08). The tagged pressing
+        // scored 81% — below trackless alternates — because titles were
+        // compared positionally (Firth of Fifth vs Dancing with the
+        // Moonlit Knight) and duration against the full release.
+        let full: Vec<&str> = vec![
+            "Dancing with the Moonlit Knight",
+            "I Know What I Like (In Your Wardrobe)",
+            "Firth of Fifth",
+            "More Fool Me",
+            "The Battle of Epping Forest",
+            "After the Ordeal",
+            "The Cinema Show",
+            "Aisle of Plenty",
+        ];
+        let release = make_release("Genesis", "Selling England by the Pound", &full);
+        let local_titles: Vec<String> = full[2..].iter().map(|s| s.to_string()).collect();
+
+        let score = score_release(
+            "Genesis",
+            "Selling England by the Pound",
+            Some(1973),
+            6,
+            &local_titles,
+            // Incomplete album: total duration necessarily lacks the first
+            // two tracks (~14min) — this used to zero the duration factor.
+            2_487_811,
+            &MbRelease {
+                year: Some(1973),
+                group_min_year: Some(1973),
+                ..release
+            },
+        );
+
+        assert!(
+            score.tracks > 0.95,
+            "subset titles must align to their real MB tracks: {}",
+            score.tracks
+        );
+        assert!(
+            score.total > 0.90,
+            "partial but correct match should score like one: {}",
+            score.total
+        );
+    }
+
+    #[test]
+    fn unrelated_titles_still_sink_the_tracks_factor() {
+        // Greedy alignment must not rescue a wrong album: garbage titles
+        // don't meet the pairing threshold, so the factor collapses.
+        let release = make_release(
+            "Genesis",
+            "Selling England by the Pound",
+            &["Dancing with the Moonlit Knight", "More Fool Me"],
+        );
+        let score = score_release(
+            "Genesis",
+            "Selling England by the Pound",
+            Some(1973),
+            2,
+            &["xyzzy01".to_string(), "qkvjty556".to_string()],
+            0,
+            &release,
+        );
+        assert!(
+            score.tracks < 0.2,
+            "unrelated titles must not pair: {}",
+            score.tracks
+        );
+    }
+
+    #[test]
+    fn duration_factor_applies_when_track_counts_agree() {
+        // Equal counts: duration mismatch is a real signal again.
+        let release = make_release("A", "B", &["t1", "t2"]); // 2 x 240s = 480s
+        let score = score_release(
+            "A",
+            "B",
+            Some(1997),
+            2,
+            &["t1".into(), "t2".into()],
+            480_000,
+            &release,
+        );
+        assert!(
+            (score.duration - 1.0).abs() < 1e-9,
+            "equal counts + equal duration should give 1.0: {}",
+            score.duration
+        );
+    }
+
+    #[test]
+    fn duration_factor_skipped_for_partial_albums() {
+        let release = make_release("A", "B", &["t1", "t2", "t3", "t4"]);
+        let score = score_release(
+            "A",
+            "B",
+            Some(1997),
+            2,
+            &["t3".into(), "t4".into()],
+            240_000, // only the 2 local tracks' worth
+            &release,
+        );
+        assert_eq!(
+            score.duration, 0.0,
+            "factor must be excluded (surfaced as 0.0 in MatchScore), not penalised"
+        );
+    }
+
+    #[test]
     fn cjk_extension_b_counts_as_cjk_script() {
         let ext_b = "𠀀";
         assert!(!is_pure_latin(ext_b));
@@ -561,6 +838,60 @@ mod tests {
         assert!(!is_pure_latin("花冷え。"));
         assert!(!is_pure_latin("幻燈"));
         assert!(!is_pure_latin("BUMP OF CHICKEN 結成"));
+    }
+
+    #[test]
+    fn various_artists_labels_detected() {
+        for s in [
+            "Various Artists",
+            "various artists",
+            "Various",
+            "VA",
+            "V.A.",
+            "V/A",
+            "Artisti Vari",
+            "@Artisti Vari", // real tag from an Italian Soulseek rip
+            "オムニバス",
+            "ヴァリアス・アーティスト",
+        ] {
+            assert!(is_various_artists_label(s), "{s:?} should be VA");
+        }
+        for s in ["Genesis", "Variety Show", "Vangelis", ""] {
+            assert!(!is_various_artists_label(s), "{s:?} is not VA");
+        }
+    }
+
+    #[test]
+    fn various_artists_label_excluded_from_scoring() {
+        // The tribute-album case: local album_artist is a localised VA
+        // label, MB credit is "Various Artists". The artist factor must be
+        // excluded, not scored near-zero — otherwise the *correct* tribute
+        // release sinks below random pressings.
+        let tribute = make_release(
+            "Various Artists",
+            "Return to the Dark Side of the Moon",
+            &[],
+        );
+        let tribute = MbRelease {
+            track_count: 10,
+            year: Some(2006),
+            group_min_year: Some(2006),
+            ..tribute
+        };
+        let score = score_release(
+            "@Artisti Vari",
+            "Return To The Dark Side Of The Moon (A Tribute To Pink Floyd)",
+            Some(2006),
+            10,
+            &[],
+            0,
+            &tribute,
+        );
+        assert!(
+            score.total > 0.85,
+            "VA-labeled correct album must score as a clean match: {}",
+            score.total
+        );
     }
 
     #[test]
@@ -615,6 +946,154 @@ mod tests {
             score.album > 0.9,
             "normalized titles should match well: {}",
             score.album
+        );
+    }
+
+    /// Candidate factory for the pressing-preference tests below: same
+    /// artist/title/tracks, varying year/country within one release group.
+    fn make_pressing(
+        artist: &str,
+        title: &str,
+        year: Option<i32>,
+        country: Option<&str>,
+        group_min_year: Option<i32>,
+    ) -> MbRelease {
+        MbRelease {
+            year,
+            country: country.map(String::from),
+            group_min_year,
+            ..make_release(artist, title, &[])
+        }
+    }
+
+    fn queen_pressing(year: Option<i32>, country: Option<&str>, group_min: Option<i32>) -> MbRelease {
+        MbRelease {
+            track_count: 10,
+            ..make_pressing("Queen", "A Day at the Races", year, country, group_min)
+        }
+    }
+
+    fn beatles_pressing(
+        year: Option<i32>,
+        country: Option<&str>,
+        group_min: Option<i32>,
+    ) -> MbRelease {
+        MbRelease {
+            track_count: 17,
+            ..make_pressing("The Beatles", "Abbey Road", year, country, group_min)
+        }
+    }
+
+    #[test]
+    fn original_pressing_beats_reissue_when_local_year_known() {
+        // The "A Day at the Races" report: MB's top hits for this album are
+        // all 1990s–2010s reissues with identical relevance scores; the 1976
+        // original sits deep in the list. With a local year tag of 1976 the
+        // original must outrank every reissue by a wide margin.
+        let original = queen_pressing(Some(1976), Some("US"), Some(1976));
+        let reissue_2011 = queen_pressing(Some(2011), Some("XE"), Some(1976));
+        let reissue_1993 = queen_pressing(Some(1993), Some("IT"), Some(1976));
+
+        let s_orig = score_release("Queen", "A Day at the Races", Some(1976), 10, &[], 0, &original);
+        let s_r2011 = score_release("Queen", "A Day at the Races", Some(1976), 10, &[], 0, &reissue_2011);
+        let s_r1993 = score_release("Queen", "A Day at the Races", Some(1976), 10, &[], 0, &reissue_1993);
+
+        assert!(s_orig.total > s_r2011.total + 0.15, "orig={} reissue={}", s_orig.total, s_r2011.total);
+        assert!(s_orig.total > s_r1993.total + 0.15, "orig={} reissue={}", s_orig.total, s_r1993.total);
+        assert!(s_orig.total >= 0.85, "original should auto-match: {}", s_orig.total);
+    }
+
+    #[test]
+    fn original_pressing_beats_reissue_even_without_local_year() {
+        // Local files carry no year at all — originality must still push the
+        // group-min-year pressing to the top so the default pick is sane.
+        let original = beatles_pressing(Some(1969), Some("US"), Some(1969));
+        let reissue = beatles_pressing(Some(2012), Some("XE"), Some(1969));
+
+        let s_orig = score_release("The Beatles", "Abbey Road", None, 17, &[], 0, &original);
+        let s_reissue = score_release("The Beatles", "Abbey Road", None, 17, &[], 0, &reissue);
+
+        assert!(s_orig.total > s_reissue.total, "orig={} reissue={}", s_orig.total, s_reissue.total);
+    }
+
+    #[test]
+    fn worldwide_or_major_market_beats_exotic_pressing_on_ties() {
+        // All else equal (the MB score-100 tie swamp), XE should beat CN,
+        // and both should stay within review range of each other — the
+        // country factor is a nudge, not a verdict.
+        let xe = beatles_pressing(Some(1987), Some("XE"), Some(1969));
+        let cn = beatles_pressing(Some(1987), Some("CN"), Some(1969));
+
+        let s_xe = score_release("The Beatles", "Abbey Road", None, 17, &[], 0, &xe);
+        let s_cn = score_release("The Beatles", "Abbey Road", None, 17, &[], 0, &cn);
+
+        assert!(s_xe.total > s_cn.total, "XE={} CN={}", s_xe.total, s_cn.total);
+        assert!(
+            s_xe.total - s_cn.total < 0.10,
+            "country must be only a nudge: XE={} CN={}",
+            s_xe.total,
+            s_cn.total
+        );
+    }
+
+    #[test]
+    fn candidate_without_year_gets_no_originality_penalty() {
+        // A pressing with no known date (common for digital XW releases)
+        // must not sink below every dated reissue — the originality factor
+        // is excluded (weight redistributed), not zeroed.
+        let undated = beatles_pressing(None, Some("XW"), Some(1969));
+        let score = score_release("The Beatles", "Abbey Road", None, 17, &[], 0, &undated);
+        assert!(
+            score.total > 0.85,
+            "undated XW pressing should stay competitive: {}",
+            score.total
+        );
+    }
+
+    #[test]
+    fn edition_count_breaks_exact_title_ties_toward_famous_album() {
+        // The artist-less corner: a folder named just "News of the World
+        // (remastered)". Both the canonical 1977 album and a random
+        // same-titled 2012 release match title exactly; with no artist
+        // signal the release-group edition count (dozens of pressings vs.
+        // one) must flip the order to the canonical album.
+        let famous = MbRelease {
+            group_release_count: Some(60),
+            country: None,
+            ..beatles_pressing(Some(1977), None, Some(1977))
+        };
+        let noise = MbRelease {
+            group_release_count: Some(1),
+            ..beatles_pressing(Some(2012), Some("XW"), Some(2012))
+        };
+
+        let s_famous = score_release("", "Abbey Road (remastered)", None, 17, &[], 0, &famous);
+        let s_noise = score_release("", "Abbey Road (remastered)", None, 17, &[], 0, &noise);
+
+        assert!(
+            s_famous.total > s_noise.total,
+            "famous group must edge out same-title noise: famous={} noise={}",
+            s_famous.total,
+            s_noise.total
+        );
+    }
+
+    #[test]
+    fn bootleg_is_demoted_below_official_pressing() {
+        let bootleg = MbRelease {
+            status: Some("Bootleg".to_string()),
+            ..beatles_pressing(Some(1969), Some("XW"), Some(1969))
+        };
+        let official = beatles_pressing(Some(1969), Some("US"), Some(1969));
+
+        let s_boot = score_release("The Beatles", "Abbey Road", None, 17, &[], 0, &bootleg);
+        let s_off = score_release("The Beatles", "Abbey Road", None, 17, &[], 0, &official);
+
+        assert!(
+            s_off.total > s_boot.total,
+            "official={} bootleg={}",
+            s_off.total,
+            s_boot.total
         );
     }
 }

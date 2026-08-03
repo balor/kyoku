@@ -472,6 +472,174 @@ pub fn scan_inbox(
     scan_inbox_with_report(conn, music_dir, inbox_dirs).map(|r| r.files)
 }
 
+// ── Folder-name search hints ────────────────────────────────────────
+
+/// Artist/title/year hints extracted from a source folder's basename.
+/// Used for MB searches only when the file tags don't carry the
+/// corresponding field — folder names like `1968 Procol Harum - Shine On
+/// Brightly` or `A Day at the Races (1976) [FLAC]` are the last reliable
+/// metadata source for untagged Soulseek rips.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FolderHints {
+    pub artist: Option<String>,
+    pub title: Option<String>,
+    pub year: Option<i32>,
+}
+
+/// Parse a folder basename into MB-search hints. Handles the conventions
+/// seen in the wild:
+///
+///   `(2006) Return To The Dark Side Of The Moon (A Tribute To Pink Floyd) [FLAC]`
+///       → year 2006, title "Return To The Dark Side Of The Moon (A Tribute To Pink Floyd)"
+///   `1968 Procol Harum - Shine On Brightly`
+///       → year 1968, artist "Procol Harum", title "Shine On Brightly"
+///   `A Day at the Races (1976)` → year 1976, title "A Day at the Races"
+///   `Abbey road`                → title "Abbey road"
+///
+/// Anything ambiguous is left `None` rather than guessed — a bad artist
+/// hint actively hurts matching (it constrains the MB query).
+pub fn parse_folder_hints(folder_name: &str) -> FolderHints {
+    let mut hints = FolderHints::default();
+    let mut s = folder_name.trim();
+
+    // Strip trailing [bracket] groups: "[FLAC]", "[WEB]", "[2009 Remaster]".
+    // A bare-year bracket is captured as the year ("[2006]").
+    while let Some(open) = s.rfind('[') {
+        if !s.ends_with(']') {
+            break;
+        }
+        let inside = s[open + 1..s.len() - 1].trim();
+        if inside.is_empty() {
+            break;
+        }
+        if hints.year.is_none() {
+            hints.year = parse_year(inside);
+        }
+        s = s[..open].trim_end();
+    }
+
+    // Leading year: "(2006) Foo", "[2006] Foo", "2006 Foo", "2006 - Foo".
+    if let Some((year, rest)) = take_leading_year(s) {
+        if hints.year.is_none() {
+            hints.year = Some(year);
+        }
+        s = rest;
+    }
+
+    // List-number prefix from book/blog rips: "0344. Pink Floyd - Wish You
+    // Were Here" (e.g. "1001 Albums You Must Hear Before You Die")
+    // numbering). A 1-4 digit token closed by '.' or ')' that isn't a
+    // plausible year is list index, never part of the artist name. Digits
+    // that *are* plausible years were already taken by the year path.
+    if let Some(rest) = strip_list_number_prefix(s) {
+        s = rest;
+    }
+
+    // Trailing "(1976)" paren year.
+    if hints.year.is_none()
+        && let Some(open) = s.rfind('(')
+        && s.ends_with(')')
+    {
+        let inside = s[open + 1..s.len() - 1].trim();
+        if let Some(y) = parse_year(inside) {
+            let before = s[..open].trim_end();
+            if !before.is_empty() {
+                hints.year = Some(y);
+                s = before;
+            }
+        }
+    }
+
+    // "Artist - Title" split. Only the first separator is honoured so a
+    // dash inside the title survives.
+    if let Some((artist, title)) = s.split_once(" - ") {
+        let artist = artist.trim();
+        let title = title.trim();
+        if !artist.is_empty() && !title.is_empty() {
+            hints.artist = Some(artist.to_string());
+            hints.title = non_empty(title);
+            return hints;
+        }
+    }
+
+    hints.title = non_empty(s);
+    hints
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    let t = s.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+/// Strip a leading count-down/list index: "0344. Foo - Bar" → "Foo - Bar",
+/// "12) Foo" → "Foo". Returns None when the digits look like a year (the
+/// year parser owns those), aren't followed by `./)` + whitespace, or —
+/// for 4-digit runs — when the remainder has no " - " artist separator
+/// (protects titles that genuinely start with an out-of-range year number,
+/// e.g. Rush's "2112").
+fn strip_list_number_prefix(s: &str) -> Option<&str> {
+    let t = s.trim_start();
+    let digit_len = t.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digit_len == 0 || digit_len > 4 {
+        return None;
+    }
+    let rest = &t[digit_len..];
+    let after = rest
+        .strip_prefix('.')
+        .or_else(|| rest.strip_prefix(')'))?
+        .trim_start();
+    if after.is_empty() {
+        return None;
+    }
+    if digit_len == 4 && !after.contains(" - ") {
+        return None;
+    }
+    Some(after)
+}
+
+/// Strict-ish plausible release year: 4 digits, 1900–2099.
+fn parse_year(s: &str) -> Option<i32> {
+    if s.len() == 4 && s.bytes().all(|b| b.is_ascii_digit()) {
+        s.parse::<i32>().ok().filter(|y| (1900..=2099).contains(y))
+    } else {
+        None
+    }
+}
+
+/// Pull a leading year off a folder name, returning the year and the
+/// remaining text. Accepts bare (`1968 Foo`, `1968 - Foo`) and wrapped
+/// (`(1968) Foo`, `[1968] Foo`) forms. Bare years must be followed by a
+/// separator so album titles that *start* with digits aren't eaten.
+fn take_leading_year(s: &str) -> Option<(i32, &str)> {
+    let t = s.trim_start();
+    let (wrapped, body, close) = if let Some(rest) = t.strip_prefix('(') {
+        (true, rest, ')')
+    } else if let Some(rest) = t.strip_prefix('[') {
+        (true, rest, ']')
+    } else {
+        (false, t, ' ')
+    };
+
+    let digits: String = body.chars().take(4).collect();
+    let year = parse_year(&digits)?;
+    let rest = &body[4..];
+    if wrapped {
+        let rest = rest.strip_prefix(close)?.trim_start();
+        return (!rest.is_empty()).then_some((year, rest));
+    }
+    // Unwrapped: require a non-alphanumeric separator right after the year.
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some(c) if !c.is_alphanumeric() => {
+            let rest = rest[c.len_utf8()..]
+                .trim_start_matches([' ', '-', '_', '.'])
+                .trim_start();
+            (!rest.is_empty()).then_some((year, rest))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -756,5 +924,111 @@ mod tests {
         import(&conn, no_root(), fixtures_dir(), false, false, None).unwrap();
         let unimported = scan_inbox(&conn, no_root(), &[fixtures_dir()]).unwrap();
         assert_eq!(unimported.len(), 0);
+    }
+
+    // ── parse_folder_hints ─────────────────────────────────────────
+
+    #[test]
+    fn folder_hints_tribute_album_with_leading_paren_year_and_flac_suffix() {
+        let h = parse_folder_hints(
+            "(2006) Return To The Dark Side Of The Moon (A Tribute To Pink Floyd) [FLAC]",
+        );
+        assert_eq!(h.year, Some(2006));
+        assert_eq!(h.artist, None);
+        assert_eq!(
+            h.title.as_deref(),
+            Some("Return To The Dark Side Of The Moon (A Tribute To Pink Floyd)")
+        );
+    }
+
+    #[test]
+    fn folder_hints_year_artist_dash_title() {
+        let h = parse_folder_hints("1968 Procol Harum - Shine On Brightly");
+        assert_eq!(h.year, Some(1968));
+        assert_eq!(h.artist.as_deref(), Some("Procol Harum"));
+        assert_eq!(h.title.as_deref(), Some("Shine On Brightly"));
+    }
+
+    #[test]
+    fn folder_hints_trailing_paren_year() {
+        let h = parse_folder_hints("A Day at the Races (1976)");
+        assert_eq!(h.year, Some(1976));
+        assert_eq!(h.artist, None);
+        assert_eq!(h.title.as_deref(), Some("A Day at the Races"));
+    }
+
+    #[test]
+    fn folder_hints_bare_title() {
+        let h = parse_folder_hints("Abbey road");
+        assert_eq!(h.year, None);
+        assert_eq!(h.artist, None);
+        assert_eq!(h.title.as_deref(), Some("Abbey road"));
+    }
+
+    #[test]
+    fn folder_hints_title_with_qualifier_kept_for_search_layer() {
+        // "(remastered)" is not a year — stays in the title; the search
+        // layer's strip_parenthesized_suffix removes it for the MB query.
+        let h = parse_folder_hints("News of the World (remastered)");
+        assert_eq!(h.year, None);
+        assert_eq!(h.title.as_deref(), Some("News of the World (remastered)"));
+    }
+
+    #[test]
+    fn folder_hints_various_suffix_junk() {
+        let h = parse_folder_hints("Artist - Album (Deluxe Edition) [FLAC] [WEB]");
+        assert_eq!(h.artist.as_deref(), Some("Artist"));
+        assert_eq!(h.title.as_deref(), Some("Album (Deluxe Edition)"));
+    }
+
+    #[test]
+    fn folder_hints_year_in_brackets() {
+        let h = parse_folder_hints("2020 Artist - Album");
+        assert_eq!(h.year, Some(2020));
+        assert_eq!(h.artist.as_deref(), Some("Artist"));
+        assert_eq!(h.title.as_deref(), Some("Album"));
+    }
+
+    #[test]
+    fn folder_hints_numeric_title_not_eaten_as_year() {
+        // Bare leading digits with no separator must not be parsed as a
+        // year-year-year ambiguity ("1999 Remixes" is fine to take, but a
+        // title like "1999" alone must not produce an empty title).
+        let h = parse_folder_hints("1999");
+        assert_eq!(h.title.as_deref(), Some("1999"));
+    }
+
+    #[test]
+    fn folder_hints_dash_only_inside_title_kept() {
+        let h = parse_folder_hints("OK Computer OKNOTOK 1997 2017");
+        assert_eq!(h.title.as_deref(), Some("OK Computer OKNOTOK 1997 2017"));
+        assert_eq!(h.artist, None);
+    }
+
+    #[test]
+    fn folder_hints_book_list_number_prefix_stripped() {
+        // "1001 Albums You Must Hear Before You Die" style numbering.
+        let h = parse_folder_hints("0344. Pink Floyd - Wish You Were Here (1975)");
+        assert_eq!(h.year, Some(1975));
+        assert_eq!(h.artist.as_deref(), Some("Pink Floyd"));
+        assert_eq!(h.title.as_deref(), Some("Wish You Were Here"));
+    }
+
+    #[test]
+    fn folder_hints_out_of_range_year_title_without_dash_preserved() {
+        // Four digits that aren't a plausible year and no " - " separator:
+        // must not be eaten as a list index (Rush's "2112" style).
+        let h = parse_folder_hints("2112");
+        assert_eq!(h.title.as_deref(), Some("2112"));
+        let h = parse_folder_hints("2112. Overture Something");
+        assert_eq!(h.title.as_deref(), Some("2112. Overture Something"));
+    }
+
+    #[test]
+    fn folder_hints_plausible_year_with_dot_still_parsed_as_year() {
+        let h = parse_folder_hints("1975. Pink Floyd - Wish You Were Here");
+        assert_eq!(h.year, Some(1975));
+        assert_eq!(h.artist.as_deref(), Some("Pink Floyd"));
+        assert_eq!(h.title.as_deref(), Some("Wish You Were Here"));
     }
 }

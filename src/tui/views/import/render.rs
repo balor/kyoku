@@ -289,6 +289,7 @@ impl ImportView {
                         (pick_hint, "pick MB"),
                         ("m", "MBID"),
                         ("c", "+coll"),
+                        ("o", "open dir"),
                         ("A", "as-is"),
                         ("S", "skip"),
                         ("L", "loose"),
@@ -593,7 +594,14 @@ impl ImportView {
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        let p = Paragraph::new(vec![source_line, Line::from(meta_spans), Line::from("")]);
+        let notice_line = match &self.notice {
+            Some(n) => Line::from(Span::styled(
+                format!(" {}", n),
+                Style::default().fg(theme.yellow),
+            )),
+            None => Line::from(""),
+        };
+        let p = Paragraph::new(vec![source_line, Line::from(meta_spans), notice_line]);
         frame.render_widget(p, chunks[0]);
 
         // Track list

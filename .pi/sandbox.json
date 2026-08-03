@@ -1,0 +1,7 @@
+{
+  "filesystem": {
+    "allowRead": [
+      "/Users/balor/tata-music/library.db"
+    ]
+  }
+}

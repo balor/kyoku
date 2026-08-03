@@ -450,16 +450,31 @@ The CLI import path is intentionally simpler today: scan/read tags and import as
 
 #### 6.1.4 Match Phase
 - For each album candidate, query MusicBrainz for matching releases.
+- Local metadata comes from file tags first; gaps are filled from **folder-name hints**
+  (`(2006) Album [FLAC]`, `1968 Artist - Album`, `Album (1976)` — artist/title/year are parsed
+  out of the source directory basename and used only where the tags are missing).
 - Current matching strategies:
   1. **Manual MBID lookup**: user can paste a release MBID/URL in the TUI wizard.
   2. **Text search**: search MB by artist + album + track count, with follow-up full-release fetches for tracklists.
+     The MB search fetches a *wide* pool (at least 25 hits even when only 5 will be displayed) because
+     well-known albums return dozens of same-score pressings in arbitrary order — the local scorer,
+     not MB's relevance ranking, decides the displayed top-N. If artist+album finds nothing the
+     fallbacks progressively loosen (artist-MBID constrained, type filter dropped, album-only rescue
+     for mis-tagged artists, artist-only).
 - Future matching strategy: **AcoustID match** once fingerprinting lands.
 - Score matches by similarity (weighted combination of):
   - Artist name similarity (fuzzy string matching)
   - Album title similarity
   - Track count match
-  - Total duration match (within tolerance)
-  - Track title similarity (ordered comparison)
+  - Year match (exact/near)
+  - Country press preference (small; worldwide/Europe and major markets win ties)
+  - Originality (candidate year vs. earliest known year in its release group — original
+    pressings rank above reissues/remasters)
+  - Total duration match (within tolerance; only when track counts agree — a partial album
+    can never match the full release's duration)
+  - Track title similarity (best-match aligned comparison, so a partial album whose files are
+    tracks 3-8 still scores ~1.0 instead of being misaligned positionally)
+  - Bootlegs and pseudo-releases are demoted multiplicatively but kept visible as fallbacks
 - Present top N candidates to user with similarity scores
 - **Multiple releases of the same album** (e.g. US vs UK vs Japan editions): editions are shown as separate candidates and never filtered by region. Two fairness nuances soften the naive "show everything, pick nothing": the top candidate is *pre-selected* when its score ≥ `[import].auto_match_threshold` (the user still confirms or overrides), and hopeless candidates far behind a strong leader are pruned from the list unless they share the leader's release group (regional editions of the same album survive the prune — they share the group).
 
@@ -490,6 +505,7 @@ Intra-batch conflicts (two incoming tracks collide with each other rather than w
   - **To a collection** (`c`) — import the group straight into a chosen collection
   - **Skip** — don't import this album at all
   - **Manual MBID/URL lookup** (`m`) — paste a release MBID or musicbrainz.org URL to pin the match
+  - **Open file location** (`o`) — reveal the group's source folder in the system file manager
   - **Retry search** (`r`) — re-query MB after a failed lookup
   - (Future: in-wizard field editing before applying — today edits happen post-import in the tag editor)
 
