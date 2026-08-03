@@ -470,8 +470,10 @@ The CLI import path is intentionally simpler today: scan/read tags and import as
   - Country press preference (small; worldwide/Europe and major markets win ties)
   - Originality (candidate year vs. earliest known year in its release group — original
     pressings rank above reissues/remasters)
-  - Total duration match (within tolerance)
-  - Track title similarity (ordered comparison)
+  - Total duration match (within tolerance; only when track counts agree — a partial album
+    can never match the full release's duration)
+  - Track title similarity (best-match aligned comparison, so a partial album whose files are
+    tracks 3-8 still scores ~1.0 instead of being misaligned positionally)
   - Bootlegs and pseudo-releases are demoted multiplicatively but kept visible as fallbacks
 - Present top N candidates to user with similarity scores
 - **Multiple releases of the same album** (e.g. US vs UK vs Japan editions): editions are shown as separate candidates and never filtered by region. Two fairness nuances soften the naive "show everything, pick nothing": the top candidate is *pre-selected* when its score ≥ `[import].auto_match_threshold` (the user still confirms or overrides), and hopeless candidates far behind a strong leader are pruned from the list unless they share the leader's release group (regional editions of the same album survive the prune — they share the group).

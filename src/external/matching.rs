@@ -118,18 +118,42 @@ pub fn score_release(
         _ => None,
     };
 
-    // Per-track title similarity (ordered comparison).
-    // Excluded if data is unavailable (search results don't include tracks).
+    // Per-track title similarity. Excluded if data is unavailable (search
+    // results don't include tracks).
+    //
+    // Matching is best-similarity, NOT positional: a partial album (local
+    // tracks 3-8 of an 8-track release — a real Soulseek-rip case) would be
+    // misaligned by an ordered zip, tanking an otherwise exact match. Each
+    // local title greedily claims its best remaining MB track, so a subset
+    // still scores ~1.0; completeness is penalised by the track_count
+    // factor instead of paid for twice. Normalise over LOCAL track count,
+    // so an all-garbage title set (nothing matches) scores near 0 and still
+    // sinks wrong-album candidates.
     let tracks = if local_track_titles.is_empty() || candidate.tracks.is_empty() {
         None
     } else {
-        let pairs = local_track_titles.len().min(candidate.tracks.len());
-        let sum: f64 = local_track_titles
-            .iter()
-            .zip(candidate.tracks.iter())
-            .map(|(local, mb)| sim(local, &mb.title))
-            .sum();
-        Some(sum / pairs as f64)
+        let mut pairs: Vec<(usize, usize, f64)> = Vec::new();
+        for (li, local) in local_track_titles.iter().enumerate() {
+            for (mi, mb) in candidate.tracks.iter().enumerate() {
+                let s = sim(local, &mb.title);
+                if s >= 0.70 {
+                    pairs.push((li, mi, s));
+                }
+            }
+        }
+        pairs.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let mut claimed_local = vec![false; local_track_titles.len()];
+        let mut claimed_mb = vec![false; candidate.tracks.len()];
+        let mut sum = 0.0;
+        for (li, mi, s) in pairs {
+            if claimed_local[li] || claimed_mb[mi] {
+                continue;
+            }
+            claimed_local[li] = true;
+            claimed_mb[mi] = true;
+            sum += s;
+        }
+        Some(sum / local_track_titles.len() as f64)
     };
 
     // Press-country preference. Excluded entirely when MB exposes no
@@ -144,8 +168,16 @@ pub fn score_release(
         _ => None,
     };
 
-    // Duration comparison. Excluded if data unavailable.
-    let duration = if local_total_duration_ms == 0 {
+    // Duration comparison. Excluded if data unavailable — and skipped
+    // entirely for partial albums: local tracks 3-8 of an 8-track release
+    // can never approach the full release's total duration, so the factor
+    // would be a guaranteed ~0 punishing the (otherwise best) candidate.
+    // Track-count mismatch is already priced in by the track_count factor.
+    let duration = if local_total_duration_ms == 0
+        || local_track_count == 0
+        || candidate.track_count == 0
+        || local_track_count != candidate.track_count
+    {
         None
     } else {
         let mb_duration: u64 = candidate.tracks.iter().filter_map(|t| t.duration_ms).sum();
@@ -591,6 +623,117 @@ mod tests {
             score.album < 0.8,
             "same-script differing titles must still penalize: {}",
             score.album
+        );
+    }
+
+    #[test]
+    fn partial_album_subset_scores_high_via_aligned_titles() {
+        // Real case: Soulseek rip of Selling England by the Pound missing
+        // tracks 1-2 (local files are tracks 03-08). The tagged pressing
+        // scored 81% — below trackless alternates — because titles were
+        // compared positionally (Firth of Fifth vs Dancing with the
+        // Moonlit Knight) and duration against the full release.
+        let full: Vec<&str> = vec![
+            "Dancing with the Moonlit Knight",
+            "I Know What I Like (In Your Wardrobe)",
+            "Firth of Fifth",
+            "More Fool Me",
+            "The Battle of Epping Forest",
+            "After the Ordeal",
+            "The Cinema Show",
+            "Aisle of Plenty",
+        ];
+        let release = make_release("Genesis", "Selling England by the Pound", &full);
+        let local_titles: Vec<String> = full[2..].iter().map(|s| s.to_string()).collect();
+
+        let score = score_release(
+            "Genesis",
+            "Selling England by the Pound",
+            Some(1973),
+            6,
+            &local_titles,
+            // Incomplete album: total duration necessarily lacks the first
+            // two tracks (~14min) — this used to zero the duration factor.
+            2_487_811,
+            &MbRelease {
+                year: Some(1973),
+                group_min_year: Some(1973),
+                ..release
+            },
+        );
+
+        assert!(
+            score.tracks > 0.95,
+            "subset titles must align to their real MB tracks: {}",
+            score.tracks
+        );
+        assert!(
+            score.total > 0.90,
+            "partial but correct match should score like one: {}",
+            score.total
+        );
+    }
+
+    #[test]
+    fn unrelated_titles_still_sink_the_tracks_factor() {
+        // Greedy alignment must not rescue a wrong album: garbage titles
+        // don't meet the pairing threshold, so the factor collapses.
+        let release = make_release(
+            "Genesis",
+            "Selling England by the Pound",
+            &["Dancing with the Moonlit Knight", "More Fool Me"],
+        );
+        let score = score_release(
+            "Genesis",
+            "Selling England by the Pound",
+            Some(1973),
+            2,
+            &["xyzzy01".to_string(), "qkvjty556".to_string()],
+            0,
+            &release,
+        );
+        assert!(
+            score.tracks < 0.2,
+            "unrelated titles must not pair: {}",
+            score.tracks
+        );
+    }
+
+    #[test]
+    fn duration_factor_applies_when_track_counts_agree() {
+        // Equal counts: duration mismatch is a real signal again.
+        let release = make_release("A", "B", &["t1", "t2"]); // 2 x 240s = 480s
+        let score = score_release(
+            "A",
+            "B",
+            Some(1997),
+            2,
+            &["t1".into(), "t2".into()],
+            480_000,
+            &release,
+        );
+        assert!(
+            (score.duration - 1.0).abs() < 1e-9,
+            "equal counts + equal duration should give 1.0: {}",
+            score.duration
+        );
+    }
+
+    #[test]
+    fn duration_factor_skipped_for_partial_albums() {
+        let release = make_release("A", "B", &["t1", "t2", "t3", "t4"]);
+        let score = score_release(
+            "A",
+            "B",
+            Some(1997),
+            2,
+            &["t3".into(), "t4".into()],
+            240_000, // only the 2 local tracks' worth
+            &release,
+        );
+        assert_eq!(
+            score.duration, 0.0,
+            "factor must be excluded (surfaced as 0.0 in MatchScore), not penalised"
         );
     }
 
