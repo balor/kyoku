@@ -17,10 +17,10 @@ class Kyoku < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/balor/kyoku/releases/download/v0.2.1/kyoku-0.2.1-aarch64-apple-darwin.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      sha256 "b234f8867488ff0197761226e57f76686f6b21e0746d9636edc0ce7f79b05125"
     else
       url "https://github.com/balor/kyoku/releases/download/v0.2.1/kyoku-0.2.1-x86_64-apple-darwin.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      sha256 "03043b36d62f5031edaf4dd7623fb83427f4cb6660fa262ba706fa5e086330f5"
     end
   end
 
@@ -31,7 +31,7 @@ class Kyoku < Formula
       odie "kyoku has no prebuilt aarch64 Linux binary; use: cargo install kyoku"
     end
     url "https://github.com/balor/kyoku/releases/download/v0.2.1/kyoku-0.2.1-x86_64-unknown-linux-gnu.tar.gz"
-    sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    sha256 "27bb240aa274a299a09c9a2352626bc9d55759e109e819586675f30e1495d0bf"
   end
 
   def install
