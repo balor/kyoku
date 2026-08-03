@@ -9,6 +9,17 @@ use crate::external::http::{self, AttemptError};
 use crate::external::name_preference::{AliasKind, MbAlias, pick_preferred_name};
 const MB_BASE: &str = "https://musicbrainz.org/ws/2";
 
+/// Floor for how many search hits we pull from MB per pass, regardless of
+/// how few the UI will display. Well-known albums have dozens of same-score
+/// pressings; a narrow fetch truncates away the good candidates before our
+/// local scorer ever sees them. Capped by the caller at MB's 100-result max.
+const MIN_SEARCH_FETCH: u32 = 25;
+
+/// Maximum number of distinct release groups we hit for `first-release-date`
+/// during year enrichment of one search batch. Worst case adds this many
+/// throttled requests (~1.1s each) on top of the search itself.
+const MAX_RG_YEAR_LOOKUPS: usize = 5;
+
 #[derive(Debug, Clone)]
 pub struct MbRelease {
     pub id: String,
@@ -25,6 +36,12 @@ pub struct MbRelease {
     /// Release-group MBID, used to look up `first-release-date` when the
     /// release itself has no date exposed in the search response.
     pub release_group_id: Option<String>,
+    /// Earliest known release year within this candidate's release group.
+    /// Search responses don't expose `first-release-date`, so this is the
+    /// min over the years of all siblings returned in the same search batch
+    /// (or the group's `first-release-date` for direct lookups). The
+    /// scorer uses it to prefer original pressings over reissues.
+    pub group_min_year: Option<i32>,
 }
 
 impl MbRelease {
@@ -91,6 +108,15 @@ impl MbClient {
         let clean_artist = strip_trailing_punct(artist);
         let clean_album = strip_parenthesized_suffix(album);
 
+        // MB's relevance ordering is nearly useless for well-known albums:
+        // dozens of pressings all score 100 and come back in an arbitrary
+        // (effectively submission) order — the top-5 can easily be all JP/
+        // CA/CN reissues while the original pressing sits at #9. Fetch a
+        // much wider pool than the UI will display and let local scoring
+        // (which knows the local year, track count, and press preferences)
+        // pick the real top-N.
+        let fetch_limit = (limit.max(1) * 5).clamp(MIN_SEARCH_FETCH, 100);
+
         // Groups with several tracks can't plausibly match a single. MB's
         // own relevance ranking doesn't know that — a same-named single
         // often outranks the real album, pushing the album out of the
@@ -110,13 +136,17 @@ impl MbClient {
         // All-punctuation artists clean down to empty; don't build the
         // malformed Lucene clause `artist:()` in that case.
         if !clean_artist.trim().is_empty() {
-            let releases =
-                self.run_search_artist(&clean_artist, Some(&clean_album), limit, type_filter)?;
+            let releases = self.run_search_artist(
+                &clean_artist,
+                Some(&clean_album),
+                fetch_limit,
+                type_filter,
+            )?;
             if !releases.is_empty() {
                 return Ok(releases);
             }
         } else {
-            let releases = self.run_search_album(&clean_album, limit, type_filter)?;
+            let releases = self.run_search_album(&clean_album, fetch_limit, type_filter)?;
             if !releases.is_empty() {
                 return Ok(releases);
             }
@@ -138,7 +168,8 @@ impl MbClient {
         // uses a different script/name than the file tags. Keep the Album/EP
         // filter here too — same reasoning as the first pass.
         if !arids.is_empty() {
-            let releases = self.run_search_arids(&arids, Some(&clean_album), limit, type_filter)?;
+            let releases =
+                self.run_search_arids(&arids, Some(&clean_album), fetch_limit, type_filter)?;
             if !releases.is_empty() {
                 return Ok(releases);
             }
@@ -153,27 +184,41 @@ impl MbClient {
         if type_filter.is_some() {
             if !clean_artist.trim().is_empty() {
                 let releases =
-                    self.run_search_artist(&clean_artist, Some(&clean_album), limit, None)?;
+                    self.run_search_artist(&clean_artist, Some(&clean_album), fetch_limit, None)?;
                 if !releases.is_empty() {
                     return Ok(releases);
                 }
             } else {
-                let releases = self.run_search_album(&clean_album, limit, None)?;
+                let releases = self.run_search_album(&clean_album, fetch_limit, None)?;
                 if !releases.is_empty() {
                     return Ok(releases);
                 }
             }
             if !arids.is_empty() {
-                let releases = self.run_search_arids(&arids, Some(&clean_album), limit, None)?;
+                let releases =
+                    self.run_search_arids(&arids, Some(&clean_album), fetch_limit, None)?;
                 if !releases.is_empty() {
                     return Ok(releases);
                 }
             }
         }
 
+        // Fallback 2.5: album only, no artist constraint. Rescues albums
+        // whose local artist tag is flat-out wrong or unmatchable against
+        // MB's credits — e.g. a Various-Artists tribute album tagged with
+        // the tributed artist ("Pink Floyd" for "Return To The Dark Side
+        // Of The Moon"). Local scoring penalises the artist mismatch, so
+        // noise from popular titles ranks low naturally.
+        if !clean_artist.trim().is_empty() && clean_album.chars().count() >= 3 {
+            let releases = self.run_search_album(&clean_album, fetch_limit, None)?;
+            if !releases.is_empty() {
+                return Ok(releases);
+            }
+        }
+
         // Fallback 3: artist only (string match), in case album spelling differs
         if !clean_artist.trim().is_empty() {
-            let releases = self.run_search_artist(&clean_artist, None, limit, None)?;
+            let releases = self.run_search_artist(&clean_artist, None, fetch_limit, None)?;
             if !releases.is_empty() {
                 return Ok(releases);
             }
@@ -183,7 +228,7 @@ impl MbClient {
         // Only do this for unambiguous artist resolution; querying every
         // candidate for a short alias like "Minami" produces unrelated noise.
         if arids.len() == 1 {
-            let releases = self.run_search_arids(&arids, None, limit, None)?;
+            let releases = self.run_search_arids(&arids, None, fetch_limit, None)?;
             if !releases.is_empty() {
                 return Ok(releases);
             }
@@ -191,7 +236,8 @@ impl MbClient {
 
         // Fallback 5: original artist (with punctuation) + album
         if clean_artist != artist {
-            let releases = self.run_search_artist(artist, Some(&clean_album), limit, None)?;
+            let releases =
+                self.run_search_artist(artist, Some(&clean_album), fetch_limit, None)?;
             if !releases.is_empty() {
                 return Ok(releases);
             }
@@ -249,7 +295,7 @@ impl MbClient {
         let Some(query) = build_artist_search_query(artist, album, type_filter) else {
             return Ok(Vec::new());
         };
-        self.run_release_query(&query, limit)
+        self.run_release_query_lenient(&query, limit)
     }
 
     fn run_search_album(
@@ -263,7 +309,7 @@ impl MbClient {
             query.push_str(" AND ");
             query.push_str(tf);
         }
-        self.run_release_query(&query, limit)
+        self.run_release_query_lenient(&query, limit)
     }
 
     fn run_search_arids(
@@ -297,7 +343,35 @@ impl MbClient {
             query.push_str(" AND ");
             query.push_str(tf);
         }
-        self.run_release_query(&query, limit)
+        self.run_release_query_lenient(&query, limit)
+    }
+
+    /// Run one search pass, treating a query MB *rejects* (HTTP 4xx) as an
+    /// empty result instead of a hard failure: rescue fallbacks further
+    /// down the chain must still get their chance, and a garbage local
+    /// search term shouldn't nuke the whole import review. Trimmed by the
+    /// caller, so returning nothing here just moves to the next fallback.
+    fn run_release_query_lenient(
+        &mut self,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<MbRelease>> {
+        match self.run_release_query(query, limit) {
+            Ok(releases) => Ok(releases),
+            Err(e) => {
+                let msg = e.to_string();
+                // get_json_body formats MB rejections as
+                // "MB <op> failed: HTTP 4xx: <detail>". 4xx means MB
+                // refused the query itself — no point retrying, but the
+                // next fallback pass may still succeed.
+                if msg.contains("HTTP 4") {
+                    tracing::warn!("MB search query rejected, treating as empty: {}", msg);
+                    Ok(Vec::new())
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     fn run_release_query(&mut self, query: &str, limit: u32) -> Result<Vec<MbRelease>> {
@@ -330,10 +404,13 @@ impl MbClient {
         // `release-events`, nor `release-group.first-release-date` appear
         // in search output, though the release page on MB shows them), fill
         // the gap by fetching `first-release-date` from the release group.
-        // Only fires per candidate that's actually missing a year, so the
-        // extra API traffic is bounded and only the slower import-review
-        // path pays the cost.
+        // Bounded per unique release group so a wide search result can't
+        // burst dozens of extra requests.
         self.enrich_missing_years(&mut releases);
+
+        // Compute the per-release-group originality signal used by the
+        // scorer to prefer original pressings over reissues.
+        assign_group_min_years(&mut releases);
 
         Ok(releases)
     }
@@ -453,15 +530,25 @@ impl MbClient {
                     tracks: Vec::new(),
                     api_score: source.api_score,
                     release_group_id: Some(rg_id.to_string()),
+                    // Filled in after the sort below (min over sibling years).
+                    group_min_year: None,
                 })
             })
             .collect();
 
         releases.sort_by_key(|r| (r.year.unwrap_or(i32::MAX), r.id.clone()));
+        let group_min_year = releases.iter().filter_map(|r| r.year).min();
+        for r in releases.iter_mut() {
+            r.group_min_year = group_min_year;
+        }
         Ok(releases)
     }
 
     fn enrich_missing_years(&mut self, releases: &mut [MbRelease]) {
+        // Per-release-group memo so siblings share one lookup; capped so a
+        // wide search (up to 100 candidates across many groups) can't queue
+        // a request storm behind the rate-limiter.
+        let mut cache: HashMap<String, Option<i32>> = HashMap::new();
         for r in releases.iter_mut() {
             if r.year.is_some() {
                 continue;
@@ -469,10 +556,29 @@ impl MbClient {
             let Some(rg_id) = r.release_group_id.clone() else {
                 continue;
             };
-            match self.fetch_release_group_first_year(&rg_id) {
-                Ok(Some(y)) => r.year = Some(y),
-                Ok(None) => {}
-                Err(e) => tracing::debug!("MB release-group {} year lookup failed: {}", rg_id, e),
+            let year = match cache.get(&rg_id) {
+                Some(cached) => *cached,
+                None => {
+                    if cache.len() >= MAX_RG_YEAR_LOOKUPS {
+                        continue;
+                    }
+                    let fetched = match self.fetch_release_group_first_year(&rg_id) {
+                        Ok(y) => y,
+                        Err(e) => {
+                            tracing::debug!(
+                                "MB release-group {} year lookup failed: {}",
+                                rg_id,
+                                e
+                            );
+                            None
+                        }
+                    };
+                    cache.insert(rg_id, fetched);
+                    fetched
+                }
+            };
+            if let Some(y) = year {
+                r.year = Some(y);
             }
         }
     }
@@ -523,6 +629,29 @@ impl MbClient {
 
         let parsed = parse_full_release(&raw);
         let mut release = parsed.release;
+
+        // Last-resort year: neither the release payload nor the embedded
+        // release-group carried any date. One extra tiny request, only when
+        // the year is actually missing (this is how a matched album would
+        // otherwise land in the DB with a NULL year despite a good match).
+        if release.year.is_none()
+            && let Some(rg_id) = release.release_group_id.clone()
+        {
+            match self.fetch_release_group_first_year(&rg_id) {
+                Ok(Some(y)) => {
+                    release.year = Some(y);
+                    if release.group_min_year.is_none() {
+                        release.group_min_year = Some(y);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::debug!(
+                    "MB release-group {} year lookup during fetch_release failed: {}",
+                    rg_id,
+                    e
+                ),
+            }
+        }
 
         if self.name_script == NameScriptPreference::Native {
             return Ok(release);
@@ -821,6 +950,8 @@ fn parse_search_release(r: MbSearchRelease) -> MbRelease {
         tracks: Vec::new(), // Search results don't include tracks
         api_score: r.score.unwrap_or(0),
         release_group_id,
+        // Assigned by `assign_group_min_years` once the full batch is known.
+        group_min_year: None,
     }
 }
 
@@ -871,6 +1002,12 @@ fn parse_full_release(v: &serde_json::Value) -> ParsedFullRelease {
         .and_then(|y| y.parse::<i32>().ok());
 
     let release_group_id = v["release-group"]["id"].as_str().map(|s| s.to_string());
+    // Direct lookups embed the full release-group object, including
+    // `first-release-date` — that doubles as the originality signal.
+    let group_min_year = v["release-group"]["first-release-date"]
+        .as_str()
+        .and_then(|d| d.get(..4))
+        .and_then(|y| y.parse::<i32>().ok());
 
     let country = v["country"].as_str().map(|s| s.to_string());
     let status = v["status"].as_str().map(|s| s.to_string());
@@ -940,6 +1077,7 @@ fn parse_full_release(v: &serde_json::Value) -> ParsedFullRelease {
             tracks,
             api_score: 100,
             release_group_id,
+            group_min_year,
         },
         title_aliases,
         release_artist_mbid,
@@ -962,6 +1100,28 @@ fn parse_aliases(v: &serde_json::Value) -> Vec<MbAlias> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Compute `group_min_year` for a batch of search results: the earliest
+/// year among all releases sharing a release-group MBID. Run after year
+/// enrichment so filled years are included. Releases without a release
+/// group keep `None` (no originality signal — better than inventing one).
+fn assign_group_min_years(releases: &mut [MbRelease]) {
+    let mut min_by_group: HashMap<String, i32> = HashMap::new();
+    for r in releases.iter() {
+        if let (Some(rg), Some(y)) = (r.release_group_id.as_deref(), r.year) {
+            min_by_group
+                .entry(rg.to_string())
+                .and_modify(|m| *m = (*m).min(y))
+                .or_insert(y);
+        }
+    }
+    for r in releases.iter_mut() {
+        r.group_min_year = r
+            .release_group_id
+            .as_deref()
+            .and_then(|rg| min_by_group.get(rg).copied());
+    }
 }
 
 /// Minimal URL encoding for the query parameter.
@@ -1114,5 +1274,56 @@ mod tests {
         assert_eq!(parsed.tracks[1].disc, 2);
         assert_eq!(parsed.tracks[1].position, 1);
         assert_eq!(parsed.tracks[1].recording_id, "rec-2-1");
+    }
+
+    #[test]
+    fn assign_group_min_years_shares_min_within_group_only() {
+        let rel = |id: &str, rg: Option<&str>, year: Option<i32>| MbRelease {
+            id: id.to_string(),
+            title: "T".to_string(),
+            artist: "A".to_string(),
+            year,
+            country: None,
+            label: None,
+            status: None,
+            track_count: 10,
+            medium_count: 1,
+            tracks: Vec::new(),
+            api_score: 100,
+            release_group_id: rg.map(str::to_string),
+            group_min_year: None,
+        };
+
+        let mut releases = vec![
+            rel("r1", Some("rg-x"), Some(1976)),
+            rel("r2", Some("rg-x"), Some(2011)),
+            rel("r3", Some("rg-x"), None),
+            rel("r4", Some("rg-y"), Some(1999)),
+            rel("r5", None, Some(1980)),
+        ];
+
+        assign_group_min_years(&mut releases);
+
+        assert_eq!(releases[0].group_min_year, Some(1976));
+        assert_eq!(releases[1].group_min_year, Some(1976));
+        assert_eq!(releases[2].group_min_year, Some(1976), "undated sibling inherits");
+        assert_eq!(releases[3].group_min_year, Some(1999));
+        assert_eq!(
+            releases[4].group_min_year, None,
+            "no release group → no invented originality signal"
+        );
+    }
+
+    #[test]
+    fn parse_full_release_sets_group_min_year_from_release_group() {
+        let raw = json!({
+            "id": "rel-1",
+            "title": "Album",
+            "release-group": { "id": "rg-9", "first-release-date": "1976-12-10" },
+            "media": []
+        });
+        let parsed = parse_full_release(&raw).release;
+        assert_eq!(parsed.year, Some(1976));
+        assert_eq!(parsed.group_min_year, Some(1976));
     }
 }

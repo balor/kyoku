@@ -12,6 +12,8 @@ pub struct MatchScore {
     pub year: f64,
     pub duration: f64,
     pub tracks: f64,
+    pub country: f64,
+    pub original: f64,
 }
 
 /// Score how well a local album group matches a MusicBrainz release candidate.
@@ -27,6 +29,13 @@ pub struct MatchScore {
 /// - Track count (0.25): exact match is very strong signal — steepest penalty
 ///   for mismatch since it's the most objective metric we have from search.
 /// - Year (0.15): exact/near release year match
+/// - Country (0.06): press preference — worldwide/Europe and major
+///   anglophone markets over random regional reissues. Deliberately small:
+///   it only reorders candidates that are otherwise equivalent.
+/// - Originality (0.08): candidate year vs. the earliest known year in its
+///   release group. Well-known albums have dozens of equal-score pressings
+///   on MB; this is what puts the original pressing ahead of the 2011
+///   remaster when the local files carry no year of their own.
 /// - Duration (0.05): total duration within tolerance
 /// - Per-track titles (0.20): ordered Jaro-Winkler (0.5 if unavailable)
 pub fn score_release(
@@ -123,6 +132,18 @@ pub fn score_release(
         Some(sum / pairs as f64)
     };
 
+    // Press-country preference. Excluded entirely when MB exposes no
+    // country (digital releases sometimes don't) rather than penalised.
+    let country = candidate.country.as_deref().map(country_preference_score);
+
+    // Original-pressing preference: how close the candidate's year is to
+    // the earliest known year in its release group. A 1976 original scores
+    // 1.0; a 2011 remaster of the same album lands near 0.1.
+    let original = match (candidate.year, candidate.group_min_year) {
+        (Some(y), Some(min)) => Some(originality_score((y - min).max(0))),
+        _ => None,
+    };
+
     // Duration comparison. Excluded if data unavailable.
     let duration = if local_total_duration_ms == 0 {
         None
@@ -172,6 +193,14 @@ pub fn score_release(
         weighted_sum += t * 0.20;
         total_weight += 0.20;
     }
+    if let Some(c) = country {
+        weighted_sum += c * 0.06;
+        total_weight += 0.06;
+    }
+    if let Some(o) = original {
+        weighted_sum += o * 0.08;
+        total_weight += 0.08;
+    }
 
     let mut total = if total_weight > 0.0 {
         weighted_sum / total_weight
@@ -186,6 +215,17 @@ pub fn score_release(
         total *= 0.85;
     }
 
+    // Bootlegs are rarely what the user ripped. Same keep-visible-but-
+    // demote treatment as pseudo-releases, weaker since an unofficial
+    // live/bootleg recording can occasionally be the correct target.
+    if candidate
+        .status
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("Bootleg"))
+    {
+        total *= 0.92;
+    }
+
     MatchScore {
         total,
         artist: artist.unwrap_or(0.0),
@@ -194,6 +234,40 @@ pub fn score_release(
         year: year.unwrap_or(0.0),
         duration: duration.unwrap_or(0.0),
         tracks: tracks.unwrap_or(0.0),
+        country: country.unwrap_or(0.0),
+        original: original.unwrap_or(0.0),
+    }
+}
+
+/// Pressing preference by MB release country code. Worldwide (`XW`) and
+/// pan-European (`XE`) digital/CD releases are what most libraries centre
+/// on; major original markets follow. Not a quality judgement — pure
+/// tie-breaking among otherwise indistinguishable pressings.
+fn country_preference_score(code: &str) -> f64 {
+    match code {
+        "XW" => 1.0,
+        "XE" => 0.95,
+        "GB" | "US" => 0.90,
+        "JP" => 0.85,
+        "DE" | "FR" | "NL" | "SE" | "IT" | "ES" | "AU" | "CA" => 0.80,
+        "XU" => 0.60,
+        _ => 0.70,
+    }
+}
+
+/// Originality decay by years after the release group's earliest known
+/// year. The original pressing scores 1.0; reissues fade fast but never to
+/// zero — a remaster can still be the right match when the local files
+/// came from it (the `year` factor handles that case when tags know it).
+fn originality_score(years_after_original: i32) -> f64 {
+    match years_after_original {
+        0 => 1.0,
+        1 => 0.75,
+        2 => 0.55,
+        3 => 0.40,
+        4..=5 => 0.25,
+        6..=8 => 0.15,
+        _ => 0.08,
     }
 }
 
@@ -336,6 +410,7 @@ mod tests {
                 })
                 .collect(),
             api_score: 100,
+            group_min_year: None,
         }
     }
 
@@ -615,6 +690,126 @@ mod tests {
             score.album > 0.9,
             "normalized titles should match well: {}",
             score.album
+        );
+    }
+
+    /// Candidate factory for the pressing-preference tests below: same
+    /// artist/title/tracks, varying year/country within one release group.
+    fn make_pressing(
+        artist: &str,
+        title: &str,
+        year: Option<i32>,
+        country: Option<&str>,
+        group_min_year: Option<i32>,
+    ) -> MbRelease {
+        MbRelease {
+            year,
+            country: country.map(String::from),
+            group_min_year,
+            ..make_release(artist, title, &[])
+        }
+    }
+
+    fn queen_pressing(year: Option<i32>, country: Option<&str>, group_min: Option<i32>) -> MbRelease {
+        MbRelease {
+            track_count: 10,
+            ..make_pressing("Queen", "A Day at the Races", year, country, group_min)
+        }
+    }
+
+    fn beatles_pressing(
+        year: Option<i32>,
+        country: Option<&str>,
+        group_min: Option<i32>,
+    ) -> MbRelease {
+        MbRelease {
+            track_count: 17,
+            ..make_pressing("The Beatles", "Abbey Road", year, country, group_min)
+        }
+    }
+
+    #[test]
+    fn original_pressing_beats_reissue_when_local_year_known() {
+        // The "A Day at the Races" report: MB's top hits for this album are
+        // all 1990s–2010s reissues with identical relevance scores; the 1976
+        // original sits deep in the list. With a local year tag of 1976 the
+        // original must outrank every reissue by a wide margin.
+        let original = queen_pressing(Some(1976), Some("US"), Some(1976));
+        let reissue_2011 = queen_pressing(Some(2011), Some("XE"), Some(1976));
+        let reissue_1993 = queen_pressing(Some(1993), Some("IT"), Some(1976));
+
+        let s_orig = score_release("Queen", "A Day at the Races", Some(1976), 10, &[], 0, &original);
+        let s_r2011 = score_release("Queen", "A Day at the Races", Some(1976), 10, &[], 0, &reissue_2011);
+        let s_r1993 = score_release("Queen", "A Day at the Races", Some(1976), 10, &[], 0, &reissue_1993);
+
+        assert!(s_orig.total > s_r2011.total + 0.15, "orig={} reissue={}", s_orig.total, s_r2011.total);
+        assert!(s_orig.total > s_r1993.total + 0.15, "orig={} reissue={}", s_orig.total, s_r1993.total);
+        assert!(s_orig.total >= 0.85, "original should auto-match: {}", s_orig.total);
+    }
+
+    #[test]
+    fn original_pressing_beats_reissue_even_without_local_year() {
+        // Local files carry no year at all — originality must still push the
+        // group-min-year pressing to the top so the default pick is sane.
+        let original = beatles_pressing(Some(1969), Some("US"), Some(1969));
+        let reissue = beatles_pressing(Some(2012), Some("XE"), Some(1969));
+
+        let s_orig = score_release("The Beatles", "Abbey Road", None, 17, &[], 0, &original);
+        let s_reissue = score_release("The Beatles", "Abbey Road", None, 17, &[], 0, &reissue);
+
+        assert!(s_orig.total > s_reissue.total, "orig={} reissue={}", s_orig.total, s_reissue.total);
+    }
+
+    #[test]
+    fn worldwide_or_major_market_beats_exotic_pressing_on_ties() {
+        // All else equal (the MB score-100 tie swamp), XE should beat CN,
+        // and both should stay within review range of each other — the
+        // country factor is a nudge, not a verdict.
+        let xe = beatles_pressing(Some(1987), Some("XE"), Some(1969));
+        let cn = beatles_pressing(Some(1987), Some("CN"), Some(1969));
+
+        let s_xe = score_release("The Beatles", "Abbey Road", None, 17, &[], 0, &xe);
+        let s_cn = score_release("The Beatles", "Abbey Road", None, 17, &[], 0, &cn);
+
+        assert!(s_xe.total > s_cn.total, "XE={} CN={}", s_xe.total, s_cn.total);
+        assert!(
+            s_xe.total - s_cn.total < 0.10,
+            "country must be only a nudge: XE={} CN={}",
+            s_xe.total,
+            s_cn.total
+        );
+    }
+
+    #[test]
+    fn candidate_without_year_gets_no_originality_penalty() {
+        // A pressing with no known date (common for digital XW releases)
+        // must not sink below every dated reissue — the originality factor
+        // is excluded (weight redistributed), not zeroed.
+        let undated = beatles_pressing(None, Some("XW"), Some(1969));
+        let score = score_release("The Beatles", "Abbey Road", None, 17, &[], 0, &undated);
+        assert!(
+            score.total > 0.85,
+            "undated XW pressing should stay competitive: {}",
+            score.total
+        );
+    }
+
+    #[test]
+    fn bootleg_is_demoted_below_official_pressing() {
+        let bootleg = MbRelease {
+            status: Some("Bootleg".to_string()),
+            ..beatles_pressing(Some(1969), Some("XW"), Some(1969))
+        };
+        let official = beatles_pressing(Some(1969), Some("US"), Some(1969));
+
+        let s_boot = score_release("The Beatles", "Abbey Road", None, 17, &[], 0, &bootleg);
+        let s_off = score_release("The Beatles", "Abbey Road", None, 17, &[], 0, &official);
+
+        assert!(
+            s_off.total > s_boot.total,
+            "official={} bootleg={}",
+            s_off.total,
+            s_boot.total
         );
     }
 }

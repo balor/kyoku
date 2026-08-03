@@ -985,6 +985,7 @@ mod tests {
             tracks: vec![mbt.clone()],
             api_score: 100,
             release_group_id: None,
+            group_min_year: None,
         };
         let single = MbRelease {
             medium_count: 1,

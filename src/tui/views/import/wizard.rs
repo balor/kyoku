@@ -128,6 +128,70 @@ fn prune_weak_candidates_after_obvious_leader(candidates: &mut Vec<MbCandidate>)
     });
 }
 
+/// Everything the MB search + scoring paths need from local metadata.
+/// Tag values win everywhere; folder-name hints fill the gaps left by
+/// untagged files (`1968 Procol Harum - Shine On Brightly`,
+/// `A Day at the Races (1976) [FLAC]`, …).
+struct LocalMatchContext {
+    artist: String,
+    album: String,
+    year: Option<i32>,
+    track_count: u32,
+    titles: Vec<String>,
+    total_ms: u64,
+}
+
+fn local_match_context(group: &ImportGroup) -> LocalMatchContext {
+    let first_tag = group.tracks.first().and_then(|(_, td)| td.as_ref());
+    let hints = group_folder_hints(group);
+    let artist = first_tag
+        .and_then(|td| td.album_artist.as_deref().or(td.artist.as_deref()))
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .or(hints.artist)
+        .unwrap_or_default();
+    let album = first_tag
+        .and_then(|td| td.album.as_deref())
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .or(hints.title)
+        // Last resort. Rarely useful as a search term, but gives the
+        // pseudo-release/fallback machinery something to chew on.
+        .unwrap_or_else(|| group.name.clone());
+    let year = first_tag
+        .and_then(|td| td.year.map(|y| y as i32))
+        .or(hints.year);
+    let track_count = group.tracks.len() as u32;
+    let titles: Vec<String> = group.tracks.iter().map(|(t, _)| t.title.clone()).collect();
+    let total_ms: u64 = group
+        .tracks
+        .iter()
+        .map(|(t, _)| t.duration_ms.unwrap_or(0))
+        .sum();
+    LocalMatchContext {
+        artist,
+        album,
+        year,
+        track_count,
+        titles,
+        total_ms,
+    }
+}
+
+/// Folder-name hints from the group's source directory basename. All
+/// tracks in a group share the directory by construction, so looking at
+/// the first is enough.
+fn group_folder_hints(group: &ImportGroup) -> importer::FolderHints {
+    group
+        .tracks
+        .first()
+        .and_then(|(t, _)| t.source_dir.as_deref().or_else(|| t.file_path.parent()))
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .map(importer::parse_folder_hints)
+        .unwrap_or_default()
+}
+
 impl ImportView {
     pub fn handle_key(&mut self, key: KeyEvent, conn: &Connection) {
         match self.step {
@@ -479,30 +543,18 @@ impl ImportView {
         let idx = self.current_group;
 
         // Get local data for scoring
-        let (artist, album, year, track_count, titles, total_ms) = if let Some(group) =
-            self.groups.get(idx)
-        {
-            let first_tag = group.tracks.first().and_then(|(_, td)| td.as_ref());
-            let artist = first_tag
-                .and_then(|td| td.album_artist.as_deref().or(td.artist.as_deref()))
-                .unwrap_or("")
-                .to_string();
-            let album = first_tag
-                .and_then(|td| td.album.as_deref())
-                .unwrap_or(&group.name)
-                .to_string();
-            let year = first_tag.and_then(|td| td.year.map(|y| y as i32));
-            let tc = group.tracks.len() as u32;
-            let titles: Vec<String> = group.tracks.iter().map(|(t, _)| t.title.clone()).collect();
-            let ms: u64 = group
-                .tracks
-                .iter()
-                .map(|(t, _)| t.duration_ms.unwrap_or(0))
-                .sum();
-            (artist, album, year, tc, titles, ms)
-        } else {
+        let Some(group) = self.groups.get(idx) else {
             return;
         };
+        let ctx = local_match_context(group);
+        let (artist, album, year, track_count, titles, total_ms) = (
+            ctx.artist,
+            ctx.album,
+            ctx.year,
+            ctx.track_count,
+            ctx.titles,
+            ctx.total_ms,
+        );
 
         let (tx, rx) = mpsc::channel();
         self.mbid_fetch_rx = Some(rx);
@@ -705,25 +757,15 @@ impl ImportView {
         };
         group.mb_state = MbMatchState::Searching;
 
-        let first_tag = group.tracks.first().and_then(|(_, td)| td.as_ref());
-        let artist = first_tag
-            .and_then(|td| td.album_artist.as_deref().or(td.artist.as_deref()))
-            .unwrap_or("")
-            .to_string();
-        let album = first_tag
-            .and_then(|td| td.album.as_deref())
-            .unwrap_or(&group.name)
-            .to_string();
-        let year = first_tag.and_then(|td| td.year.map(|y| y as i32));
-        let track_count = group.tracks.len() as u32;
-        let titles: Vec<String> = group.tracks.iter().map(|(t, _)| t.title.clone()).collect();
-        let total_ms: u64 = group
-            .tracks
-            .iter()
-            .map(|(t, _)| t.duration_ms.unwrap_or(0))
-            .sum();
+        let ctx = local_match_context(group);
         let tag_release_mbid = common_tag_release_mbid(&group.tracks);
         let limit = self.match_candidates;
+        let artist = ctx.artist;
+        let album = ctx.album;
+        let year = ctx.year;
+        let track_count = ctx.track_count;
+        let titles = ctx.titles;
+        let total_ms = ctx.total_ms;
 
         self.ensure_mb_infra();
         // Clones for the worker thread.

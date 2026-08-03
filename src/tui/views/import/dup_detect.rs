@@ -1076,6 +1076,7 @@ mod tests {
             }],
             api_score: 0,
             release_group_id: None,
+            group_min_year: None,
         };
         MbCandidate {
             release,
@@ -1087,6 +1088,8 @@ mod tests {
                 year: 0.0,
                 duration: 0.0,
                 tracks: 0.0,
+                country: 0.0,
+                original: 0.0,
             },
         }
     }
@@ -1493,6 +1496,7 @@ mod tests {
             tracks,
             api_score: 0,
             release_group_id: None,
+            group_min_year: None,
         };
         MbCandidate {
             release,
@@ -1504,6 +1508,8 @@ mod tests {
                 year: 0.0,
                 duration: 0.0,
                 tracks: 0.0,
+                country: 0.0,
+                original: 0.0,
             },
         }
     }
