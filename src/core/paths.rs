@@ -164,9 +164,12 @@ mod tests {
     #[test]
     fn relative_input_passes_through() {
         let music = abs("/home/user/Music");
+        // Verbatim pass-through: display() never normalizes separators
+        // (that's also why callers feeding strip_prefix-derived paths get
+        // the input's own separator style).
         assert_eq!(
             to_db_path(Path::new("Artist/01.mp3"), &music),
-            db("Artist/01.mp3")
+            "Artist/01.mp3"
         );
     }
 
