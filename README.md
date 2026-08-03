@@ -58,6 +58,22 @@ kyoku previews and confirms every destructive operation, but it does move and re
 
 ## Install
 
+### Homebrew (macOS, Linux)
+
+```sh
+brew install balor/kyoku/kyoku
+```
+
+Prebuilt binaries from our own tap — no Rust toolchain needed, and Gatekeeper never quarantines Homebrew downloads (skip the [macOS binary note](#macos-binary-note) below). aarch64 Linux isn't covered by the tap; use crates.io there.
+
+### crates.io
+
+```sh
+cargo install kyoku
+```
+
+Builds from source; needs a recent stable Rust toolchain (2024 edition). No system libraries required — rusqlite is bundled and TLS goes through rustls, so this works on Linux, macOS, and Windows alike.
+
 ### Prebuilt binaries
 
 Download the binary for your platform from the repository's Releases page and put `kyoku` somewhere on your `PATH`.
@@ -71,11 +87,9 @@ cargo build --release
 ./target/release/kyoku --help
 ```
 
-Requires a recent stable Rust toolchain (2024 edition). No system libraries required — rusqlite is bundled; TLS goes through rustls.
-
 ### macOS binary note
 
-The macOS release binaries are not Apple-notarized, so Gatekeeper will block them on first run with "Apple could not verify…". Strip the quarantine attribute after extracting:
+This applies to manually downloaded release binaries only (Homebrew and `cargo install` users are not affected). The macOS release binaries are not Apple-notarized, so Gatekeeper will block them on first run with "Apple could not verify…". Strip the quarantine attribute after extracting:
 
 ```sh
 xattr -d com.apple.quarantine ./kyoku

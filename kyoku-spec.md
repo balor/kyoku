@@ -1322,7 +1322,7 @@ A single MB entity can have both a native-script primary name and one or more La
 
 ### Test Fixtures
 - `tests/fixtures/sample_library/` holds tiny (~0.1 s) silent files: `tagged.{mp3,flac,ogg}`, `cjk_tagged.mp3` (Japanese titles only — a Polish/other-script fixture would be a good addition), `no_title.mp3`, plus `not_audio.txt`
-- Regenerate with `tests/fixtures/create_fixtures.rs` (`cargo run --bin create_fixtures`)
+- Regenerate with `examples/create_fixtures.rs` (`cargo run --example create_fixtures`)
 - Coverage gaps vs the ideal list: remaining formats (m4a/wav/wma/ape/opus/aiff…), Polish/Nordic tags, and a multi-disc album
 
 ### Continuous Integration

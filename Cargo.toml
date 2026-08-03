@@ -1,9 +1,25 @@
 [package]
 name = "kyoku"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "A TUI-first music library manager"
-default-run = "kyoku"
+license = "MIT"
+repository = "https://github.com/balor/kyoku"
+readme = "README.md"
+keywords = ["music", "tui", "music-library", "metadata", "musicbrainz"]
+categories = ["command-line-utilities", "multimedia::audio"]
+# Not build-relevant — keep the crates.io tarball lean. packaging/windows
+# MUST stay included: build.rs embeds the manifest on Windows builds.
+exclude = [
+    ".github/**",
+    ".pi/**",
+    "doc/**",
+    "packaging/homebrew/**",
+    "kyoku-spec.md",
+    "flake.nix",
+    "flake.lock",
+    "justfile",
+]
 
 [dependencies]
 # TUI
@@ -57,10 +73,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 name = "kyoku"
 path = "src/main.rs"
 
-[[bin]]
-name = "create_fixtures"
-path = "tests/fixtures/create_fixtures.rs"
-
+# Fixture generator lives in examples/ (not a [[bin]]) so crates.io users
+# don't get it installed alongside kyoku. Run: cargo run --example create_fixtures
+#
 # Embeds packaging/windows/kyoku.manifest (longPathAware) into the exe.
 # Compiled on all platforms so cross-builds (xwin, cargo-zigbuild) keep
 # working; build.rs only invokes it when targeting Windows.

@@ -5,7 +5,7 @@ The checked-in files under `sample_library/` are intentionally tiny fixtures use
 Regenerate the MP3 fixtures with:
 
 ```sh
-cargo run --bin create_fixtures
+cargo run --example create_fixtures
 ```
 
 Regenerate the FLAC/OGG fixtures with ffmpeg, then tag them with Vorbis comments:

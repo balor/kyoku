@@ -1,5 +1,5 @@
-/// Helper binary to create test fixture audio files.
-/// Run with: cargo run --bin create_fixtures
+/// Helper to create test fixture audio files.
+/// Run with: cargo run --example create_fixtures
 use std::fs;
 use std::io::Write;
 use std::path::Path;
