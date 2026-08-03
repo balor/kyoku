@@ -23,36 +23,54 @@ use kyoku::external::musicbrainz::{MbClient, MbRelease};
 /// feeds the Album/EP type filter exactly like the wizard does.
 struct Scenario {
     folder: &'static str,
+    /// Artist as found in the file tags; `None` models untagged rips where
+    /// everything has to come from folder-name hints.
+    tag_artist: Option<&'static str>,
     local_track_count: u32,
     /// Always-true expectations that hold regardless of MB data drift.
     expect_substring: &'static str,
+    /// When set, the #1 ranked candidate must be by this artist — guards
+    /// against regressions where a random pressing/tribute outranks the
+    /// canonical album.
+    leader_artist: Option<&'static str>,
 }
 
 const SCENARIOS: &[Scenario] = &[
     Scenario {
         folder: "(2006) Return To The Dark Side Of The Moon (A Tribute To Pink Floyd) [FLAC]",
+        tag_artist: None,
         local_track_count: 13,
         expect_substring: "Return to the Dark Side of the Moon",
+        leader_artist: None,
     },
     Scenario {
         folder: "1968 Procol Harum - Shine On Brightly",
+        tag_artist: None,
         local_track_count: 14,
         expect_substring: "Shine On Brightly",
+        leader_artist: Some("Procol Harum"),
     },
     Scenario {
         folder: "A Day at the Races (1976)",
+        tag_artist: None,
         local_track_count: 10,
         expect_substring: "A Day at the Races",
+        leader_artist: Some("Queen"),
     },
     Scenario {
+        // Tags carry the artist; the folder basename is the only title hint.
         folder: "Abbey road",
+        tag_artist: Some("The Beatles"),
         local_track_count: 17,
         expect_substring: "Abbey Road",
+        leader_artist: Some("The Beatles"),
     },
     Scenario {
         folder: "News of the World (remastered)",
+        tag_artist: None,
         local_track_count: 11,
         expect_substring: "News of the World",
+        leader_artist: Some("Queen"),
     },
 ];
 
@@ -70,7 +88,11 @@ fn live_mb_probe_for_known_problem_folders() {
     for s in SCENARIOS {
         let hints = parse_folder_hints(s.folder);
         let album = hints.title.clone().unwrap_or_else(|| s.folder.into());
-        let artist = hints.artist.clone().unwrap_or_default();
+        let artist = s
+            .tag_artist
+            .map(str::to_string)
+            .or_else(|| hints.artist.clone())
+            .unwrap_or_default();
 
         println!("\n=== {}", s.folder);
         println!(
@@ -134,6 +156,20 @@ fn live_mb_probe_for_known_problem_folders() {
                 "{}: no top-5 candidate contains {:?}",
                 s.folder, s.expect_substring
             ));
+        }
+
+        if let Some(want) = s.leader_artist {
+            let leader_ok = scored
+                .first()
+                .is_some_and(|(r, _)| r.artist.eq_ignore_ascii_case(want));
+            if !leader_ok {
+                failures.push(format!(
+                    "{}: leader is {:?}, expected artist {:?}",
+                    s.folder,
+                    scored.first().map(|(r, _)| r.artist.as_str()),
+                    want
+                ));
+            }
         }
     }
 
