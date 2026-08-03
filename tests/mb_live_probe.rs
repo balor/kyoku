@@ -179,3 +179,48 @@ fn live_mb_probe_for_known_problem_folders() {
         failures.join("\n")
     );
 }
+
+/// Regression probe for the "matched albums with NULL year in the DB"
+/// report: these five release MBIDs were matched during a real import but
+/// landed in `albums` without a year. `fetch_release` must recover a year
+/// for every one of them (release date, release-events, or
+/// release-group first-release-date fallback).
+#[test]
+#[ignore = "hits the live MusicBrainz API; run manually"]
+fn live_mb_year_backfill_for_previously_yearless_releases() {
+    let cases: &[(&str, &str, i32)] = &[
+        ("9081951b-8fa8-4e71-8b50-6dfe059c9b25", "Sticky Fingers", 1971),
+        ("87815df0-bb54-4ca2-a5e8-a21bf9d662eb", "A Trick of the Tail", 1976),
+        ("75927c23-91ee-4b25-8b80-fbcf6521ac73", "Dire Straits", 1978),
+        ("61d644bb-8851-4d37-b85e-ad796cd31972", "Out of the Blue", 1977),
+        ("bacbd0b1-a596-43ee-ace4-1d19664fcd3c", "[Led Zeppelin IV]", 1971),
+    ];
+
+    let mut client = MbClient::new(1100, NameScriptPreference::Native);
+    let mut failures = Vec::new();
+
+    for (mbid, title, want_year) in cases {
+        match client.fetch_release(mbid) {
+            Ok(r) => {
+                println!(
+                    "{}: year={:?} rgmin={:?} [{}] {}",
+                    title, r.year, r.group_min_year, r.artist, r.title
+                );
+                match r.year {
+                    Some(y) if y == *want_year => {}
+                    other => failures.push(format!(
+                        "{}: year={:?}, wanted Some({})",
+                        title, other, want_year
+                    )),
+                }
+            }
+            Err(e) => failures.push(format!("{}: fetch failed: {}", title, e)),
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "year backfill failures:\n{}",
+        failures.join("\n")
+    );
+}
