@@ -1,6 +1,6 @@
 [package]
 name = "kyoku"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "A TUI-first music library manager"
 license = "MIT"
@@ -35,7 +35,7 @@ image = "0.25"
 clap = { version = "4", features = ["derive"] }
 
 # Audio metadata
-lofty = "0.23"
+lofty = "0.24"
 
 # Database
 rusqlite = { version = "0.39", features = ["bundled"] }
